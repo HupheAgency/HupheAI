@@ -1,0 +1,32 @@
+# Gevoelige bestanden - NOOIT committen
+.secrets/
+
+# Electron build output
+HupheShell/out/
+HupheShell/dist/
+HupheShell/build/
+
+# Dependencies
+node_modules/
+HupheShell/node_modules/
+HupheWeb/node_modules/
+
+# Environment variables
+.env
+.env.local
+HupheShell/.env
+HupheShell/.env.local
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Python cache
+__pycache__/

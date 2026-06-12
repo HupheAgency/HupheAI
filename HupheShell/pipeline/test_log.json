@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "exitCode": 0,
+  "stdout": "\n> hupheai@1.0.0 test\n> echo \"No tests configured\"\n\nNo tests configured\n",
+  "stderr": "",
+  "modifiedFiles": [
+    "src/renderer/src/pages/DeckPlaceholderPage.tsx"
+  ],
+  "ranAt": "2026-04-20T13:09:55.012Z"
+}

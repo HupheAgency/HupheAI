@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HupheAI</title>
+  <meta name="description" content="HupheAI - The next generation of creative workflow." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400;700;800&family=Sora:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      color-scheme: dark;
+      --black: #050505;
+      --paper: #f4f1e8;
+      --yellow: #ffd84d;
+      --logo-yellow: #facc15;
+      --gold: #c8a93a;
+      --moss: #4a5a2a;
+    }
+
+    html {
+      min-height: 100%;
+      background: var(--black);
+    }
+
+    body {
+      min-height: 100vh;
+      min-height: 100svh;
+      overflow-x: hidden;
+      background: var(--black);
+      color: var(--paper);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      text-rendering: geometricPrecision;
+    }
+
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      background:
+        radial-gradient(ellipse at center, rgba(244, 241, 232, 0.018) 0%, rgba(244, 241, 232, 0) 48%),
+        linear-gradient(rgba(255, 255, 255, 0.01), rgba(255, 255, 255, 0));
+      mix-blend-mode: normal;
+    }
+
+    #network-canvas {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      pointer-events: none;
+      background: var(--black);
+    }
+
+    .hero {
+      position: relative;
+      z-index: 2;
+      min-height: 100vh;
+      min-height: 100svh;
+      display: grid;
+      place-items: center;
+      padding: 40px 24px;
+      text-align: center;
+      isolation: isolate;
+    }
+
+    .hero-content {
+      width: min(820px, 100%);
+    }
+
+    .title-reveal {
+      position: relative;
+      display: inline-block;
+      margin-bottom: 20px;
+    }
+
+    h1 {
+      font-family: "Baloo 2", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 72px;
+      font-weight: 400;
+      line-height: 0.92;
+      letter-spacing: 0.05em;
+      color: #ffffff;
+      margin-bottom: 0;
+    }
+
+    .title-highlight {
+      position: absolute;
+      inset: 0;
+      color: #ffffff;
+      pointer-events: none;
+      --mouse-x: -999px;
+      --mouse-y: -999px;
+      --highlight-center: rgba(0, 0, 0, 0);
+      --highlight-mid: rgba(0, 0, 0, 0);
+      -webkit-mask-image: radial-gradient(circle 110px at var(--mouse-x) var(--mouse-y), var(--highlight-center) 0%, var(--highlight-center) 45px, var(--highlight-mid) 80px, transparent 110px);
+      mask-image: radial-gradient(circle 110px at var(--mouse-x) var(--mouse-y), var(--highlight-center) 0%, var(--highlight-center) 45px, var(--highlight-mid) 80px, transparent 110px);
+    }
+
+    .title-strong {
+      color: var(--logo-yellow);
+      font-weight: 700;
+    }
+
+    #title-mask-canvas {
+      position: absolute;
+      left: 0;
+      top: 0;
+      display: block;
+      pointer-events: none;
+    }
+
+    .text-content-bg {
+      position: relative;
+      padding: 30px 40px;
+      margin: -30px -40px 0;
+      z-index: 1;
+    }
+
+    .text-content-bg::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      background: radial-gradient(ellipse at center, rgba(5, 5, 5, 0.8) 0%, rgba(5, 5, 5, 0.3) 50%, transparent 80%);
+      pointer-events: none;
+    }
+
+    .tagline {
+      max-width: 720px;
+      margin: 0 auto 14px;
+      color: rgba(244, 241, 232, 0.72);
+      font-size: clamp(19px, 2.35vw, 25px);
+      font-weight: 500;
+      line-height: 1.34;
+    }
+
+    .subtitle {
+      margin: 0 auto 52px;
+      color: rgba(244, 241, 232, 0.46);
+      font-size: clamp(15px, 1.65vw, 18px);
+      line-height: 1.55;
+    }
+
+    .download-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 13px;
+    }
+
+    .btn-download {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      min-height: 48px;
+      padding: 14px 24px;
+      border: 1px solid rgba(255, 216, 77, 0.7);
+      border-radius: 8px;
+      background: var(--yellow);
+      color: #080805;
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1;
+      text-decoration: none;
+      box-shadow: 0 12px 34px rgba(255, 216, 77, 0.11);
+      transition: background 160ms ease, border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+    }
+
+    .btn-download:hover {
+      background: #ffe16c;
+      border-color: rgba(255, 225, 108, 0.92);
+      box-shadow: 0 16px 42px rgba(255, 216, 77, 0.16);
+      transform: translateY(-1px);
+    }
+
+    .btn-download:active {
+      transform: translateY(0);
+    }
+
+    .btn-download:focus-visible {
+      outline: 2px solid rgba(244, 241, 232, 0.86);
+      outline-offset: 4px;
+    }
+
+    .btn-download svg {
+      flex: 0 0 auto;
+    }
+
+    .btn-download[aria-disabled="true"] {
+      opacity: 0.4;
+      pointer-events: none;
+      cursor: default;
+    }
+
+    .download-meta {
+      color: rgba(244, 241, 232, 0.34);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 640px) {
+      .hero {
+        padding: 32px 20px;
+      }
+
+      h1 {
+        font-size: clamp(44px, 15vw, 64px);
+      }
+
+      .title-reveal {
+        margin-bottom: 18px;
+      }
+
+      .tagline {
+        font-size: 18px;
+      }
+
+      .subtitle {
+        margin-bottom: 42px;
+      }
+
+      .btn-download {
+        width: min(100%, 260px);
+      }
+    }
+
+    @media (pointer: coarse) and (max-width: 768px) {
+      .download-section {
+        display: none;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .btn-download {
+        transition: none;
+      }
+    }
+
+    .btn-cloud {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 44px;
+      padding: 12px 22px;
+      border: 1px solid rgba(244, 241, 232, 0.18);
+      border-radius: 8px;
+      background: transparent;
+      color: rgba(244, 241, 232, 0.72);
+      font-size: 15px;
+      font-weight: 500;
+      line-height: 1;
+      text-decoration: none;
+      transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+    }
+
+    .btn-cloud:hover {
+      border-color: rgba(244, 241, 232, 0.38);
+      color: rgba(244, 241, 232, 0.92);
+      background: rgba(244, 241, 232, 0.04);
+    }
+
+    .btn-cloud:focus-visible {
+      outline: 2px solid rgba(244, 241, 232, 0.86);
+      outline-offset: 4px;
+    }
+
+    .cloud-section {
+      margin-top: 16px;
+      margin-bottom: 16px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .btn-cloud {
+        transition: none;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="network-canvas" aria-hidden="true"></canvas>
+
+  <main class="hero">
+    <section class="hero-content" aria-label="HupheAI">
+      <div class="title-reveal">
+        <h1 id="hero-title"><span>Huphe</span><span class="title-strong">AI</span></h1>
+        <h1 id="hero-title-highlight" class="title-highlight" aria-hidden="true"><span>Huphe</span><span class="title-strong">AI</span></h1>
+      </div>
+
+      <div class="text-content-bg">
+        <p class="tagline">The next generation of creative workflow.<br />From messy ideas to polished execution.</p>
+
+        <p class="subtitle">Turn rough thinking into sharp ideas.</p>
+
+        <div class="cloud-section">
+          <a href="./cloud/index.html" class="btn-cloud">Open HupheAI Cloud →</a>
+        </div>
+
+        <div class="download-section">
+          <a id="download-btn" href="#" class="btn-download" aria-disabled="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            <span id="download-label">Download for Mac</span>
+          </a>
+          <span class="download-meta" id="download-meta">macOS 12 or higher &middot; Apple Silicon &amp; Intel</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById("network-canvas");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const title = document.getElementById("hero-title");
+      const titleHighlight = document.getElementById("hero-title-highlight");
+      const texture = document.createElement("canvas");
+      const textureCtx = texture.getContext("2d", { willReadFrequently: true });
+      const revealImage = new Image();
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+      const coarsePointer = window.matchMedia("(pointer: coarse)");
+
+      revealImage.decoding = "async";
+
+      const config = {
+        baseOpacity: 0.15,
+        breathOpacityLift: 0.05,
+        breathCycleMs: 7600,
+        fadeMs: 1100,
+        gridStep: 8,
+        hoverRadius: 120,
+        pixelSize: 1.35,
+        // Twinkle: ambient sparks that keep the background alive
+        twinkleCount: 3,
+        twinkleMax: 0.2,
+        // Load-in sweep ripple
+        sweepDuration: 2200,
+        sweepBandWidth: 130,
+        sweepPeakIntensity: 0.9,
+        // Heartbeat: two opening-style pulses, then a long rest
+        heartbeatCycleMs: 12800,
+        heartbeatIdleDelay: 3000,
+        heartbeatBeatGap: 1400,
+        // Velocity trail: wider wake when moving fast
+        velocityScale: 0.5,
+        velocityMaxExtra: 100,
+        velocitySmoothing: 0.72,
+      };
+
+      const state = {
+        width: 0,
+        height: 0,
+        dpr: 1,
+        points: [],
+        animationFrame: 0,
+        lastTime: performance.now(),
+        reduced: reduceMotion.matches,
+        coarse: coarsePointer.matches,
+        imageReady: false,
+        // Ripples (sweep + heartbeat share the same system)
+        ripples: [],
+        hasSwept: false,
+        // Heartbeat
+        lastInteractionTime: 0,
+        nextHeartbeatTime: 0,
+        // Velocity
+        prevMouseX: -1,
+        prevMouseY: -1,
+        mouseVelocity: 0,
+        maskIntensity: 0,
+      };
+
+      function easeOutCubic(t) {
+        return 1 - Math.pow(1 - t, 3);
+      }
+
+      function waveBandFalloff(offsetFromFront, bandWidth) {
+        const leadingFade = bandWidth * 0.42;
+        const trailingFade = bandWidth;
+
+        if (offsetFromFront > leadingFade || offsetFromFront < -trailingFade) {
+          return 0;
+        }
+
+        if (offsetFromFront >= 0) {
+          return easeOutCubic(1 - offsetFromFront / leadingFade);
+        }
+
+        return Math.pow(1 + offsetFromFront / trailingFade, 1.45);
+      }
+
+      function getBreathingOpacity(now) {
+        if (state.reduced) return config.baseOpacity;
+
+        const phase = (Math.sin((now / config.breathCycleMs) * Math.PI * 2 - Math.PI / 2) + 1) / 2;
+        const eased = phase * phase * (3 - 2 * phase);
+        return config.baseOpacity + eased * config.breathOpacityLift;
+      }
+
+      function drawImageCover(context, image, width, height) {
+        const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight);
+        const drawWidth = image.naturalWidth * scale;
+        const drawHeight = image.naturalHeight * scale;
+        const offsetX = (width - drawWidth) / 2;
+        const offsetY = (height - drawHeight) / 2;
+
+        context.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
+      }
+
+      function buildTexture(width, height) {
+        texture.width = Math.max(1, Math.ceil(width));
+        texture.height = Math.max(1, Math.ceil(height));
+
+        textureCtx.setTransform(1, 0, 0, 1, 0, 0);
+        textureCtx.clearRect(0, 0, width, height);
+
+        if (state.imageReady) {
+          drawImageCover(textureCtx, revealImage, width, height);
+          return;
+        }
+
+        const fallback = textureCtx.createLinearGradient(0, 0, width, height);
+        fallback.addColorStop(0, "#ff4a00");
+        fallback.addColorStop(0.28, "#ffd84d");
+        fallback.addColorStop(0.55, "#5fe58c");
+        fallback.addColorStop(0.78, "#1aa7ff");
+        fallback.addColorStop(1, "#5526ff");
+        textureCtx.fillStyle = fallback;
+        textureCtx.fillRect(0, 0, width, height);
+      }
+
+      function sampleTexture() {
+        const imageData = textureCtx.getImageData(0, 0, texture.width, texture.height).data;
+        const points = [];
+        const inset = config.gridStep / 2;
+
+        for (let y = inset; y < state.height; y += config.gridStep) {
+          for (let x = inset; x < state.width; x += config.gridStep) {
+            const sx = Math.min(texture.width - 1, Math.max(0, Math.floor(x)));
+            const sy = Math.min(texture.height - 1, Math.max(0, Math.floor(y)));
+            const idx = (sy * texture.width + sx) * 4;
+            points.push({
+              x, y,
+              r: Math.max(imageData[idx], 36),
+              g: Math.max(imageData[idx + 1], 33),
+              b: Math.max(imageData[idx + 2], 23),
+              intensity: 0
+            });
+          }
+        }
+
+        state.points = points;
+      }
+
+      function spawnRipple(startTime, cx, cy, peakIntensity, duration, bandWidth, persist = true) {
+        state.ripples.push({
+          startTime,
+          cx, cy,
+          maxRadius: Math.hypot(cx, cy),
+          peakIntensity,
+          duration,
+          bandWidth,
+          persist,
+        });
+      }
+
+      function fireHeartbeat(now) {
+        const cx = state.width / 2;
+        const cy = state.height / 2;
+        spawnRipple(now, cx, cy, config.sweepPeakIntensity, config.sweepDuration, config.sweepBandWidth);
+        spawnRipple(now + config.heartbeatBeatGap, cx, cy, config.sweepPeakIntensity, config.sweepDuration, config.sweepBandWidth);
+      }
+
+      function drawFrame(deltaMs, now) {
+        const decay = Math.exp((-deltaMs * 3) / config.fadeMs);
+
+        // Randomly ignite a few pixels per frame for ambient twinkle
+        if (!state.reduced && state.points.length > 0) {
+          for (let i = 0; i < config.twinkleCount; i++) {
+            const point = state.points[Math.floor(Math.random() * state.points.length)];
+            const target = Math.random() * config.twinkleMax;
+            if (target > point.intensity) point.intensity = target;
+          }
+        }
+
+        // Pre-compute active ripple wavefronts and cull expired ones
+        const activeRipples = [];
+        const keepRipples = [];
+        for (const ripple of state.ripples) {
+          const elapsed = now - ripple.startTime;
+          if (elapsed < 0) { keepRipples.push(ripple); continue; } // scheduled for future
+          const progress = elapsed / ripple.duration;
+          if (progress >= 1) continue; // expired
+          ripple.wavefront = easeOutCubic(progress) * (ripple.maxRadius + ripple.bandWidth);
+          activeRipples.push(ripple);
+          keepRipples.push(ripple);
+        }
+        state.ripples = keepRipples;
+
+        ctx.fillStyle = "#050505";
+        ctx.fillRect(0, 0, state.width, state.height);
+
+        const restingOpacity = getBreathingOpacity(now);
+
+        for (const point of state.points) {
+          let rippleIntensity = 0;
+
+          // Apply any active ripple wavefronts
+          for (const ripple of activeRipples) {
+            const dx = point.x - ripple.cx;
+            const dy = point.y - ripple.cy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const offsetFromFront = dist - ripple.wavefront;
+            const falloff = waveBandFalloff(offsetFromFront, ripple.bandWidth);
+            if (falloff > 0) {
+              const intensity = falloff * ripple.peakIntensity;
+              if (ripple.persist) {
+                if (intensity > point.intensity) point.intensity = intensity;
+              } else if (intensity > rippleIntensity) {
+                rippleIntensity = intensity;
+              }
+            }
+          }
+
+          if (point.intensity > 0.002) {
+            point.intensity *= decay;
+          } else {
+            point.intensity = 0;
+          }
+
+          const alpha = restingOpacity + Math.max(point.intensity, rippleIntensity) * 0.78;
+          ctx.fillStyle = `rgba(${point.r}, ${point.g}, ${point.b}, ${alpha.toFixed(3)})`;
+          ctx.fillRect(
+            Math.round(point.x - config.pixelSize / 2),
+            Math.round(point.y - config.pixelSize / 2),
+            config.pixelSize,
+            config.pixelSize
+          );
+        }
+      }
+
+      function tick(now) {
+        const deltaMs = Math.min(48, now - state.lastTime);
+        state.lastTime = now;
+
+        // Fire heartbeat when idle long enough
+        if (!state.reduced) {
+          if (now - state.lastInteractionTime > config.heartbeatIdleDelay && now >= state.nextHeartbeatTime) {
+            fireHeartbeat(now);
+            state.nextHeartbeatTime = now + config.heartbeatCycleMs;
+          }
+        }
+
+        drawFrame(deltaMs, now);
+
+        // Decay mask
+        if (state.maskIntensity > 0.001) {
+          const decay = Math.exp((-deltaMs * 3) / config.fadeMs);
+          state.maskIntensity *= decay;
+        } else {
+          state.maskIntensity = 0;
+        }
+
+        if (titleHighlight) {
+          const centerAlpha = state.maskIntensity.toFixed(3);
+          const midAlpha = Math.min(1, state.maskIntensity * 0.55).toFixed(3);
+          titleHighlight.style.setProperty('--highlight-center', `rgba(0,0,0,${centerAlpha})`);
+          titleHighlight.style.setProperty('--highlight-mid', `rgba(0,0,0,${midAlpha})`);
+        }
+
+        if (!state.reduced) {
+          // Always keep running so twinkle stays alive
+          state.animationFrame = requestAnimationFrame(tick);
+        } else {
+          // In reduced-motion mode, only continue while pixels are active
+          const hasActive = state.points.some(p => p.intensity > 0.002) || state.maskIntensity > 0.001;
+          if (hasActive) {
+            state.animationFrame = requestAnimationFrame(tick);
+          } else {
+            state.animationFrame = 0;
+          }
+        }
+      }
+
+      function ensureAnimation() {
+        if (!state.animationFrame && !document.hidden) {
+          state.lastTime = performance.now();
+          state.animationFrame = requestAnimationFrame(tick);
+        }
+      }
+
+      function activatePixels(clientX, clientY, radius = config.hoverRadius) {
+        const r2 = radius * radius;
+
+        for (const point of state.points) {
+          const dx = point.x - clientX;
+          const dy = point.y - clientY;
+          const d2 = dx * dx + dy * dy;
+
+          if (d2 <= r2) {
+            const d = Math.sqrt(d2);
+            const falloff = 1 - d / radius;
+            const intensity = 0.16 + easeOutCubic(falloff) * 0.84;
+            if (intensity > point.intensity) point.intensity = intensity;
+          }
+        }
+
+        state.lastInteractionTime = performance.now();
+        ensureAnimation();
+      }
+
+      function startSweep() {
+        if (state.reduced || state.hasSwept) return;
+        state.hasSwept = true;
+        const cx = state.width / 2;
+        const cy = state.height / 2;
+        spawnRipple(performance.now(), cx, cy, config.sweepPeakIntensity, config.sweepDuration, config.sweepBandWidth);
+      }
+
+      function resize() {
+        state.width = window.innerWidth;
+        state.height = window.innerHeight;
+        state.dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        canvas.width = Math.ceil(state.width * state.dpr);
+        canvas.height = Math.ceil(state.height * state.dpr);
+        canvas.style.width = `${state.width}px`;
+        canvas.style.height = `${state.height}px`;
+        ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+
+        buildTexture(state.width, state.height);
+        sampleTexture();
+        drawFrame(0, performance.now());
+
+        startSweep();
+        if (!state.reduced) ensureAnimation();
+      }
+
+      window.addEventListener("resize", resize, { passive: true });
+
+      function updateMaskPosition(clientX, clientY) {
+        if (!title || !titleHighlight) return;
+        const rect = title.getBoundingClientRect();
+        titleHighlight.style.setProperty('--mouse-x', `${clientX - rect.left}px`);
+        titleHighlight.style.setProperty('--mouse-y', `${clientY - rect.top}px`);
+        state.maskIntensity = 1.0;
+        ensureAnimation();
+      }
+
+      window.addEventListener("pointermove", (event) => {
+        if (state.reduced || event.pointerType === "touch") return;
+
+        const dx = state.prevMouseX < 0 ? 0 : event.clientX - state.prevMouseX;
+        const dy = state.prevMouseY < 0 ? 0 : event.clientY - state.prevMouseY;
+        const speed = Math.sqrt(dx * dx + dy * dy);
+        state.mouseVelocity = state.mouseVelocity * config.velocitySmoothing + speed * (1 - config.velocitySmoothing);
+        state.prevMouseX = event.clientX;
+        state.prevMouseY = event.clientY;
+
+        const extraRadius = Math.min(state.mouseVelocity * config.velocityScale, config.velocityMaxExtra);
+        activatePixels(event.clientX, event.clientY, config.hoverRadius + extraRadius);
+        updateMaskPosition(event.clientX, event.clientY);
+      }, { passive: true });
+
+      window.addEventListener("pointerdown", (event) => {
+        if (state.reduced) return;
+        activatePixels(event.clientX, event.clientY, state.coarse ? 96 : config.hoverRadius);
+        updateMaskPosition(event.clientX, event.clientY);
+      }, { passive: true });
+
+      // Pointer leave is handled by natural decay in tick()
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          if (state.animationFrame) {
+            cancelAnimationFrame(state.animationFrame);
+            state.animationFrame = 0;
+          }
+        } else if (!state.reduced) {
+          ensureAnimation();
+        }
+      });
+
+      reduceMotion.addEventListener("change", (event) => {
+        state.reduced = event.matches;
+        if (state.reduced && state.animationFrame) {
+          cancelAnimationFrame(state.animationFrame);
+          state.animationFrame = 0;
+        } else if (!state.reduced) {
+          ensureAnimation();
+        }
+        resize();
+      });
+
+      coarsePointer.addEventListener("change", (event) => {
+        state.coarse = event.matches;
+      });
+
+      revealImage.addEventListener("load", () => {
+        state.imageReady = true;
+        resize();
+      }, { once: true });
+
+      revealImage.addEventListener("error", () => {
+        state.imageReady = false;
+        resize();
+      }, { once: true });
+
+      revealImage.src = "assets/gradient-reveal.jpg";
+
+      if (revealImage.complete && revealImage.naturalWidth > 0) {
+        state.imageReady = true;
+      }
+
+      // Resolve latest release from manifest
+      (function resolveDownload() {
+        const btn = document.getElementById('download-btn');
+        const label = document.getElementById('download-label');
+        const meta = document.getElementById('download-meta');
+        if (!btn) return;
+
+        fetch('/releases/latest-mac.yml', { cache: 'no-cache' })
+          .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
+          .then(function (text) {
+            var versionMatch = text.match(/^version:\s*(.+)$/m);
+            if (!versionMatch) return;
+            var version = versionMatch[1].trim();
+            btn.href = '/releases/HupheAI-' + version + '-universal.dmg';
+            btn.removeAttribute('aria-disabled');
+            if (label) label.textContent = 'Download for Mac';
+            if (meta) meta.textContent = 'v' + version + ' · macOS 12+ · Apple Silicon & Intel';
+          })
+          .catch(function () {
+            // No release published yet — keep button disabled
+          });
+      })();
+
+      resize();
+
+      if (document.fonts) {
+        document.fonts.ready.then(() => {
+        });
+      }
+    })();
+  </script>
+</body>
+
+</html>

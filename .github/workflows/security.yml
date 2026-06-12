@@ -1,0 +1,37 @@
+name: Security checks
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # Maandag 06:00 UTC
+
+jobs:
+  security:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: HupheShell
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: HupheShell/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Security smoke tests
+        run: npm run test:security
+
+      - name: npm audit (high/critical only)
+        run: npm audit --audit-level=high
+        # Breaking upgrades zijn geblokkeerd via dependabot.yml ignore-lijst.
+        # High/critical kwetsbaarheden in productie-dependencies moeten hier falen.
+        continue-on-error: false

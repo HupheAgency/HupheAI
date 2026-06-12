@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="HupheAI" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>HupheAI Cloud</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Inter+Tight:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    @font-face { font-family: 'Baloo 2'; font-style: normal; font-weight: 400; font-display: swap; src: url(https://fonts.gstatic.com/s/baloo2/v23/wXKrE3kTposypRyd51jcAM4olXc.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+    @font-face { font-family: 'Baloo 2'; font-style: normal; font-weight: 700; font-display: swap; src: url(https://fonts.gstatic.com/s/baloo2/v23/wXKrE3kTposypRyd51jcAM4olXc.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .sora { font-family: 'Sora', ui-sans-serif, system-ui, sans-serif; }
+    .brand-title { font-family: 'Baloo 2', sans-serif; font-size: 2.25rem; font-weight: 400; letter-spacing: 0.05em; line-height: 0.92; color: #fff; display: inline-block; transition: color 150ms; cursor: default; }
+    .brand-title .ai { color: #facc15; font-weight: 700; transition: color 150ms; }
+    .brand-title:hover, .brand-title:hover .ai { color: #facc15; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 1s linear infinite; }
+    html, body, #app { height: 100%; }
+    .slide-wrap { width:100%; height:100%; overflow:hidden; position:relative; }
+    .slide-card { aspect-ratio:16/9; border-radius:1rem; border:1px solid rgba(255,255,255,0.07); overflow:hidden; cursor:pointer; transition:border-color .15s; }
+    .slide-card:hover { border-color:rgba(255,255,255,0.18); }
+    #fs-overlay { display:none; position:fixed; inset:0; z-index:9999; background:#000; touch-action:none; }
+    #fs-overlay.open { display:block; }
+    #fs-slide { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
+    #fs-slide > * { width:100%; height:100%; max-width:calc(var(--fs-h, 100vh) * 16/9); max-height:calc(var(--fs-w, 100vw) * 9/16); }
+    #fs-ui { position:absolute; inset:0; pointer-events:none; opacity:0; transition:opacity 180ms ease; }
+    #fs-ui.visible { opacity:1; pointer-events:auto; }
+    #fs-prev, #fs-next { position:absolute; top:50%; transform:translateY(-50%); background:rgba(0,0,0,0.35); border:none; color:rgba(255,255,255,0.75); font-size:28px; width:52px; height:88px; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background 140ms,color 140ms; }
+    #fs-prev { left:0; border-radius:0 10px 10px 0; }
+    #fs-next { right:0; border-radius:10px 0 0 10px; }
+    #fs-prev:hover, #fs-next:hover { background:rgba(0,0,0,0.6); color:#fff; }
+    #fs-prev:disabled, #fs-next:disabled { opacity:0.15; pointer-events:none; }
+    #fs-counter { position:absolute; bottom:20px; left:50%; transform:translateX(-50%); color:rgba(255,255,255,0.45); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; background:rgba(0,0,0,0.35); padding:4px 12px; border-radius:999px; }
+    #fs-close { position:absolute; top:14px; right:14px; background:rgba(255,255,255,0.10); border:none; color:rgba(255,255,255,0.75); font-size:16px; width:34px; height:34px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background 140ms; }
+    #fs-close:hover { background:rgba(255,255,255,0.18); color:#fff; }
+  </style>
+</head>
+<body class="bg-[#050505] text-white">
+  <div id="app" class="h-full"></div>
+
+  <!-- Fullscreen slide viewer overlay -->
+  <div id="fs-overlay">
+    <div id="fs-slide"></div>
+    <div id="fs-ui">
+      <button id="fs-prev">&#8249;</button>
+      <button id="fs-next">&#8250;</button>
+      <div id="fs-counter"></div>
+      <button id="fs-close">&#x2715;</button>
+    </div>
+  </div>
+
+  <script type="module">
+    if (!window.supabase) {
+      document.getElementById('app').innerHTML = '<div style="color:#fff;padding:2rem;font-family:monospace;">Fout: Supabase kon niet laden. Probeer de pagina te herladen.</div>'
+      throw new Error('window.supabase not defined')
+    }
+    const { createClient } = window.supabase
+
+    const SUPABASE_URL = 'https://rnluzxpsduphqspqnwbe.supabase.co'
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJubHV6eHBzZHVwaHFzcHFud2JlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5ODgzMzMsImV4cCI6MjA5MTU2NDMzM30.BMD0ztU-s2XP3M5UzRH9k9fq6gOZK5JwFDj3ouKaWhg'
+    const EDGE_URL = `${SUPABASE_URL}/functions/v1/engine-chat`
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+    const AGENTS = [
+      { id: '00000000-0000-0000-0000-000000000001', label: 'ChatGPT (GPT-4o)',   model: 'openai/gpt-4o' },
+      { id: '00000000-0000-0000-0000-000000000002', label: 'Gemini 1.5 Pro',     model: 'google/gemini-1.5-pro' },
+      { id: '00000000-0000-0000-0000-000000000003', label: 'Claude 3.5 Sonnet',  model: 'anthropic/claude-3.5-sonnet' },
+    ]
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    const s = {
+      session: null,
+      view: 'login',          // 'login' | 'app'
+      appTab: 'chat',         // 'chat' | 'docs'
+      // login
+      email: '', sent: false, loginLoading: false, loginError: '',
+      // chat
+      convId: null, messages: [], history: [], selectedAgentId: AGENTS[0].id,
+      draft: '', running: false, chatError: '',
+      // presentations
+      presentations: [], presQuery: '', selectedPresId: null, selectedSlideIdx: 0, mobileDetail: false,
+    }
+
+    let msgCh = null
+
+    // ── HTML helpers ──────────────────────────────────────────────────────────
+    const esc = str => String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+
+    function h(id) { return document.getElementById(id) }
+
+    function mount(html) { h('app').innerHTML = html }
+
+    // ── Render ────────────────────────────────────────────────────────────────
+    function render() {
+      if (s.view === 'login') { mount(loginView()); wireLogin() }
+      else { mount(appView()); wireApp() }
+    }
+
+    // ── Login ─────────────────────────────────────────────────────────────────
+    function loginView() {
+      if (s.sent) return `
+        <main class="min-h-screen bg-[#050505] flex items-center justify-center px-6">
+          <section class="bg-[#0f0f0f] border border-white/[0.07] rounded-2xl p-10 w-full max-w-[400px] flex flex-col gap-6 shadow-2xl">
+            <div><h1 class="brand-title" style="font-family:'Baloo 2',sans-serif;font-size:2.25rem;font-weight:400;letter-spacing:0.05em;line-height:0.92;color:#fff;">Huphe<span class="ai" style="color:#facc15;font-weight:700;">AI</span></h1><p class="text-white/50 text-sm mt-2">Ga verder op het web</p></div>
+            <div class="rounded-2xl border border-white/[0.07] bg-[#141414] p-6 text-center">
+              <div class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-[#facc15]/[0.12] text-[#facc15]">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+              </div>
+              <p class="text-white text-sm font-medium">Check je e-mail voor een inloglink.</p>
+              <p class="text-white/40 text-xs mt-2">Je kunt dit venster open laten.</p>
+            </div>
+          </section>
+        </main>`
+
+      return `
+        <main class="min-h-screen bg-[#050505] flex items-center justify-center px-6">
+          <section class="bg-[#0f0f0f] border border-white/[0.07] rounded-2xl p-10 w-full max-w-[400px] flex flex-col gap-6 shadow-2xl">
+            <div><h1 class="brand-title" style="font-family:'Baloo 2',sans-serif;font-size:2.25rem;font-weight:400;letter-spacing:0.05em;line-height:0.92;color:#fff;">Huphe<span class="ai" style="color:#facc15;font-weight:700;">AI</span></h1><p class="text-white/50 text-sm mt-2">Ga verder op het web</p></div>
+            <form id="login-form" class="flex flex-col gap-4">
+              <input id="login-email" type="email" placeholder="jij@bedrijf.nl" autofocus value="${esc(s.email)}"
+                class="w-full rounded-xl border border-white/[0.07] bg-[#050505] px-4 py-3 text-white text-sm outline-none transition-colors placeholder:text-white/25 focus:border-white/15" />
+              <button type="submit" ${s.loginLoading ? 'disabled' : ''}
+                class="flex w-full items-center justify-center gap-2 rounded-xl bg-[#facc15] px-4 py-3 text-black text-sm font-semibold transition-colors hover:bg-[#fde047] disabled:bg-white/[0.06] disabled:text-white/25 disabled:cursor-not-allowed">
+                ${s.loginLoading ? '<svg class="spin h-4 w-4" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3"/><path class="opacity-80" d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg> Versturen...' : 'Stuur inloglink →'}
+              </button>
+              ${s.loginError ? `<p class="text-red-400 text-xs">${esc(s.loginError)}</p>` : ''}
+            </form>
+          </section>
+        </main>`
+    }
+
+    function wireLogin() {
+      const emailEl = h('login-email')
+      emailEl?.addEventListener('input', e => { s.email = e.target.value })
+      h('login-form')?.addEventListener('submit', async e => {
+        e.preventDefault()
+        const email = s.email.trim()
+        if (!email || !email.includes('@') || s.loginLoading) return
+        s.loginLoading = true; s.loginError = ''; render()
+        const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.href } })
+        s.loginLoading = false
+        if (error) { s.loginError = error.message; render() }
+        else { s.sent = true; render() }
+      })
+    }
+
+    // ── App shell ─────────────────────────────────────────────────────────────
+    function tab(id, label) {
+      const active = s.appTab === id
+      return `<button data-tab="${id}" class="px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${active ? 'bg-white text-black' : 'text-white/50 hover:text-white hover:bg-white/[0.08]'}">${label}</button>`
+    }
+
+    function appView() {
+      return `
+        <div class="flex flex-col h-full bg-[#0a0a0a]">
+          <header class="flex items-center justify-between border-b border-white/[0.07] px-4 py-3 flex-shrink-0">
+            <span class="sora text-white font-semibold text-base">HupheAI Cloud</span>
+            <div class="flex items-center gap-2">
+              ${tab('chat','Chat')} ${tab('docs','Documenten')}
+              <button id="logout-btn" class="ml-2 px-3 py-1.5 rounded-full border border-white/[0.07] text-white/40 text-xs hover:text-white/70 transition-colors">Uitloggen</button>
+            </div>
+          </header>
+          <div class="flex-1 min-h-0">${s.appTab === 'chat' ? chatView() : docsView()}</div>
+        </div>`
+    }
+
+    function wireApp() {
+      document.querySelectorAll('[data-tab]').forEach(btn =>
+        btn.addEventListener('click', () => { s.appTab = btn.dataset.tab; render() })
+      )
+      h('logout-btn')?.addEventListener('click', async () => {
+        await supabase.auth.signOut()
+        s.session = null; s.view = 'login'; s.sent = false; render()
+      })
+      if (s.appTab === 'chat') wireChat()
+      else wireDocs()
+    }
+
+    // ── Chat ──────────────────────────────────────────────────────────────────
+    function chatView() {
+      const empty = s.messages.length === 0
+      const agentOpts = AGENTS.map(a => `<option value="${a.id}" class="bg-[#111] text-white" ${a.id === s.selectedAgentId ? 'selected' : ''}>${esc(a.label)}</option>`).join('')
+
+      const bubbles = s.messages.map(m => {
+        const isUser = m.role === 'user'
+        return `<article class="flex w-full ${isUser ? 'justify-end' : 'justify-start'}">
+          <div class="max-w-[85%] px-5 py-3.5 ${isUser ? 'bg-[#1e1e1e] rounded-[24px] text-white/90' : 'bg-transparent text-white/80'}">
+            ${!isUser && m.agentLabel ? `<p class="text-white/50 text-xs font-medium mb-2">${esc(m.agentLabel)}</p>` : ''}
+            <p class="text-[15px] leading-relaxed whitespace-pre-wrap">${esc(m.content)}</p>
+          </div>
+        </article>`
+      }).join('')
+
+      const thinking = s.running ? `<div class="flex justify-start"><div class="px-1 py-2 text-white/40 text-sm" id="thinking">Thinking...</div></div>` : ''
+
+      return `
+        <div class="relative flex flex-col h-full">
+          <div class="flex-1 overflow-y-auto px-4 pb-40 sm:px-6 md:px-8" id="msgs">
+            ${!empty ? `<div class="max-w-3xl mx-auto py-8 space-y-6">${bubbles}${thinking}<div id="bottom"></div></div>` : ''}
+          </div>
+          <div class="absolute left-0 right-0 px-4 sm:px-6 flex flex-col items-center transition-all duration-300 ${empty ? 'top-1/2 -translate-y-1/2' : 'bottom-0 bg-gradient-to-t from-[#0a0a0a] via-[#0a0a0a] to-transparent pt-10 pb-8'}">
+            ${empty ? '<h1 class="text-2xl font-medium text-white/90 mb-8 text-center tracking-tight">Ga verder waar je gebleven was.</h1>' : ''}
+            ${s.chatError ? `<div class="mb-3 w-full max-w-3xl rounded-xl border border-red-500/20 bg-red-500/[0.08] px-4 py-3 text-red-300 text-xs text-center">${esc(s.chatError)}</div>` : ''}
+            <form id="chat-form" class="flex items-center w-full max-w-3xl rounded-[2rem] border border-white/[0.07] bg-[#1e1e1e] px-4 py-2.5 shadow-sm transition-colors focus-within:border-white/15">
+              <input id="chat-input" value="${esc(s.draft)}" placeholder="Ask anything" ${s.running ? 'disabled' : ''}
+                class="min-w-0 flex-1 border-none bg-transparent px-2 text-white text-base outline-none placeholder:text-white/40 disabled:opacity-50" />
+              <div class="flex items-center gap-1.5 flex-shrink-0">
+                <select id="agent-select" class="appearance-none bg-transparent text-white/60 text-sm outline-none cursor-pointer pr-4 font-medium"
+                  style="background-image:url('data:image/svg+xml,%3Csvg width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right center">
+                  ${agentOpts}
+                </select>
+                <button type="submit" ${s.running ? 'disabled' : ''} class="w-8 h-8 rounded-full flex items-center justify-center transition-colors ${s.running ? 'bg-white/[0.05] text-white/20' : 'bg-white text-black'}">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4Z"/></svg>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>`
+    }
+
+    function wireChat() {
+      h('chat-input')?.addEventListener('input', e => { s.draft = e.target.value })
+      h('agent-select')?.addEventListener('change', e => { s.selectedAgentId = e.target.value })
+      h('chat-form')?.addEventListener('submit', e => { e.preventDefault(); sendMessage() })
+      h('chat-input')?.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } })
+      scrollBottom()
+    }
+
+    function scrollBottom() {
+      requestAnimationFrame(() => h('bottom')?.scrollIntoView({ block: 'end' }))
+    }
+
+    async function sendMessage() {
+      const msg = s.draft.trim()
+      if (!msg || s.running || !s.session) return
+      s.draft = ''; s.running = true; s.chatError = ''
+
+      if (!s.convId) {
+        const { data, error } = await supabase.from('engine_conversations')
+          .insert({ user_id: s.session.user.id, title: 'Nieuw gesprek', source: 'cloud' })
+          .select('id').single()
+        if (error || !data) { s.running = false; s.chatError = 'Kon gesprek niet aanmaken.'; render(); return }
+        s.convId = data.id
+        subMessages(s.convId)
+      }
+
+      const tmpId = `tmp-${Date.now()}`
+      s.messages = [...s.messages, { id: tmpId, role: 'user', content: msg }]
+      render(); scrollBottom()
+
+      const agent = AGENTS.find(a => a.id === s.selectedAgentId) ?? AGENTS[0]
+      const historyForApi = s.history.slice(-20)
+
+      try {
+        const res = await fetch(EDGE_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.session.access_token}` },
+          body: JSON.stringify({ conversationId: s.convId, agentId: agent.id, agentModel: agent.model, message: msg, history: historyForApi }),
+        })
+        const data = await res.json()
+        if (data.ok) {
+          s.history = [...s.history, { role: 'user', content: msg }, { role: 'assistant', content: data.content }]
+          s.messages = s.messages.filter(m => m.id !== tmpId)
+        } else {
+          s.chatError = data.error ?? 'Onbekende fout'
+          s.messages = s.messages.filter(m => m.id !== tmpId)
+        }
+      } catch {
+        s.chatError = 'Verbindingsfout — probeer opnieuw.'
+        s.messages = s.messages.filter(m => m.id !== tmpId)
+      }
+
+      s.running = false; render(); scrollBottom()
+    }
+
+    // ── Presentations ─────────────────────────────────────────────────────────
+    function fmtDate(iso) {
+      if (!iso) return ''
+      return new Date(iso).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', year: 'numeric' })
+    }
+
+    // ── Block normalization (mirrors desktop buildPreviewBlock) ──────────────
+    function autoResolveWebTag(displayKey, block, overrides, mdToSageTag, sageTags) {
+      const blockOverrides = (overrides ?? {})[block.id] ?? {}
+      const direct = blockOverrides[displayKey] ?? mdToSageTag?.[block.type]?.[displayKey] ?? (sageTags.includes(displayKey) ? displayKey : null)
+      if (direct) return direct
+      // Elimination: find the only unclaimed sageTag
+      const allKeys = [block.heading && 'heading', block.body && 'body', ...Object.keys(block.fields ?? {})].filter(Boolean)
+      const claimed = new Set()
+      for (const fk of allKeys) {
+        if (fk === displayKey) continue
+        const t = blockOverrides[fk] ?? mdToSageTag?.[block.type]?.[fk] ?? (sageTags.includes(fk) ? fk : null)
+        if (t) claimed.add(t)
+      }
+      const remaining = sageTags.filter(st => !claimed.has(st))
+      return remaining.length === 1 ? remaining[0] : null
+    }
+
+    function buildPreviewFields(block, overrides, mdToSageTag, sageTags) {
+      const ov = (overrides ?? {})[block.id] ?? {}
+      const mergedBlock = { ...block, fields: { ...(block.fields ?? {}), ...ov } }
+      const f = {}
+      if (mergedBlock.heading) {
+        const t = autoResolveWebTag('heading', mergedBlock, overrides, mdToSageTag, sageTags)
+        if (t) f[t] = mergedBlock.heading
+      }
+      if (mergedBlock.body) {
+        const t = autoResolveWebTag('body', mergedBlock, overrides, mdToSageTag, sageTags)
+        if (t) f[t] = mergedBlock.body
+      }
+      for (const [k, v] of Object.entries(mergedBlock.fields ?? {})) {
+        if (!v) continue
+        const t = autoResolveWebTag(k, mergedBlock, overrides, mdToSageTag, sageTags)
+        f[t || k] = v
+      }
+      return f
+    }
+
+    // ── Pixel-perfect renderer using web_layouts ──────────────────────────────
+    function floatColorToRgb(c) {
+      if (!c) return 'inherit'
+      return `rgb(${Math.round(c.r*255)},${Math.round(c.g*255)},${Math.round(c.b*255)})`
+    }
+
+    // Map Keynote PostScript font names → CSS font-family + font-weight
+    const FONT_MAP = {
+      'intertight':    "'Inter Tight', sans-serif",
+      'inter tight':   "'Inter Tight', sans-serif",
+      'inter-tight':   "'Inter Tight', sans-serif",
+    }
+    function resolveFont(postScriptName) {
+      if (!postScriptName) return { family: 'sans-serif', weight: 'normal' }
+      const lower = postScriptName.toLowerCase().replace(/[\s_]/g, '')
+      // Weight from name suffix
+      let weight = 'normal'
+      if (lower.includes('thin'))       weight = '100'
+      if (lower.includes('extralight')) weight = '200'
+      if (lower.includes('light'))      weight = '300'
+      if (lower.includes('medium'))     weight = '500'
+      if (lower.includes('semibold'))   weight = '600'
+      if (lower.includes('bold'))       weight = '700'
+      if (lower.includes('extrabold'))  weight = '800'
+      if (lower.includes('black') || lower.includes('heavy')) weight = '900'
+      // Strip weight suffix to get base family name
+      const base = lower.replace(/-(thin|extralight|light|medium|semibold|bold|extrabold|black|heavy|regular|normal|compressed|condensed|narrow|wide|extended)$/i, '')
+      // Look up mapped family
+      for (const [key, css] of Object.entries(FONT_MAP)) {
+        if (base.includes(key.replace(/[\s-]/g, ''))) return { family: css, weight }
+      }
+      // Unknown font: keep original name, browser will try to find it
+      return { family: `'${postScriptName}', sans-serif`, weight }
+    }
+
+    function renderPixelSlide(rawBlock, overrides, webLayouts) {
+      const layout = webLayouts?.[rawBlock.type]
+      if (!layout) return renderSlideFallback(rawBlock, overrides)
+      const mdToSageTag = webLayouts['_mdToSageTag'] ?? {}
+      const sageTags = layout.sageTags ?? []
+      const resolvedFields = buildPreviewFields(rawBlock, overrides, mdToSageTag, sageTags)
+      const b = { ...rawBlock, fields: resolvedFields }
+      const scaleX = 1920 / (layout.slideWidth || 1920)
+      const scaleY = 1080 / (layout.slideHeight || 1080)
+
+      const assetsHtml = (layout.assets ?? []).map(a =>
+        `<div style="position:absolute;left:${a.posX*scaleX}px;top:${a.posY*scaleY}px;width:${a.width*scaleX}px;height:${a.height*scaleY}px;background-image:url('${a.dataUrl}');background-size:contain;background-repeat:no-repeat;background-position:center;z-index:5;"></div>`
+      ).join('')
+
+      const textsHtml = (layout.textItems ?? []).map(item => {
+        const content = b.fields[item.role] ?? ''
+        if (!content) return ''
+        const left = item.posX * scaleX
+        const top = item.posY * scaleY
+        const w = item.width * scaleX
+        const hasHeight = (item.height ?? 0) > 0
+        const h = hasHeight ? item.height * scaleY : 0
+        const fontSize = item.fontSize * scaleX
+        const ls = item.paraProperties?.lineSpacing
+        let lhMulti = 1.25
+        if (ls?.amount) lhMulti = ls.amount * 1.2
+        else if (item.verticalAlignment === 'bottom' || item.verticalAlignment === 'middle') lhMulti = 1.05
+        const lineHeight = fontSize * lhMulti
+        const halfLeading = (lineHeight - fontSize) / 2
+        const { family: fontFamily, weight: fontWeight } = resolveFont(item.font)
+        const color = floatColorToRgb(item.color)
+        const textAlign = item.alignment ?? 'left'
+        const va = item.verticalAlignment ?? 'top'
+        let innerStyle = `font-family:${fontFamily};font-weight:${fontWeight};font-size:${fontSize}px;color:${color};line-height:${lineHeight}px;text-align:${textAlign};word-wrap:break-word;white-space:pre-wrap;`
+        if (va === 'top') innerStyle += `margin-top:${-halfLeading}px;`
+        if (va === 'bottom') innerStyle += `margin-bottom:${-halfLeading}px;`
+        let outerStyle
+        if (hasHeight) {
+          outerStyle = `position:absolute;left:${left}px;top:${top}px;width:${w}px;height:${h}px;overflow:visible;z-index:10;`
+          innerStyle += 'position:absolute;width:100%;'
+          if (va === 'middle') innerStyle += 'top:50%;transform:translateY(-50%);'
+          else if (va === 'bottom') innerStyle += 'bottom:0;'
+          else innerStyle += 'top:0;'
+        } else {
+          const xform = va === 'middle' ? 'translateY(-50%)' : va === 'bottom' ? 'translateY(-100%)' : ''
+          outerStyle = `position:absolute;left:${left}px;top:${top}px;width:${w}px;overflow:visible;z-index:10;${xform ? `transform:${xform};` : ''}`
+        }
+        return `<div style="${outerStyle}"><div style="${innerStyle}">${esc(content)}</div></div>`
+      }).join('')
+
+      let imageHtml = ''
+      const imgSrc = (b.imageUrl && typeof b.imageUrl === 'string' && b.imageUrl.startsWith('http')) ? b.imageUrl : null
+      if (imgSrc && (layout.imageSlot || layout.imageMask)) {
+        const slot = layout.imageMask ?? layout.imageSlot
+        imageHtml = `<div style="position:absolute;left:${slot.posX*scaleX}px;top:${slot.posY*scaleY}px;width:${slot.width*scaleX}px;height:${slot.height*scaleY}px;overflow:hidden;z-index:20;"><img src="${esc(imgSrc)}" style="width:100%;height:100%;object-fit:cover;" /></div>`
+      }
+
+      return `<div style="position:relative;width:100%;height:100%;overflow:hidden;">
+        <div class="pixel-slide-canvas" style="position:absolute;top:0;left:0;width:1920px;height:1080px;background:${layout.bgColor};transform-origin:top left;">
+          ${assetsHtml}${textsHtml}${imageHtml}
+        </div>
+      </div>`
+    }
+
+    function scalePixelSlides() {
+      document.querySelectorAll('.pixel-slide-canvas').forEach(canvas => {
+        const parent = canvas.parentElement
+        if (!parent) return
+        const w = parent.getBoundingClientRect().width
+        if (w > 0) canvas.style.transform = `scale(${w / 1920})`
+      })
+    }
+
+    // ── Fallback renderer (used when web_layouts is not yet available) ─────────
+    function renderSlideFallback(rawBlock, overrides) {
+      const b = applyOverrides(rawBlock, overrides)
+      const t = (b.type ?? '').toLowerCase()
+      const heading = (b.heading ?? '').trim()
+      const fields = b.fields ?? {}
+      const imageUrl = (typeof fields.imageUrl === 'string') ? fields.imageUrl : null
+      const textFields = Object.entries(fields)
+        .filter(([k, v]) => typeof v === 'string' && !v.startsWith('http') && k !== 'imageUrl' && k !== 'imagePath')
+        .map(([, v]) => v.trim()).filter(Boolean)
+      const pad = 'style="padding:6% 8%"'
+      const H = 'font-size:clamp(1.1rem,3vw,2rem)'
+      const B = 'font-size:clamp(.8rem,1.5vw,1rem);opacity:.6'
+      const S = 'font-size:clamp(.65rem,1vw,.85rem);opacity:.4'
+      if (t.includes('title')) {
+        const datum = (fields.datum ?? '').trim()
+        const klant = (fields.klant ?? '').trim()
+        return `<div class="slide-wrap" style="background:#090909;display:flex;flex-direction:column;justify-content:center;" ${pad}>
+          ${(datum||klant)?`<p style="color:#fff;${S};margin-bottom:.6em;font-weight:500;">${esc(datum)}${datum&&klant?' · ':''}${esc(klant)}</p>`:''}
+          ${heading?`<h1 style="color:#fff;${H};font-weight:700;line-height:1.1;margin:0;">${esc(heading)}</h1>`:''}
+        </div>`
+      }
+      if (t.includes('section') || t.includes('color')) {
+        const title = (fields.title ?? heading).trim()
+        return `<div class="slide-wrap" style="background:#b91c1c;display:flex;align-items:center;justify-content:center;" ${pad}>
+          ${title?`<h2 style="color:#fff;font-size:clamp(1.5rem,4vw,3.5rem);font-weight:700;line-height:1;text-align:center;margin:0;">${esc(title)}</h2>`:''}
+        </div>`
+      }
+      if (t.includes('chapter')) {
+        const text = (fields.Text ?? fields.text ?? heading).trim()
+        return `<div class="slide-wrap" style="background:#090909;display:flex;align-items:center;justify-content:center;" ${pad}>
+          ${text?`<h2 style="color:#fff;font-size:clamp(2rem,5vw,4rem);font-weight:700;line-height:1;text-align:center;margin:0;">${esc(text)}</h2>`:''}
+        </div>`
+      }
+      if (t.includes('content')) {
+        const body = textFields[0] ?? ''
+        return `<div class="slide-wrap" style="background:#090909;display:flex;flex-direction:column;justify-content:center;position:relative;overflow:hidden;" ${pad}>
+          ${imageUrl?`<img src="${esc(imageUrl)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.18;pointer-events:none;" />`:''}
+          <div style="position:relative;z-index:1;">
+            ${heading?`<h2 style="color:#fff;font-size:clamp(1rem,2.2vw,2rem);font-weight:600;line-height:1.15;margin:0 0 .5em;">${esc(heading)}</h2>`:''}
+            ${body?`<p style="color:#fff;${B};line-height:1.6;margin:0;">${esc(body)}</p>`:''}
+          </div>
+        </div>`
+      }
+      if (t.includes('end')) {
+        return `<div class="slide-wrap" style="background:#090909;display:flex;align-items:center;justify-content:center;">
+          <p style="color:rgba(255,255,255,.12);font-size:1rem;letter-spacing:.2em;text-transform:uppercase;">Einde</p>
+        </div>`
+      }
+      const main = heading || textFields[0] || ''
+      return `<div class="slide-wrap" style="background:#111;display:flex;flex-direction:column;justify-content:center;" ${pad}>
+        ${main?`<p style="color:#fff;${H};margin:0;">${esc(main)}</p>`:`<p style="color:rgba(255,255,255,.15);font-size:.85rem;">Lege slide</p>`}
+      </div>`
+    }
+
+    // webLayouts: the web_layouts object for the current presentation, or null for fallback
+    function renderSlide(rawBlock, overrides, webLayouts) {
+      if (webLayouts) return renderPixelSlide(rawBlock, overrides, webLayouts)
+      return renderSlideFallback(rawBlock, overrides)
+    }
+
+    function slideAccentColor(type, webLayouts) {
+      const layout = webLayouts?.[type]
+      if (layout?.bgColor) return layout.bgColor
+      const t = (type ?? '').toLowerCase()
+      if (t.includes('section') || t.includes('color')) return '#b91c1c'
+      if (t.includes('chapter')) return '#1c1c1c'
+      if (t.includes('title')) return '#090909'
+      if (t.includes('content')) return '#0d0d0d'
+      return '#111'
+    }
+
+    function docsView() {
+      const q = s.presQuery.toLowerCase()
+      const filtered = [...s.presentations]
+        .sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+        .filter(p => !q || p.name.toLowerCase().includes(q))
+
+      const sel = filtered.find(p => p.id === s.selectedPresId) ?? null
+      const blocks = sel?.blocks ?? []
+      const overrides = sel?.overrides ?? {}
+      const webLayouts = sel?.webLayouts ?? null
+      const idx = Math.min(s.selectedSlideIdx, Math.max(0, blocks.length - 1))
+      const block = blocks[idx] ?? null
+
+      const listItems = filtered.map(p => {
+        const isSelected = p.id === sel?.id
+        const count = (p.blocks ?? []).length
+        const firstType = p.blocks?.[0]?.type ?? ''
+        const accent = slideAccentColor(firstType, p.webLayouts)
+        return `<button class="pres-item w-full rounded-2xl border p-3 text-left transition-colors mb-2 ${isSelected ? 'border-[#facc15]/40 bg-[#facc15]/[0.06]' : 'border-white/[0.07] bg-[#141414] hover:border-white/15'}" data-id="${p.id}">
+          <div class="flex items-center gap-3">
+            <div style="width:72px;height:44px;border-radius:8px;background:${accent};flex-shrink:0;border:1px solid rgba(255,255,255,.06);"></div>
+            <div class="min-w-0 flex-1">
+              <h2 class="truncate text-white text-sm font-medium">${esc(p.name)}</h2>
+              <p class="mt-0.5 text-white/30 text-xs">${count} slide${count !== 1 ? 's' : ''} · ${fmtDate(p.updatedAt)}</p>
+            </div>
+            <svg class="flex-shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+        </button>`
+      }).join('')
+
+      const slideHtml = block
+        ? `<div class="slide-card" data-open-fs="1">${renderSlide(block, overrides, webLayouts)}</div>`
+        : ''
+
+      const detailHtml = sel ? `
+        <header class="flex items-center justify-between gap-3 border-b border-white/[0.07] px-5 py-3.5 flex-shrink-0">
+          <div class="min-w-0">
+            <h2 class="truncate text-white text-sm font-medium">${esc(sel.name)}</h2>
+            <p class="text-white/30 text-xs mt-0.5">${blocks.length} slide${blocks.length !== 1 ? 's' : ''}</p>
+          </div>
+          <button id="doc-back" class="md:hidden rounded-xl border border-white/[0.07] px-3 py-1.5 text-white/50 text-xs flex-shrink-0">Terug</button>
+        </header>
+        <div class="flex-1 min-h-0 overflow-y-auto flex flex-col gap-5 p-5">
+          ${slideHtml}
+          ${blocks.length > 1 ? `
+          <div class="flex items-center justify-between gap-4">
+            <button id="slide-prev" ${idx === 0 ? 'disabled' : ''} class="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-white/[0.07] text-white/50 text-sm transition-colors hover:border-white/15 hover:text-white disabled:opacity-25 disabled:cursor-not-allowed">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg> Vorige
+            </button>
+            <span class="text-white/30 text-xs tabular-nums">${idx + 1} / ${blocks.length}</span>
+            <button id="slide-next" ${idx >= blocks.length - 1 ? 'disabled' : ''} class="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-white/[0.07] text-white/50 text-sm transition-colors hover:border-white/15 hover:text-white disabled:opacity-25 disabled:cursor-not-allowed">
+              Volgende <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+          </div>` : ''}
+        </div>` : '<div class="flex h-full items-center justify-center"><p class="text-white/35 text-sm">Selecteer een presentatie.</p></div>'
+
+      return `
+        <div class="grid min-h-0 h-full md:grid-cols-[360px_1fr]">
+          <aside class="min-h-0 border-r border-white/[0.07] flex flex-col ${s.mobileDetail ? 'hidden md:flex' : 'flex'}">
+            <div class="border-b border-white/[0.07] p-4 flex-shrink-0">
+              <input id="pres-search" value="${esc(s.presQuery)}" placeholder="Zoek presentatie"
+                class="w-full rounded-xl border border-white/[0.07] bg-[#141414] px-3.5 py-2.5 text-white text-sm outline-none transition-colors placeholder:text-white/25 focus:border-white/15" />
+            </div>
+            <div class="flex-1 overflow-y-auto p-3">
+              ${filtered.length === 0
+                ? '<div class="flex min-h-[200px] items-center justify-center"><p class="text-white/35 text-sm text-center max-w-xs">Geen presentaties gevonden.<br>Deel een presentatie via de desktop-app.</p></div>'
+                : listItems}
+            </div>
+          </aside>
+          <section class="min-h-0 flex flex-col ${s.mobileDetail ? 'flex' : 'hidden md:flex'}">${detailHtml}</section>
+        </div>`
+    }
+
+    // ── Fullscreen overlay ────────────────────────────────────────────────────
+    function updateFsViewport() {
+      const h = window.innerHeight
+      const w = window.innerWidth
+      document.documentElement.style.setProperty('--fs-h', h + 'px')
+      document.documentElement.style.setProperty('--fs-w', w + 'px')
+      const overlay = document.getElementById('fs-overlay')
+      if (overlay) { overlay.style.height = h + 'px'; overlay.style.width = w + 'px' }
+    }
+    let fsUiTimer = null
+    function showFsUi() {
+      document.getElementById('fs-ui').classList.add('visible')
+      clearTimeout(fsUiTimer)
+      fsUiTimer = setTimeout(() => document.getElementById('fs-ui').classList.remove('visible'), 2200)
+    }
+    function openFs(presId, startIdx) {
+      s.selectedPresId = presId
+      s.selectedSlideIdx = startIdx
+      updateFsViewport()
+      updateFs()
+      document.getElementById('fs-overlay').classList.add('open')
+      showFsUi()
+      const el = document.documentElement
+      if (el.requestFullscreen) el.requestFullscreen().catch(() => {})
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
+    }
+    function closeFs() {
+      document.getElementById('fs-overlay').classList.remove('open')
+      clearTimeout(fsUiTimer)
+      document.getElementById('fs-ui').classList.remove('visible')
+      if (document.exitFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => {})
+      else if (document.webkitExitFullscreen && document.webkitFullscreenElement) document.webkitExitFullscreen()
+    }
+    function updateFs() {
+      const sel = s.presentations.find(p => p.id === s.selectedPresId)
+      const blocks = sel?.blocks ?? []
+      const overrides = sel?.overrides ?? {}
+      const webLayouts = sel?.webLayouts ?? null
+      const idx = Math.min(s.selectedSlideIdx, Math.max(0, blocks.length - 1))
+      const block = blocks[idx]
+      document.getElementById('fs-slide').innerHTML = block ? renderSlide(block, overrides, webLayouts) : ''
+      requestAnimationFrame(() => requestAnimationFrame(scalePixelSlides))
+      document.getElementById('fs-counter').textContent = blocks.length > 1 ? `${idx + 1} / ${blocks.length}` : ''
+      const prevBtn = document.getElementById('fs-prev')
+      const nextBtn = document.getElementById('fs-next')
+      if (idx <= 0) { prevBtn.setAttribute('disabled', '') } else { prevBtn.removeAttribute('disabled') }
+      if (idx >= blocks.length - 1) { nextBtn.setAttribute('disabled', '') } else { nextBtn.removeAttribute('disabled') }
+    }
+    ;(function initFs() {
+      document.getElementById('fs-overlay').addEventListener('mousemove', showFsUi)
+      document.getElementById('fs-close').addEventListener('click', closeFs)
+      document.getElementById('fs-prev').addEventListener('click', () => {
+        s.selectedSlideIdx = Math.max(0, s.selectedSlideIdx - 1); updateFs()
+      })
+      document.getElementById('fs-next').addEventListener('click', () => {
+        const sel = s.presentations.find(p => p.id === s.selectedPresId)
+        s.selectedSlideIdx = Math.min((sel?.blocks ?? []).length - 1, s.selectedSlideIdx + 1); updateFs()
+      })
+      document.addEventListener('keydown', e => {
+        if (!document.getElementById('fs-overlay').classList.contains('open')) return
+        if (e.key === 'Escape') { closeFs(); return }
+        if (e.key === 'ArrowLeft') { s.selectedSlideIdx = Math.max(0, s.selectedSlideIdx - 1); updateFs() }
+        if (e.key === 'ArrowRight') {
+          const sel = s.presentations.find(p => p.id === s.selectedPresId)
+          s.selectedSlideIdx = Math.min((sel?.blocks ?? []).length - 1, s.selectedSlideIdx + 1); updateFs()
+        }
+      })
+      let touchX = null
+      document.getElementById('fs-overlay').addEventListener('touchstart', e => { touchX = e.touches[0].clientX }, { passive: true })
+      document.getElementById('fs-overlay').addEventListener('touchend', e => {
+        if (touchX === null) return
+        const dx = e.changedTouches[0].clientX - touchX; touchX = null
+        if (Math.abs(dx) < 40) return
+        if (dx < 0) {
+          const sel = s.presentations.find(p => p.id === s.selectedPresId)
+          s.selectedSlideIdx = Math.min((sel?.blocks ?? []).length - 1, s.selectedSlideIdx + 1)
+        } else {
+          s.selectedSlideIdx = Math.max(0, s.selectedSlideIdx - 1)
+        }
+        updateFs()
+      }, { passive: true })
+    })()
+
+    function wireDocs() {
+      h('pres-search')?.addEventListener('input', e => { s.presQuery = e.target.value; render() })
+      document.querySelectorAll('.pres-item').forEach(btn =>
+        btn.addEventListener('click', () => {
+          s.selectedPresId = btn.dataset.id
+          s.selectedSlideIdx = 0
+          s.mobileDetail = true
+          render()
+        })
+      )
+      h('doc-back')?.addEventListener('click', () => { s.mobileDetail = false; render() })
+      h('slide-prev')?.addEventListener('click', () => { s.selectedSlideIdx = Math.max(0, s.selectedSlideIdx - 1); render() })
+      h('slide-next')?.addEventListener('click', () => {
+        const sel = s.presentations.find(p => p.id === s.selectedPresId)
+        s.selectedSlideIdx = Math.min((sel?.blocks ?? []).length - 1, s.selectedSlideIdx + 1); render()
+      })
+      h('doc-back')?.addEventListener('click', () => { s.mobileDetail = false; render() })
+      document.querySelector('[data-open-fs]')?.addEventListener('click', () => {
+        if (s.selectedPresId) openFs(s.selectedPresId, s.selectedSlideIdx)
+      })
+      requestAnimationFrame(() => requestAnimationFrame(scalePixelSlides))
+    }
+
+    // ── Realtime ──────────────────────────────────────────────────────────────
+    function subMessages(convId) {
+      msgCh?.unsubscribe()
+      msgCh = supabase.channel('cloud_msgs_' + convId)
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'engine_messages' }, ({ new: row }) => {
+          if (row.conversation_id !== convId) return
+          const agent = AGENTS.find(a => a.id === row.agent_id)
+          const msg = { id: row.id, role: row.role, agentLabel: agent?.label, content: row.content }
+          s.messages = s.messages.some(m => m.id === msg.id) ? s.messages : [...s.messages, msg]
+          render(); scrollBottom()
+        })
+        .subscribe()
+    }
+
+    // ── Signed image URLs (atelier-assets bucket is private) ─────────────────
+    const STORAGE_BUCKET = 'atelier-assets'
+    const STORAGE_PUBLIC_PREFIX = `https://rnluzxpsduphqspqnwbe.supabase.co/storage/v1/object/public/${STORAGE_BUCKET}/`
+
+    async function resolveImageUrls(blocks) {
+      return Promise.all((blocks ?? []).map(async block => {
+        if (!block.imageUrl || !block.imageUrl.startsWith(STORAGE_PUBLIC_PREFIX)) return block
+        const path = block.imageUrl.slice(STORAGE_PUBLIC_PREFIX.length)
+        const { data } = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(path, 86400)
+        return data?.signedUrl ? { ...block, imageUrl: data.signedUrl } : block
+      }))
+    }
+
+    // ── Load data ─────────────────────────────────────────────────────────────
+    async function loadData() {
+      const { data } = await supabase.from('presentations')
+        .select('id, name, blocks, overrides, web_layouts, updated_at')
+        .eq('is_live', true)
+        .order('updated_at', { ascending: false })
+        .limit(100)
+      s.presentations = await Promise.all((data ?? []).map(async p => ({
+        id: p.id, name: p.name ?? 'Naamloze presentatie',
+        blocks: await resolveImageUrls(p.blocks ?? []), overrides: p.overrides ?? {}, webLayouts: p.web_layouts ?? null, updatedAt: p.updated_at,
+      })))
+      render()
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────
+    window.addEventListener('resize', () => { updateFsViewport(); scalePixelSlides() })
+
+    async function init() {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session) { s.session = session; s.view = 'app'; render(); await loadData() }
+      else render()
+
+      supabase.auth.onAuthStateChange(async (event, session) => {
+        if (event === 'SIGNED_IN' && session) {
+          s.session = session; s.view = 'app'
+          history.replaceState(null, '', window.location.pathname)
+          render(); await loadData()
+        } else if (event === 'SIGNED_OUT') {
+          s.session = null; s.view = 'login'; s.sent = false
+          msgCh?.unsubscribe(); render()
+        }
+      })
+    }
+
+    init()
+  </script>
+</body>
+</html>

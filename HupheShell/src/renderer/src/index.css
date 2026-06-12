@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0a;
+  --canvas-bg: #141414;
+  --sidebar-bg: #111111;
+  --active-yellow: #facc15;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--background);
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+.atelier-range {
+  --range-progress: 0%;
+  height: 18px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.atelier-range:focus {
+  outline: none;
+}
+
+.atelier-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--active-yellow) 0%,
+    var(--active-yellow) var(--range-progress),
+    rgba(255, 255, 255, 0.32) var(--range-progress),
+    rgba(255, 255, 255, 0.32) 100%
+  );
+}
+
+.atelier-range::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -5.5px;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--active-yellow);
+  box-shadow: 0 0 0 2px rgba(10, 10, 10, 0.85);
+}
+
+.atelier-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px rgba(10, 10, 10, 0.85), 0 0 0 4px rgba(250, 204, 21, 0.32);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.settings-main-scroll {
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+  transition: scrollbar-color 180ms ease-out;
+}
+
+.settings-main-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.settings-main-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-main-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  transition: background 180ms ease-out;
+}
+
+.settings-main-scroll--active {
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+.settings-main-scroll--active::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.settings-main-scroll--active::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+}

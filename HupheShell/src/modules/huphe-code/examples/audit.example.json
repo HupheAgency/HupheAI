@@ -1,0 +1,102 @@
+{
+  "$schema": "https://huphe.ai/schemas/audit-v1.json",
+  "auditId": "audit_20260418_143022_a1b2c3",
+  "task": "Voeg een exportknop toe aan het DeckCanvas component die de huidige slide als PNG exporteert via de Electron IPC bridge",
+  "createdAt": "2026-04-18T14:30:22.000Z",
+  "auditorModel": "glm-4",
+  "impactScope": {
+    "level": "MODERATE",
+    "description": "Wijziging raakt de renderer-laag en de IPC bridge. Geen core state-logica aangetast.",
+    "touchedLayers": ["renderer", "preload", "main"]
+  },
+  "dependencyContracts": [
+    {
+      "contractId": "dc_001",
+      "path": "src/renderer/components/DeckCanvas.tsx",
+      "absPath": "/Users/tom.zwarts/HupheAI/HupheShell/src/renderer/components/DeckCanvas.tsx",
+      "role": "MODIFY",
+      "priority": "CRITICAL",
+      "reason": "Dit is het directe doel van de taak. Claude moet de export-UI hier toevoegen.",
+      "requiredExports": ["DeckCanvas", "DeckCanvasProps"],
+      "requiredInterfaces": ["DeckCanvasProps"],
+      "requiredTypes": [],
+      "snippet": null
+    },
+    {
+      "contractId": "dc_002",
+      "path": "src/renderer/hooks/useSlide.ts",
+      "absPath": "/Users/tom.zwarts/HupheAI/HupheShell/src/renderer/hooks/useSlide.ts",
+      "role": "READ_ONLY",
+      "priority": "HIGH",
+      "reason": "Claude moet de hook-interface kennen om de huidige slideState correct te lezen.",
+      "requiredExports": ["useSlide"],
+      "requiredInterfaces": ["SlideState", "UseSlideReturn"],
+      "requiredTypes": ["SlideId"],
+      "snippet": null
+    },
+    {
+      "contractId": "dc_003",
+      "path": "src/preload/index.ts",
+      "absPath": "/Users/tom.zwarts/HupheAI/HupheShell/src/preload/index.ts",
+      "role": "MODIFY",
+      "priority": "HIGH",
+      "reason": "De nieuwe IPC-handler slide:export-png moet via de preload worden blootgesteld aan de renderer.",
+      "requiredExports": ["electronAPI"],
+      "requiredInterfaces": ["ElectronAPI"],
+      "requiredTypes": [],
+      "snippet": null
+    },
+    {
+      "contractId": "dc_004",
+      "path": "src/main/index.ts",
+      "absPath": "/Users/tom.zwarts/HupheAI/HupheShell/src/main/index.ts",
+      "role": "MODIFY",
+      "priority": "HIGH",
+      "reason": "De ipcMain.handle('slide:export-png') handler moet hier worden geregistreerd.",
+      "requiredExports": [],
+      "requiredInterfaces": [],
+      "requiredTypes": [],
+      "nearbyIPCHandlers": [
+        "image:generate",
+        "image:download-url",
+        "placeholder:read"
+      ],
+      "snippet": null
+    },
+    {
+      "contractId": "dc_005",
+      "path": "src/renderer/types/global.d.ts",
+      "absPath": "/Users/tom.zwarts/HupheAI/HupheShell/src/renderer/types/global.d.ts",
+      "role": "MODIFY",
+      "priority": "MEDIUM",
+      "reason": "Type-declaratie voor de nieuwe IPC-methode in Window.electronAPI.",
+      "requiredExports": [],
+      "requiredInterfaces": ["Window"],
+      "requiredTypes": ["ElectronAPI"],
+      "snippet": null
+    }
+  ],
+  "excludedFiles": [
+    {
+      "path": "src/renderer/components/SettingsPanel.tsx",
+      "reason": "Geen dependency op export-feature. Uitsluitend UI-instellingen."
+    },
+    {
+      "path": "src/main/index.ts",
+      "note": "Volledige inhoud NIET doorgeven. Alleen de sectie rond ipcMain.handle registraties."
+    }
+  ],
+  "tokenBudget": {
+    "estimatedContextTokens": 4200,
+    "maxAllowed": 8000,
+    "filesExcluded": 18,
+    "filesIncluded": 5,
+    "savingsPercent": 82
+  },
+  "riskFlags": [
+    {
+      "level": "LOW",
+      "message": "sharp dependency aanwezig — geschikt voor PNG rendering in main process"
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Betaling geannuleerd · HupheAI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400;700;800&family=Sora:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { color-scheme: dark; }
+    html, body {
+      min-height: 100vh;
+      background: #050505;
+      color: #f4f1e8;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      display: grid;
+      place-items: center;
+      padding: 32px 20px;
+      text-align: center;
+    }
+    .card {
+      width: min(480px, 100%);
+      background: #111;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 48px 40px 40px;
+    }
+    .icon {
+      width: 64px;
+      height: 64px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 28px;
+    }
+    h1 {
+      font-family: "Baloo 2", sans-serif;
+      font-size: 28px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 12px;
+    }
+    .subtitle {
+      color: rgba(244,241,232,0.55);
+      font-size: 15px;
+      line-height: 1.6;
+      margin-bottom: 8px;
+    }
+    .note {
+      color: rgba(244,241,232,0.32);
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 36px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 46px;
+      padding: 12px 28px;
+      background: #facc15;
+      color: #080805;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 150ms ease;
+      width: 100%;
+    }
+    .btn:hover { background: #fde047; }
+    .wordmark {
+      margin-top: 32px;
+      font-family: "Baloo 2", sans-serif;
+      font-size: 13px;
+      color: rgba(244,241,232,0.2);
+      letter-spacing: 0.04em;
+    }
+    .wordmark span { color: #facc15; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="rgba(244,241,232,0.4)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+      </svg>
+    </div>
+    <h1>Betaling geannuleerd</h1>
+    <p class="subtitle">Je betaling is niet doorgegaan.</p>
+    <p class="note">Er zijn geen kosten in rekening gebracht. Je kunt het opnieuw proberen via de app.</p>
+    <a href="hupheai://" class="btn" id="open-btn">Terug naar HupheAI</a>
+    <p class="wordmark">Huphe<span>AI</span></p>
+  </div>
+  <script>
+    const btn = document.getElementById('open-btn');
+    btn.addEventListener('click', function(e) {
+      e.preventDefault();
+      window.location.href = 'hupheai://';
+      setTimeout(function() {
+        window.location.href = '/';
+      }, 1500);
+    });
+  </script>
+</body>
+</html>

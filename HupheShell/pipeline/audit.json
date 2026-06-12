@@ -1,0 +1,12 @@
+{
+  "auditId": "auditing_20260420T130550",
+  "task": "Voeg een console.log toe aan de start van de handleGenerate functie in DeckPlaceholderPage.tsx",
+  "dependencyContracts": [
+    {
+      "path": "src/renderer/src/pages/DeckPlaceholderPage.tsx",
+      "requiredExports": [
+        "DeckPlaceholderPage"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+=== Test A: pure copy ===
+  [A] OK — opened as: test_a_pure_copy.key
+
+=== Test B: Document.iwa round-trip, original slideTree ===
+  [B] OK — opened as: test_b_doc_roundtrip.key
+
+=== Test C: Shrink slideTree to 1 original slide (no cloning) ===
+  Original slide nodes: [{'node_id': '3155003', 'slide_id': '3154939'}, {'node_id': '3156589', 'slide_id': '3156554'}, {'node_id': '3156827', 'slide_id': '3156786'}, {'node_id': '3157014', 'slide_id': '3156973'}, {'node_id': '3157175', 'slide_id': '3157147'}]
+  [C] OK — opened as: test_c_one_original_slide.key
+
+=== Test D: Clone 1 slide file, point to it in Document.iwa ===
+  Source slide file: Index/Slide-3154939.iwa
+  Clone: Index/Slide-3154939.iwa → Index/Slide-9900000.iwa  node=9900027
+  [D] TIMEOUT — Keynote hung (likely error dialog)
+
+=== Test F: Rename clone to same file as source (overwrite) ===
+  [F] TIMEOUT — Keynote hung (likely error dialog)
+
+=== Preparing clone for tests G/H/I ===
+  Source slide: node=3156589  slide=3156554  file=Index/Slide.iwa
+  Clone: Index/Slide.iwa → Index/Slide-9901000-2.iwa  node=9901027  slide=9901000
+
+=== Test G: Orphan clone in ZIP — NOT referenced in Document or Metadata ===
+  [G] OK — opened as: test_g_orphan_clone.key
+
+=== Test H: Full clone — new node→slide + Metadata (with node UUID reg) ===
+  [H] OK — opened as: test_h_full_clone_meta.key
+
+=== Test I: Clone as 14th slide (all 13 kept) + Metadata (with node UUID reg) ===
+  [I] OK — opened as: test_i_14slides_clone.key
+
+=== Test J: New slide_id in Document + NO Metadata update + clone file ===
+  [J] TIMEOUT — Keynote hung (likely error dialog)
+
+=== Test K: Original Document + Metadata with new component + clone file ===
+  [K] OK — opened as: test_k_meta_only_orig_doc.key
+
+=== Test L: Modify EXISTING node in-place to point to new slide_id ===
+  [L] OK — opened as: test_l_modify_existing_node.key
+
+Done.

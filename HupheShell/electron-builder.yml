@@ -1,0 +1,62 @@
+appId: ai.huphe.app
+productName: HupheAI
+copyright: Copyright © 2026 HupheAI
+
+# Electron Fuses — schakel gevaarlijke runtime-features uit na het builden
+afterSign: scripts/apply-fuses.js
+
+publish:
+  provider: generic
+  url: https://hupheai.app/releases/
+
+mac:
+  identity: null
+  hardenedRuntime: false
+  category: public.app-category.productivity
+  target:
+    - target: dir
+      arch:
+        - arm64
+        - x64
+    - target: dmg
+      arch:
+        - universal
+    - target: zip
+      arch:
+        - arm64
+        - x64
+
+dmg:
+  title: HupheAI
+
+directories:
+  buildResources: build
+  output: dist
+
+files:
+  - out/**/*
+
+# Copy huphe-code modules into the packaged app's Resources folder.
+# These are plain CJS files that cannot be bundled by electron-vite
+# (they rely on runtime __dirname and chokidar's native fs watchers).
+extraResources:
+  - from: src/modules/huphe-code
+    to: modules/huphe-code
+    filter:
+      - "**/*.js"
+      - "!**/node_modules/**"
+  # chokidar + its transitive deps (required by flow-manager.js at runtime)
+  - { from: node_modules/chokidar,          to: modules/huphe-code/node_modules/chokidar }
+  - { from: node_modules/anymatch,          to: modules/huphe-code/node_modules/anymatch }
+  - { from: node_modules/braces,            to: modules/huphe-code/node_modules/braces }
+  - { from: node_modules/fill-range,        to: modules/huphe-code/node_modules/fill-range }
+  - { from: node_modules/glob-parent,       to: modules/huphe-code/node_modules/glob-parent }
+  - { from: node_modules/is-binary-path,    to: modules/huphe-code/node_modules/is-binary-path }
+  - { from: node_modules/binary-extensions, to: modules/huphe-code/node_modules/binary-extensions }
+  - { from: node_modules/is-extglob,        to: modules/huphe-code/node_modules/is-extglob }
+  - { from: node_modules/is-glob,           to: modules/huphe-code/node_modules/is-glob }
+  - { from: node_modules/is-number,         to: modules/huphe-code/node_modules/is-number }
+  - { from: node_modules/normalize-path,    to: modules/huphe-code/node_modules/normalize-path }
+  - { from: node_modules/picomatch,         to: modules/huphe-code/node_modules/picomatch }
+  - { from: node_modules/readdirp,          to: modules/huphe-code/node_modules/readdirp }
+  - { from: node_modules/to-regex-range,    to: modules/huphe-code/node_modules/to-regex-range }
