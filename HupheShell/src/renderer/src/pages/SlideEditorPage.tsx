@@ -6,6 +6,7 @@ import type { KeynoteTable, KeynoteTableCell, LayerHoverTarget, TemplateData, Te
 import { useLivePresentation } from '../hooks/useLivePresentation'
 import { useLiveAtelierProject } from '../hooks/useLiveAtelierProject'
 import { pushAtelierProjectToSupabase, fetchAtelierProjectById, fetchLiveAtelierProjects } from '../lib/atelier-project-sync'
+import { shareAssetToSupabase } from '../lib/atelier-asset-sync'
 import { useVoiceCommand, type VoiceCommandAction } from '../hooks/useVoiceCommand'
 import { useMeetingNotes } from '../hooks/useMeetingNotes'
 import TextReviewModal, { type TextSegment } from '../components/TextReviewModal'
@@ -4234,6 +4235,56 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
     return result
   }
 
+  // ── Lokale afbeeldingen uploaden naar Supabase vóór live zetten ─────────
+  async function uploadLocalBlockImages(rawBlocks: unknown[], ownerId: string): Promise<unknown[]> {
+    const api = (window as any).api
+    const urlCache = new Map<string, string>()
+
+    function isLocalPath(p?: string): p is string {
+      return !!p && !p.startsWith('http://') && !p.startsWith('https://') && !p.startsWith('data:')
+    }
+
+    async function resolveLocalPath(localPath: string): Promise<string> {
+      if (urlCache.has(localPath)) return urlCache.get(localPath)!
+      const buffer: ArrayBuffer | null = await api.readFileBuffer(localPath).catch(() => null)
+      if (!buffer) return localPath
+      const ext = localPath.split('.').pop()?.toLowerCase() ?? 'jpg'
+      const mimeType = ext === 'png' ? 'image/png'
+        : ext === 'webp' ? 'image/webp'
+        : ext === 'gif' ? 'image/gif'
+        : ext === 'svg' ? 'image/svg+xml'
+        : 'image/jpeg'
+      // Stabiele ID op basis van pad zodat hetzelfde bestand niet dubbel wordt geüpload
+      const stableId = `live-img-${btoa(localPath).replace(/[^a-z0-9]/gi, '').slice(0, 32)}`
+      const asset = { id: stableId, name: localPath.split('/').pop() ?? 'image', src: localPath, type: 'image' as const, mimeType, isShared: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+      const shared = await shareAssetToSupabase(asset, ownerId, buffer, mimeType)
+      const publicUrl = shared?.src ?? localPath
+      urlCache.set(localPath, publicUrl)
+      return publicUrl
+    }
+
+    return Promise.all(rawBlocks.map(async (b) => {
+      const block = { ...(b as Record<string, unknown>) }
+
+      if (isLocalPath(block.imagePath as string | undefined)) {
+        block.imageUrl = await resolveLocalPath(block.imagePath as string)
+        delete block.imagePath
+      }
+
+      if (Array.isArray(block.imageSlots)) {
+        block.imageSlots = await Promise.all((block.imageSlots as Array<Record<string, unknown>>).map(async (slot) => {
+          if (isLocalPath(slot.path as string | undefined)) {
+            const url = await resolveLocalPath(slot.path as string)
+            return { ...slot, url, path: undefined }
+          }
+          return slot
+        }))
+      }
+
+      return block
+    }))
+  }
+
   // ── Live enable handler ─────────────────────────────────────────────────
   async function handleEnableLive() {
     setLiveError('')
@@ -4266,10 +4317,12 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
       }
 
       const name = projectName ?? templateName ?? 'Presentatie'
+      const ownerId = atelierOwnerId ?? (await supabase?.auth.getUser())?.data.user?.id ?? null
+      const liveBlocks = ownerId ? await uploadLocalBlockImages(blocks, ownerId) : blocks
       const result = await live.enable({
         name,
         templateClientId,
-        blocks,
+        blocks: liveBlocks,
         overrides,
         mdText,
         existingId: supabasePresentationId ?? undefined,
