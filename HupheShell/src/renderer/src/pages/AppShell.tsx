@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import type { Session } from '@supabase/supabase-js'
 import logo from '../assets/logo.png'
@@ -13,7 +13,6 @@ import ProjectsPage from './ProjectsPage'
 import PulsePage from './PulsePage'
 import FlowPage from './FlowPage'
 import AtelierPage from './AtelierPage'
-import TypewriterPage from './TypewriterPage'
 import SettingsPage from './SettingsPage'
 import AdminPage from './AdminPage'
 import WelcomeHero from './WelcomeHero'
@@ -21,6 +20,39 @@ import { useAssetSync } from '../hooks/useAssetSync'
 import { saveLastActiveDocId } from '../lib/typewriter-documents'
 import { UnsavedChangesDialog } from '../components/UnsavedChangesDialog'
 import { CREDITS_REQUIRED_EVENT } from '../lib/credits-required'
+
+const TypewriterPage = lazy(() => import('./TypewriterPage'))
+
+class TypewriterBoundary extends Component<{ children: React.ReactNode }, { error: Error | null }> {
+  state = { error: null }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('[Typewriter] renderer crash boundary:', error)
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex h-full items-center justify-center bg-[#0a0a0a] px-6 text-white">
+          <div className="max-w-md rounded-2xl border border-red-400/20 bg-red-500/[0.06] p-5 shadow-2xl">
+            <p className="text-sm font-semibold text-red-200">Typewriter kon niet laden</p>
+            <p className="mt-2 text-sm leading-6 text-white/55">
+              De rest van HupheAI blijft beschikbaar. Herstart de app of open een ander onderdeel terwijl deze fout wordt onderzocht.
+            </p>
+            <pre className="mt-3 max-h-32 overflow-auto rounded-lg bg-black/30 p-3 text-[11px] leading-5 text-red-100/70">
+              {this.state.error.message}
+            </pre>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 type Module = 'home' | 'pulse' | 'atelier' | 'flow' | 'typewriter' | 'ledger' | 'twin' | 'documents' | 'settings'
 type ActiveView = Module | 'admin'
@@ -890,7 +922,17 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
           )}
 
           {active === 'typewriter' && (
-            <TypewriterPage joinDocId={typewriterJoinDocId} />
+            <TypewriterBoundary>
+              <Suspense
+                fallback={
+                  <div className="flex h-full items-center justify-center bg-[#0a0a0a] text-sm text-white/45">
+                    Typewriter laden...
+                  </div>
+                }
+              >
+                <TypewriterPage joinDocId={typewriterJoinDocId} />
+              </Suspense>
+            </TypewriterBoundary>
           )}
 
           {active === 'atelier' && (

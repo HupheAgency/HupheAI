@@ -349,7 +349,7 @@ function buildRendererCsp(): string {
     : "'self' http://localhost:* ws://localhost:* https: wss:"
   return [
     "default-src 'self' file: hupheai:",
-    "script-src 'self'",
+    app.isPackaged ? "script-src 'self'" : "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "img-src 'self' data: blob: file: https: hupheai:",
     "media-src 'self' data: blob: file: https: hupheai:",

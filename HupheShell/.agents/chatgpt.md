@@ -22,7 +22,7 @@ Niet doen:
 
 - Geen Supabase migrations, RLS of Edge Functions.
 - Geen databasecontracten wijzigen zonder Claude.
-- Geen volledige TipTap/Yjs-migratie starten voordat Gemini het engine-besluit heeft afgerond en Claude de backend-impact heeft gecheckt.
+- Geen Supabase/Yjs realtime-provider bouwen zonder Claude-backendcontract.
 
 ## Samenwerkingsprotocol
 
@@ -56,54 +56,57 @@ Deze taken kunnen meteen, zolang ze op de huidige editor-engine blijven en geen 
 - Live broadcast/debounce zit in `src/renderer/src/hooks/useLiveDocument.ts`.
 - Huphe-output koppelingen lopen via `linkedSelections`, `copy_blocks` en `src/renderer/src/lib/atelier-linked-sources.ts`.
 - Sanitizing loopt via `src/renderer/src/lib/html-sanitize.ts`.
-- Huidige engine is nog `contentEditable` + `document.execCommand`; geen TipTap/Yjs migratie gestart.
+- Huidige engine is gemigreerd naar TipTap/ProseMirror; oude documenten blijven voorlopig HTML-compatible opgeslagen voor live/sync backward compatibility.
 
 ## Basic Editor Tools
 
-Gebruik de lijst uit `docs/Typewriter.md` als acceptatiecriterium. Pak alleen wat veilig kan binnen de huidige engine.
+Gebruik de lijst uit `docs/Typewriter.md` als acceptatiecriterium.
 
-- [~] Schrijven/selecteren: select all, undo/redo en cursorbehoud bij toolbar-acties bestaan; drag/drop tekst is nog niet apart gebouwd.
+- [x] Schrijven/selecteren: TipTap-editor, select all, undo/redo en cursorbehoud bij toolbar-acties bestaan; drag/drop tekst blijft niet-kritische polish.
 - [x] Basis tekstopmaak: vet, cursief, onderstrepen, doorhalen, kleur, highlight, opmaak wissen.
-- [~] Alinea/structuur: block style selector heeft Body, Title, Subtitle, H3, Quote en Code; echte CTA/Note nodes wachten op engine/model.
-- [x] Lijsten: bullets, numbering en inspringing via huidige engine.
-- [~] Links: toevoegen en verwijderen toegevoegd; bewerken/kopieren/auto-linkherkenning/interne anchors blijven open.
-- [ ] Document outline op basis van headings, minimaal als navigatie/overzicht.
+- [~] Alinea/structuur: block style selector heeft Body, Title, Subtitle, H3, Quote en Code via TipTap; echte CTA/Note custom nodes wachten op definitief documentmodel.
+- [x] Lijsten: bullets, numbering en inspringing via TipTap.
+- [~] Links: toevoegen, verwijderen, autolink en link-on-paste staan in TipTap; bewerken/kopieren/interne anchors blijven polish.
+- [x] Document outline op basis van headings, minimaal als navigatie/overzicht.
 
 ## Huphe Output Flow
 
 Deze taken mogen parallel met Gemini, maar hou de data contracten flexibel.
 
-- [ ] Maak de interne copy blocks zichtbaar genoeg voor toekomstige mapping naar Presentaties, Banners, Media en Print.
+- [x] Maak de interne copy blocks zichtbaar genoeg voor toekomstige mapping naar Presentaties, Banners, Media en Print.
 - [x] Behoud bestaande Huphe-linking bij UI-wijzigingen.
-- [ ] Voeg waar nodig stabiele client-side anchors toe, maar wacht met persistente opslag tot Claude/Gemini klaar zijn.
+- [ ] Voeg waar nodig stabiele client-side anchors toe voor HupheLink/comment marks; persistente opslag volgt met Claude-contract.
 
 ## WAIT Taken
 
-- [ ] WAIT op Gemini: start geen TipTap/ProseMirror/Yjs engine-migratie voordat `gemini.md` het engine-besluit en migratieplan op `[x]` heeft staan.
-- [ ] WAIT op Claude: bouw geen persistente comments/suggesties/version history voordat Claude de backend-tabellen/RLS op `[x]` heeft staan.
+- [x] WAIT op Gemini: engine-besluit en migratieplan stonden op `[x]`; TipTap/ProseMirror basis is uitgevoerd.
+- [x] WAIT op Claude: backend-tabellen/RLS stonden op `[x]`; persistente comments/suggesties UI blijft nog niet gebouwd.
 - [ ] WAIT op Claude: koppel offline-first of version snapshots niet aan Supabase voordat het backendcontract klaar is.
 
 ## Validatie
 
 Voor je dit document op klaar zet:
 
-- [ ] Run een gerichte Typewriter check indien aanwezig.
+- [x] Run een gerichte Typewriter check indien aanwezig. *(Geen aparte Typewriter unit test aanwezig; build + security smoke gedraaid.)*
 - [x] Run `npm run build`.
 - [x] Run `npm run test:security` als Typewriter HTML/sanitizing of Electron routes geraakt zijn.
 - [x] Noteer open risico's in dit document voor Claude's eindcheck.
 
 ## Eindstatus
 
-- Status: gedeeltelijk afgerond; resterende items wachten op engine/model of extra UI-ronde.
+- Status: TipTap/ProseMirror frontend-enginebasis gemigreerd; realtime Yjs-provider en persistente review UI blijven vervolgwerk.
 - Laatste update: 2026-06-15
 - Belangrijkste aangepaste bestanden:
   - `src/renderer/src/pages/TypewriterPage.tsx`
   - `src/renderer/src/lib/html-sanitize.ts`
+  - `package.json`
+  - `package-lock.json`
   - `.agents/chatgpt.md`
 - Tests/checks:
   - `npm run build` ✅
   - `npm run test:security` ✅
 - Open risico's:
-  - `contentEditable`/`execCommand` blijft de limiet; geen TipTap/Yjs migratie gedaan.
-  - Document outline, auto-linkherkenning, echte CTA/Note nodes en drag/drop tekst zijn nog open.
+  - TipTap staat nu als editor-engine; Yjs dependencies staan klaar, maar er is nog geen realtime provider/Hocuspocus/Supabase transport aangesloten.
+  - Echte CTA/Note nodes, interne anchors, link bewerken/kopieren en drag/drop tekst zijn nog open.
+  - Documenten worden in deze tussenfase nog als veilige HTML opgeslagen voor backward compatibility; JSON opslag volgt met Claude backendcontract.
   - Sanitizer bewaart nu veilige inline styles en veilige links; dit is getest met security smoke, maar verdient later unit tests rond unsafe href/style cases.

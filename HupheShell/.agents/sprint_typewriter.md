@@ -25,7 +25,7 @@ Dit is het actieve coordinatiebord voor het uitvoeren van:
 
 | Agent | Hoofddomein | Mag direct starten | Wacht op |
 |---|---|---|---|
-| Codex/ChatGPT | Renderer, Typewriter UI, huidige-engine verbeteringen, tests | Ja | Gemini voor engine-migratie, Claude voor persistente comments/versions |
+| Codex/ChatGPT | Renderer, Typewriter UI, TipTap enginebasis, tests | Ja | Claude voor persistente comments/versions/realtime transport |
 | Gemini | Architectuur, specs, migratieplan, documentmodel, pure handoff helpers | Ja | Codex/Claude audits indien beschikbaar |
 | Claude | Supabase, RLS, backendcontracten, integratie, finale QA | Audit ja | Gemini voor definitief schema/model, Codex voor UI-integratiegebieden |
 
@@ -33,7 +33,7 @@ Dit is het actieve coordinatiebord voor het uitvoeren van:
 
 Deze taken kunnen tegelijk:
 
-- Codex: huidige Typewriter code auditen en UI/basis-tools verbeteren zonder backendwijzigingen.
+- Codex: huidige Typewriter code auditen, UI/basis-tools verbeteren en TipTap-enginebasis migreren zonder backendwijzigingen.
 - Gemini: engine decision, documentmodel, collaboration/versioning en import/export specificaties maken.
 - Claude: bestaande backend/Supabase/veiligheidsgrenzen auditen.
 
@@ -41,9 +41,10 @@ Deze taken kunnen tegelijk:
 
 Engine-migratie:
 
-- Wacht op Gemini `typewriter-engine-decision.md`.
-- Wacht op Claude backend-impactcheck.
-- Wacht tot Codex huidige UI-baseline stabiel heeft.
+- [x] Gemini `typewriter-engine-decision.md` is afgerond.
+- [x] Claude backend-impactcheck is afgerond.
+- [x] Codex heeft huidige UI-baseline stabiel gemaakt.
+- [x] Codex heeft de frontend-enginebasis naar TipTap/ProseMirror gemigreerd.
 
 Persistente comments, suggestions en version history:
 
@@ -73,7 +74,7 @@ Claude mag de sprint pas als compleet markeren als:
 
 ## Status
 
-- Sprintstatus: ✅ SPRINT AFGEROND (2026-06-15)
+- Sprintstatus: ✅ SPRINT AFGEROND + TipTap frontend-enginebasis uitgevoerd (2026-06-15)
 - Laatste update: 2026-06-15
 
 ### Definition Of Done — check
@@ -88,11 +89,13 @@ Claude mag de sprint pas als compleet markeren als:
 ### Wat klaar is
 
 - Supabase: `typewriter_versions`, `typewriter_comments`, `review_status`, `role`, RLS gefixed, 3 RPCs
-- UI: focus mode, typewriter scrolling, find/replace, tekststatistieken, statusregel, paste cleanup, shortcuts
+- UI: focus mode, typewriter scrolling, find/replace, tekststatistieken, statusregel, paste cleanup, shortcuts, document outline
+- Engine: Typewriter editor gebruikt nu TipTap/ProseMirror; documenten blijven tijdelijk HTML-compatible opgeslagen
 - Architectuur: engine-besluit (TipTap+Yjs), documentmodel, migratiestrategie, review workflow, collaboration spec
 
 ### Wat open blijft (volgende sprint)
 
-- TipTap/Yjs engine-migratie — blokkeert: echte collaboration, comments UI, offline-first, document outline
+- Yjs realtime-provider/collaboration transport — blokkeert: echte multiplayer cursors en CRDT sync
 - Backend-comments koppelen aan UI
 - `copy_blocks` team-sharing policy
+- Persistente JSON-opslag en HupheLink/comment custom marks aansluiten op backendcontract
