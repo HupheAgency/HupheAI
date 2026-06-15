@@ -1,93 +1,146 @@
-# Claude — Actuele Safety Status HupheAI
+# Claude Agent - Typewriter Sprint Backend, Integratie En Eindcheck
 
 Projectroot:
 `/Users/tom.zwarts/HupheAI/HupheShell`
 
-Lees eerst:
-- `/Users/tom.zwarts/HupheAI/HupheShell/docs/safety.md`
-- `/Users/tom.zwarts/HupheAI/HupheShell/docs/Betalingsverkeer.md`
+Bron van waarheid:
+`docs/Typewriter.md`
 
-Dit document is bijgewerkt na de laatste Claude-update. De eerdere Claude-opdracht rond privacy, server-side security tests, audit logging en CI/dependency guardrails is volgens `docs/safety.md` afgerond.
+Coordinatiebord:
+`.agents/sprint_typewriter.md`
 
-## Stand Van Zaken
+## Rol
 
-### Afgerond Door Codex
+Claude pakt Typewriter backend, Supabase, integratiecontracten en de finale kwaliteitscontrole op.
 
-- Lokale Electron command-injection fixes: risicovolle `exec()` string-interpolatie vervangen door veilige `spawn()`-argumenten.
-- Path traversal checks en `clientId`/`formatId` validatie toegevoegd.
-- `shell.openExternal` en `will-navigate` afgeschermd.
-- Ad/HTML logvenster gehard.
-- CSP helper op het hoofdvenster aangesloten.
-- High-risk IPC payload-validatie toegevoegd met `zod`.
-- Security smoke-test toegevoegd via `npm run test:security`.
-- Resterende `npm audit` kwetsbaarheden geclassificeerd en gecontroleerd opgelost.
-- IPC payload-validatie uitgebreid naar aanvullende template/import/export/AI/doc/media handlers, settings IPC, Huphe Code IPC en Engine IPC.
-- `webSecurity: false` verwijderd uit BrowserWindows.
-- Custom `huphe://file/...` protocol toegevoegd voor lokale assets, met extension allowlist.
-- Renderer preview-routes gebruiken nu `toHupheFileUrl`.
-- Security smoke-test controleert nu ook `webSecurity` en `huphe://` regressies.
-- Dependency upgrade-traject afgerond:
-  - `electron` 32 -> 39.8.10.
-  - `electron-builder` 25 -> 26.15.2.
-  - `electron-vite` 2 -> 5.0.0.
-  - `vite` 5 -> 7.3.5.
-  - `@vitejs/plugin-react` 4 -> 5.1.1.
-  - `npm audit --audit-level=low` meldt 0 vulnerabilities.
-  - `npm run test:security` en `npm run build` slagen.
+Primair werkgebied:
 
-### Afgerond Door Claude
+- Supabase schema/migrations/RLS
+- Edge Functions of backend API's als Typewriter ze nodig heeft
+- integratie van persistente comments, versions, review state, anchors en sharing
+- finale check zodra Codex/ChatGPT, Gemini en Claude klaar zijn
 
-- Supabase RLS fixes uitgevoerd.
-- Edge Function service-role audit uitgevoerd.
-- DOMPurify aangesloten op de belangrijkste HTML-renderpaden.
-- File upload validatie met size limits en magic-byte checks aangesloten.
-- Electron productie-hardening opgepakt: devtools blokkeren, fuses, sandbox-test.
-- Rate limiting voor AI-proxy's opgepakt.
-- Audit logging voor admin-acties toegevoegd.
-- Eerste `npm audit fix` uitgevoerd; resterende dependency-upgrades zijn daarna door Codex afgerond.
-- Privacy/data-retentie opgepakt:
-  - `delete_my_data()` GDPR-RPC deployed.
-  - Persoonlijke content wordt verwijderd.
-  - Audit logs worden geanonimiseerd.
-  - Stripe/betalingsrecords blijven bewaard waar wettelijk nodig.
-  - Settings bevat een "Account en data verwijderen" actie.
-- Server-side security tests/CI opgepakt:
-  - `npm run test:security` werkt.
-  - `.github/workflows/security.yml` aangemaakt met smoke tests en `npm audit --audit-level=high`.
-- Audit logging uitgebreid:
-  - trigger op `wallet_transactions`.
-  - index op `audit_log.action`.
-- Dependency guardrails opgepakt:
-  - `.github/dependabot.yml` aangemaakt.
-  - breaking upgrades bewust uitgesloten tot apart upgrade-traject.
+Niet doen zonder expliciete reden:
 
-## Actuele Open Punten
+- Niet dezelfde renderer-UI refactor uitvoeren als Codex.
+- Niet het engine-keuzeonderzoek overnemen van Gemini.
+- Niet user-wijzigingen terugdraaien.
 
-Volgens `docs/safety.md` zijn er op dit moment geen open safety release blockers.
+## Samenwerkingsprotocol
 
-## Actuele Opdracht Voor Claude
+- Lees voor start `docs/Typewriter.md`, `.agents/chatgpt.md`, `.agents/gemini.md` en `.agents/sprint_typewriter.md`.
+- Werk alleen aan taken uit dit document.
+- Zet bij actieve taken tijdelijk `[~]`, afgeronde taken `[x]`, en noteer kort wat is aangepast.
+- Check elke 30 seconden de andere agentdocumenten (`chatgpt.md`, `gemini.md`, `sprint_typewriter.md`) zolang je werkt of wacht. Start een taak met `WAIT` pas als de genoemde afhankelijkheid in het andere document op `[x]` staat.
+- Als Codex een rendererbestand actief aanpast, wacht met integratie in datzelfde bestand.
+- Jij doet de laatste complete check nadat alle agentdocumenten klaar staan.
 
-Er is op dit moment geen actieve Claude-taak vanuit de safety-lijst.
+## Direct Parallel Te Doen
 
-Claude kan voorlopig alleen helpen met:
+- [x] Audit bestaande Typewriter Supabase-tabellen, RLS policies, live-share/presence en document storage.
+- [x] Noteer welke bestaande tabellen hergebruikt kunnen worden en welke nieuwe tabellen nodig zijn.
+- [x] Controleer of huidige Typewriter HTML/content opslag overal door dezelfde sanitizing-grens gaat.
+- [x] Controleer of live documents en shared documents geen lokale of onveilige asset/data-paden lekken.
 
-- controleren of `docs/safety.md` correct blijft na nieuwe Codex-wijzigingen;
-- backend/database follow-up als Codex bij het `huphe://` protocol of IPC-validatie een Supabase-afhankelijkheid ontdekt;
-- review van eventuele CI/dependency-config als later nieuwe auditmeldingen ontstaan.
+## Auditbevindingen (2026-06-15)
 
-## Niet Oppakken Door Claude
+### Bestaande tabellen
 
-Laat onderstaande punten bij Codex, tenzij de gebruiker expliciet anders vraagt:
+| Tabel | Status | Opmerkingen |
+|---|---|---|
+| `typewriter_documents` | ✅ Herbruikbaar | Mist: `review_status`, toekomstig `model` (JSON) kolom |
+| `typewriter_doc_members` | ⚠️ Gedeeltelijk | Mist: `role` kolom, INSERT/DELETE RLS policies |
+| `copy_blocks` | ✅ Herbruikbaar | Goed schema, mist team-sharing policy |
+| `document_states` | ❌ Niet relevant | Hoort bij Engine/AI, niet bij Typewriter |
+| `slide_comments` | ❌ Niet herbruikbaar | Presentatie-specifiek, verkeerde structuur |
 
-- Nieuwe Electron/Vite/electron-builder major upgrades uitvoeren zonder aparte opdracht.
-- Renderer/main-process security smoke-test uitbreiden.
-- Lokale Electron window/security refactors.
+### Ontbrekende tabellen (aangemaakt in migration)
 
-## Rapportage Als Claude Later Toch Iets Doet
+- `typewriter_versions` — snapshots voor version history ✅ aangemaakt
+- `typewriter_comments` — inline comments met anchor-posities, replies, resolve-status ✅ aangemaakt
 
-Na nieuw werk:
+### RLS bevindingen (gefixed in migration)
 
-1. Update `docs/safety.md`.
-2. Zet bij elk punt of het code, test, documentatie of nog open is.
-3. Noem exact welke bestanden zijn aangepast.
-4. Noem welke tests of checks zijn gedraaid.
+- ✅ Member-update beperkt tot editors, kan owner_id/is_live/share_code niet meer wijzigen
+- ✅ INSERT/DELETE policies op `typewriter_doc_members` toegevoegd
+- ✅ `role` kolom (viewer/commenter/editor) op `typewriter_doc_members`
+
+### Sanitizing grens — SCHOON ✅
+
+Alle contentpaden via DOMPurify. Find/Replace gebruikt `createTextNode`/`textContent` — geen HTML-injectie. Status-berichten zijn hardcoded strings.
+
+## WAIT Op Gemini — AFGEROND
+
+- [x] Maak migration voor `typewriter_versions` (snapshots, bewaarbeleid).
+- [x] Maak migration voor `typewriter_comments` (anchors, replies, resolve, suggest mode).
+- [x] Voeg `review_status` kolom toe aan `typewriter_documents`.
+- [x] Voeg `role` kolom toe aan `typewriter_doc_members`.
+- [x] Fix `typewriter_doc_members` INSERT/DELETE RLS + column-level beperking op member UPDATE.
+- [x] Voeg RPC's toe voor: comment resolven, review status wijzigen, snapshot opslaan.
+- [ ] Voeg team/workspace sharing policy toe aan `copy_blocks`. *(uitgesteld — niet kritisch voor Fase 1/2)*
+- [ ] Leg vast hoe offline/local buffers veilig terug synchroniseren. *(wacht op TipTap/Yjs migratie door Codex)*
+
+## WAIT Op Codex — AFGEROND
+
+- [x] Controleer dat comments, review state en versions geen XSS-pad openen. ✅ Schoon.
+- [x] Controleer dat foutmeldingen voor sync/offline/save helder terugkomen. ✅ `status` + `syncIndicator` state aanwezig.
+- [ ] Sluit persistente backend-comments/versions aan op UI. *(wacht op TipTap-migratie — UI nog op contentEditable)*
+
+## Finale Check Door Claude — AFGEROND
+
+- [x] Vergelijk implementatie met `docs/Typewriter.md` roadmap — zie eindrapportage.
+- [x] Check agentdocumenten op open WAIT-taken — alleen uitgestelde items over, geen blockers.
+- [x] Run `npm run build` — ✅ 664 modules, geen errors.
+- [x] Run `npm run test:security` — ✅ alle 10 checks groen.
+- [x] Geen aparte Typewriter unit tests aanwezig — security smoke dekt sanitizing.
+
+## Eindrapportage
+
+### Gedaan deze sprint
+
+**Gemini (architectuur):**
+- 7 specificatiedocumenten in `docs/build/`: engine-besluit (TipTap+Yjs), documentmodel, migratiestrategie, collaboration/versioning, review workflow, import/export, acceptatiechecklist
+- 2 TypeScript handoff-helpers: `typewriter-html-to-model.ts`, `typewriter-model-to-huphe-outline.ts`
+
+**Codex (UI/renderer):**
+- Tekststatistieken (woorden, tekens, leestijd)
+- Statusregel autosave/sync/live
+- Find & Find/Replace (veilig via TextNode/textContent)
+- Focus mode
+- Typewriter scrolling
+- Alinea-dimming
+- Paste cleanup
+- Shortcuts overlay
+- Lege document/placeholder checks
+- Basis tekstopmaak, lijsten, links — build en security smoke groen
+
+**Claude (backend):**
+- Migration `20260615000000_typewriter_v2.sql` gedeployed naar Supabase
+- `typewriter_versions` tabel + RLS
+- `typewriter_comments` tabel + RLS (threads, replies, resolve, anchor_json)
+- `review_status` kolom op `typewriter_documents`
+- `role` kolom op `typewriter_doc_members`
+- RLS-gat gefixed: member-update te breed, INSERT/DELETE policies ontbraken
+- RPCs: `create_typewriter_snapshot`, `resolve_typewriter_comment`, `set_typewriter_review_status`
+- XSS-audit nieuwe Codex-features: schoon
+
+### Open voor volgende sprint (bewust uitgesteld)
+
+- TipTap/Yjs engine-migratie — blokkeert: echte collaboration, comments UI, offline-first sync, document outline, stable anchors
+- Backend-comments/versions koppelen aan UI — wacht op engine
+- `copy_blocks` team-sharing policy — niet kritisch voor Fase 1/2
+- Link bewerken/auto-herkenning/interne anchors — wacht op engine
+
+### Risico's
+
+- `contentEditable`/`execCommand` is de huidige limiet; alle complexere features (comments, track changes, multiplayer) kunnen pas na TipTap-migratie
+- Yjs Supabase provider bestaat nog niet als productierijpe package — bij migratie evalueren of Hocuspocus nodig is
+
+## Eindstatus
+
+- Status: ✅ KLAAR voor deze sprint (Fase 1 backend gereed, Fase 2 UI deels gereed)
+- Laatste update: 2026-06-15
+- Belangrijkste aangepaste bestanden:
+  - `supabase/migrations/20260615000000_typewriter_v2.sql`
+  - `.agents/claude.md`
+- Tests/checks: `npm run build` ✅ · `npm run test:security` ✅ (10/10)

@@ -11,6 +11,7 @@ import { type SavedImage } from '../components/DocumentStatePanel'
 import SlideEditorPage from './SlideEditorPage'
 import type { AtelierCreationType } from '../components/AtelierCreationModeButtons'
 import { loadAtelierMediaProjects } from '../hooks/useAtelierMedia'
+import { notifyIfCreditsRequired } from '../lib/credits-required'
 
 const api = (window as any).api
 
@@ -310,6 +311,7 @@ export default function AtelierPage({ initialImagePath, initialMediaProjectId, i
     })
 
     if (!result.ok) {
+      notifyIfCreditsRequired(result)
       setError(result.error)
     } else {
       historyRef.current = [

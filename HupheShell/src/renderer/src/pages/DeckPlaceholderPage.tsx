@@ -6,6 +6,7 @@ import TextReviewModal, { type TextSegment } from '../components/TextReviewModal
 import { parseMarkdownToSegments, parsePlainTextToSegments, detectFileType } from '../lib/parseRawTextToSegments'
 import logo from '../assets/logo.png'
 import spinner from '../assets/spinner.png'
+import { notifyIfCreditsRequired } from '../lib/credits-required'
 
 interface Props {
   onBack: () => void
@@ -529,6 +530,7 @@ export default function DeckPlaceholderPage({ onBack }: Props) {
       console.log('[generateImage] provider:', provider, '| prompt:', combined.slice(0, 120))
       const result = await (window as any).api.generateImage(combined, provider)
       if (!result.ok) {
+        notifyIfCreditsRequired(result)
         console.error('[generateImage] fout:', result.error)
         return
       }

@@ -5,6 +5,7 @@ interface Props {
   onCheckout: (amountCents: number) => Promise<void>
   loading?: boolean
   error?: string
+  notice?: string
 }
 
 const QUICK_AMOUNTS = [5, 10, 20, 50, 100, 200]
@@ -24,6 +25,7 @@ export default function TopUpModal({
   onCheckout,
   loading,
   error,
+  notice,
 }: Props) {
   const [selectedAmount, setSelectedAmount] = useState<number | null>(10)
   const [customAmount, setCustomAmount] = useState('')
@@ -116,6 +118,11 @@ export default function TopUpModal({
         </label>
 
         <div className="bg-white/[0.03] rounded-xl p-4 text-white/40 text-xs leading-relaxed space-y-2">
+          {notice && (
+            <p className="text-amber-200">
+              {notice}
+            </p>
+          )}
           <p>Jouw betaling wordt omgezet in credits. Een klein deel dekt de platformkosten.</p>
           <p>Credits zijn direct beschikbaar na betaling.</p>
         </div>

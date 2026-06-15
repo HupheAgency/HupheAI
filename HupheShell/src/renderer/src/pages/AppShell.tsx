@@ -20,6 +20,7 @@ import WelcomeHero from './WelcomeHero'
 import { useAssetSync } from '../hooks/useAssetSync'
 import { saveLastActiveDocId } from '../lib/typewriter-documents'
 import { UnsavedChangesDialog } from '../components/UnsavedChangesDialog'
+import { CREDITS_REQUIRED_EVENT } from '../lib/credits-required'
 
 type Module = 'home' | 'pulse' | 'atelier' | 'flow' | 'typewriter' | 'ledger' | 'twin' | 'documents' | 'settings'
 type ActiveView = Module | 'admin'
@@ -184,6 +185,7 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
   const [topUpOpen, setTopUpOpen] = useState(false)
   const [topUpLoading, setTopUpLoading] = useState(false)
   const [topUpError, setTopUpError] = useState('')
+  const [topUpNotice, setTopUpNotice] = useState('')
   const [activeAccount, setActiveAccount] = useState<'personal' | 'company'>(() =>
     (localStorage.getItem('huphe:active-account') as 'personal' | 'company') ?? 'personal'
   )
@@ -214,6 +216,19 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
   }, [])
 
   useEffect(() => { refreshWallet() }, [refreshWallet])
+
+  useEffect(() => {
+    function onCreditsRequired(event: Event) {
+      const detail = (event as CustomEvent<{ message?: string }>).detail
+      const message = detail?.message?.trim()
+      setTopUpError('')
+      setTopUpNotice(message || 'Je hebt onvoldoende credits om deze actie uit te voeren. Waardeer je wallet op om verder te gaan.')
+      setTopUpOpen(true)
+    }
+
+    window.addEventListener(CREDITS_REQUIRED_EVENT, onCreditsRequired)
+    return () => window.removeEventListener(CREDITS_REQUIRED_EVENT, onCreditsRequired)
+  }, [])
 
   async function handleCheckout(amountCents: number) {
     setTopUpLoading(true)
@@ -720,6 +735,7 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
                     onTopUp={() => {
                       setUserMenuOpen(false)
                       setTopUpError('')
+                      setTopUpNotice('')
                       setTopUpOpen(true)
                     }}
                   />
@@ -781,6 +797,7 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
           onCheckout={handleCheckout}
           loading={topUpLoading}
           error={topUpError}
+          notice={topUpNotice}
         />
       )}
 

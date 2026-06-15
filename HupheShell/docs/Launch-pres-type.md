@@ -30,8 +30,9 @@ Na een grondige inspectie van de codebase (waaronder `safety.md`, `atelier_check
 ## 3. Betalingssysteem & Gebruikerservaring
 
 > [!NOTE]
-> ⚠️ **NOG OPEN — Onzichtbare foutmeldingen bij "Credits op"**
-> De `TopUpModal` bestaat en is handmatig bereikbaar via het gebruikersmenu, maar wordt **niet automatisch geopend** bij een 402/403-fout van de API. Gebruikers zien geen melding als hun saldo op is.
+> ✅ **OPGELOST — Onzichtbare foutmeldingen bij "Credits op"**
+> ~~De `TopUpModal` werd niet automatisch geopend bij een 402/403-fout.~~
+> `credits-required.ts` detecteert 402/403-fouten en vuurt een custom browser-event. `AppShell.tsx` luistert naar dat event en opent de `TopUpModal` automatisch met een duidelijke melding. Elke plek in de app kan `notifyIfCreditsRequired(error)` aanroepen.
 
 > [!NOTE]
 > ✅ **OPGELOST — Account Switcher (Bedrijf vs Persoonlijk)**
@@ -62,7 +63,7 @@ Na een grondige inspectie van de codebase (waaronder `safety.md`, `atelier_check
 | Path Traversal bij export | ✅ Opgelost |
 | `webSecurity` refactor | ✅ Opgelost (stond al op `true`) |
 | Account Switcher | ✅ Opgelost |
-| Credits-modal automatisch bij 402/403 | ⚠️ Nog open |
+| Credits-modal automatisch bij 402/403 | ✅ Opgelost |
 | Stripe Webhook configuratie (extern) | ⚠️ Nog open — actie in Stripe Dashboard |
 
 **Conclusie:** Van de originele blockers is alles opgelost. De twee openstaande punten blokkeren geen veiligheid maar wel een naadloze betaalervaring. De app is technisch klaar voor een gesloten Beta.

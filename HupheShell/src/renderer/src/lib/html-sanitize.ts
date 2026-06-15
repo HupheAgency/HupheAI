@@ -16,7 +16,41 @@ const ALLOWED_INLINE_TAGS = new Set([
   'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del',
   'p', 'div', 'br', 'span', 'ul', 'ol', 'li',
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'a', 'blockquote', 'pre', 'code', 'sub', 'sup',
 ])
+
+const ALLOWED_STYLE_PROPERTIES = [
+  'color',
+  'background-color',
+  'font-size',
+  'font-family',
+  'line-height',
+  'letter-spacing',
+  'text-align',
+]
+
+function encodeAttribute(value: string): string {
+  return encodeTextEntities(value).replace(/"/g, '&quot;')
+}
+
+function isSafeHref(value: string): boolean {
+  return /^(https?:\/\/|mailto:)/i.test(value)
+}
+
+function isSafeCssValue(value: string): boolean {
+  return /^[#(),.%\w\s'"/-]+$/.test(value) && !/url\s*\(|expression\s*\(|javascript:/i.test(value)
+}
+
+function safeStyleAttr(el: Element): string {
+  const element = el as HTMLElement
+  const style = element.style
+  const declarations: string[] = []
+  ALLOWED_STYLE_PROPERTIES.forEach((property) => {
+    const value = style.getPropertyValue(property).trim()
+    if (value && isSafeCssValue(value)) declarations.push(`${property}: ${value}`)
+  })
+  return declarations.length ? ` style="${encodeAttribute(declarations.join('; '))}"` : ''
+}
 
 export function sanitizeHtml(html: string): string {
   if (!html) return ''
@@ -36,8 +70,13 @@ export function sanitizeHtml(html: string): string {
     if (tag === 'br') return '<br>'
     if (tag === 'div') return kids ? `<p>${kids}</p>` : ''
     if (tag === 'strike' || tag === 'del') return `<s>${kids}</s>`
-    if (tag.startsWith('h')) return `<p><strong>${kids}</strong></p>`
-    return `<${tag}>${kids}</${tag}>`
+    if (tag === 'a') {
+      const href = el.getAttribute('href')?.trim() ?? ''
+      return href && isSafeHref(href)
+        ? `<a href="${encodeAttribute(href)}" target="_blank" rel="noopener noreferrer"${safeStyleAttr(el)}>${kids}</a>`
+        : kids
+    }
+    return `<${tag}${safeStyleAttr(el)}>${kids}</${tag}>`
   }
 
   return Array.from(doc.body.childNodes).map(walk).join('')

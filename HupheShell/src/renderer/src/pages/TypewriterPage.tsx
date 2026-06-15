@@ -68,14 +68,80 @@ const RIGHT_PANEL_DEFAULT_WIDTH = 345
 // Width of the narrow strip shown when the panel is collapsed (matches Engine w-14 = 56px)
 const RIGHT_PANEL_COLLAPSED_WIDTH = 56
 const TYPEWRITER_SELECTION_HIGHLIGHT = 'typewriter-toolbar-selection'
+const TYPEWRITER_FIND_HIGHLIGHT = 'typewriter-find-result'
+const TYPEWRITER_FIND_ACTIVE_HIGHLIGHT = 'typewriter-find-active-result'
+
+type TextStats = {
+  words: number
+  characters: number
+  readingMinutes: number
+  speakingMinutes: number
+}
+
+const EMPTY_TEXT_STATS: TextStats = {
+  words: 0,
+  characters: 0,
+  readingMinutes: 0,
+  speakingMinutes: 0,
+}
 
 function makeInitialDocuments(): TypewriterDocument[] {
   return loadTypewriterDocuments()
 }
 
-
 function textPreviewFromHtml(html: string): string {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function textStatsFromText(text: string): TextStats {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  const words = normalized ? normalized.split(' ').length : 0
+  const characters = normalized.replace(/\s/g, '').length
+  return {
+    words,
+    characters,
+    readingMinutes: words ? Math.max(1, Math.ceil(words / 225)) : 0,
+    speakingMinutes: words ? Math.max(1, Math.ceil(words / 140)) : 0,
+  }
+}
+
+function textStatsFromHtml(html: string): TextStats {
+  if (typeof document === 'undefined') return EMPTY_TEXT_STATS
+  const tmp = document.createElement('div')
+  tmp.innerHTML = sanitizeHtml(html)
+  return textStatsFromText(tmp.innerText)
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function collectTextNodes(root: Node): Text[] {
+  const nodes: Text[] = []
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  while (walker.nextNode()) {
+    const node = walker.currentNode
+    if (node.textContent?.trim()) nodes.push(node as Text)
+  }
+  return nodes
+}
+
+function findTextRanges(root: HTMLElement, query: string): Range[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return []
+  const ranges: Range[] = []
+  collectTextNodes(root).forEach((node) => {
+    const haystack = (node.textContent ?? '').toLowerCase()
+    let start = haystack.indexOf(needle)
+    while (start !== -1) {
+      const range = document.createRange()
+      range.setStart(node, start)
+      range.setEnd(node, start + needle.length)
+      ranges.push(range)
+      start = haystack.indexOf(needle, start + needle.length)
+    }
+  })
+  return ranges
 }
 
 interface Props {
@@ -96,15 +162,26 @@ export default function TypewriterPage({ joinDocId }: Props) {
   const [activeFormats, setActiveFormats] = useState<Set<string>>(new Set())
   const [ownerId, setOwnerId] = useState<string | null>(null)
   const [syncIndicator, setSyncIndicator] = useState<'idle' | 'syncing' | 'live'>('idle')
+  const [editorStats, setEditorStats] = useState<TextStats>(EMPTY_TEXT_STATS)
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [replaceValue, setReplaceValue] = useState('')
+  const [findMatches, setFindMatches] = useState(0)
+  const [activeFindIndex, setActiveFindIndex] = useState(0)
+  const [focusMode, setFocusMode] = useState(false)
+  const [typewriterScrollEnabled, setTypewriterScrollEnabled] = useState(true)
+  const [paragraphFocusEnabled, setParagraphFocusEnabled] = useState(false)
   const [docIsLive, setDocIsLive] = useState(false)
   const [docShareCode, setDocShareCode] = useState<string | null>(null)
   const [goingLive, setGoingLive] = useState(false)
   const [openDocIds, setOpenDocIds] = useState<string[]>([])
   const editorRef = useRef<HTMLDivElement>(null)
+  const editorScrollRef = useRef<HTMLDivElement>(null)
   const documentsRef = useRef<TypewriterDocument[]>(documents)
   const activeIdRef = useRef(activeId)
   const rightPanelWidthRef = useRef(rightPanelWidth)
   const editorSelectionRef = useRef<Range | null>(null)
+  const findRangesRef = useRef<Range[]>([])
   const freshDocCreatedRef = useRef(false)
 
   useEffect(() => { rightPanelWidthRef.current = rightPanelWidth }, [rightPanelWidth])
@@ -127,13 +204,43 @@ export default function TypewriterPage({ joinDocId }: Props) {
   useEffect(() => {
     if (typeof document === 'undefined') return
     const style = document.createElement('style')
-    style.textContent = `::highlight(${TYPEWRITER_SELECTION_HIGHLIGHT}) { background: rgba(250, 204, 21, 0.34); color: inherit; }`
+    style.textContent = `
+      ::highlight(${TYPEWRITER_SELECTION_HIGHLIGHT}) { background: rgba(250, 204, 21, 0.34); color: inherit; }
+      ::highlight(${TYPEWRITER_FIND_HIGHLIGHT}) { background: rgba(250, 204, 21, 0.28); color: inherit; }
+      ::highlight(${TYPEWRITER_FIND_ACTIVE_HIGHLIGHT}) { background: rgba(255, 127, 80, 0.45); color: inherit; }
+      .typewriter-editor.typewriter-paragraph-focus > * { transition: opacity 160ms ease-out; }
+      .typewriter-editor.typewriter-paragraph-focus > *:not([data-typewriter-focused="true"]) { opacity: 0.38; }
+    `
     document.head.appendChild(style)
     return () => {
       ;(CSS as any).highlights?.delete(TYPEWRITER_SELECTION_HIGHLIGHT)
+      ;(CSS as any).highlights?.delete(TYPEWRITER_FIND_HIGHLIGHT)
+      ;(CSS as any).highlights?.delete(TYPEWRITER_FIND_ACTIVE_HIGHLIGHT)
       style.remove()
     }
   }, [])
+
+  useEffect(() => {
+    function handleGlobalKeyDown(event: KeyboardEvent) {
+      const key = event.key.toLowerCase()
+      if ((event.metaKey || event.ctrlKey) && key === 'f') {
+        event.preventDefault()
+        setFindOpen(true)
+        requestAnimationFrame(() => document.getElementById('typewriter-find-input')?.focus())
+      }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && key === 'f') {
+        event.preventDefault()
+        setFocusMode((value) => !value)
+      }
+      if (event.key === 'Escape') {
+        if (focusMode) setFocusMode(false)
+        else if (findOpen) setFindOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [findOpen, focusMode])
 
   const startRightPanelResize = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault()
@@ -285,6 +392,8 @@ export default function TypewriterPage({ joinDocId }: Props) {
     if (activeId === activeIdRef.current && editorRef.current.innerHTML !== '') return
     activeIdRef.current = activeId
     editorRef.current.innerHTML = sanitizeHtml(activeDocument?.content ?? '')
+    setEditorStats(textStatsFromHtml(activeDocument?.content ?? ''))
+    clearFindHighlights()
     editorRef.current.focus()
   }, [activeId])
 
@@ -410,6 +519,7 @@ export default function TypewriterPage({ joinDocId }: Props) {
     const text = getEditorSelectionText()
     if (!text) clearEditorSelectionHighlight()
     setSelectedText((current) => (current === text ? current : text))
+    updateActiveParagraphFocus()
     const activeCommandFormats = ['bold', 'italic', 'underline', 'strikeThrough',
       'justifyLeft', 'justifyCenter', 'justifyRight', 'justifyFull',
       'insertUnorderedList', 'insertOrderedList',
@@ -420,11 +530,122 @@ export default function TypewriterPage({ joinDocId }: Props) {
     setActiveFormats(new Set([...activeCommandFormats, ...(hasHighlight ? ['highlight'] : [])]))
   }
 
+  function refreshEditorStats() {
+    setEditorStats(textStatsFromText(editorRef.current?.innerText ?? ''))
+  }
+
+  function clearFindHighlights() {
+    findRangesRef.current = []
+    setFindMatches(0)
+    ;(CSS as any).highlights?.delete(TYPEWRITER_FIND_HIGHLIGHT)
+    ;(CSS as any).highlights?.delete(TYPEWRITER_FIND_ACTIVE_HIGHLIGHT)
+  }
+
+  function refreshFindHighlights(nextQuery = findQuery, nextActiveIndex = activeFindIndex) {
+    if (!editorRef.current || !nextQuery.trim()) {
+      clearFindHighlights()
+      return
+    }
+    const ranges = findTextRanges(editorRef.current, nextQuery)
+    findRangesRef.current = ranges
+    setFindMatches(ranges.length)
+    const safeActiveIndex = ranges.length ? Math.min(nextActiveIndex, ranges.length - 1) : 0
+    if (safeActiveIndex !== nextActiveIndex) setActiveFindIndex(safeActiveIndex)
+    const HighlightCtor = (window as any).Highlight
+    const highlights = (CSS as any).highlights
+    if (HighlightCtor && highlights) {
+      highlights.set(TYPEWRITER_FIND_HIGHLIGHT, new HighlightCtor(...ranges))
+      if (ranges[safeActiveIndex]) {
+        highlights.set(TYPEWRITER_FIND_ACTIVE_HIGHLIGHT, new HighlightCtor(ranges[safeActiveIndex]))
+      } else {
+        highlights.delete(TYPEWRITER_FIND_ACTIVE_HIGHLIGHT)
+      }
+    }
+    if (ranges[safeActiveIndex]) {
+      scrollRangeIntoView(ranges[safeActiveIndex], true)
+    }
+  }
+
+  function moveFindResult(delta: number) {
+    const total = findRangesRef.current.length
+    if (!total) return
+    const next = (activeFindIndex + delta + total) % total
+    setActiveFindIndex(next)
+    refreshFindHighlights(findQuery, next)
+  }
+
+  function replaceCurrentFindResult() {
+    const range = findRangesRef.current[activeFindIndex]
+    if (!range || !editorRef.current) return
+    range.deleteContents()
+    range.insertNode(document.createTextNode(replaceValue))
+    saveEditorContent()
+    refreshFindHighlights(findQuery, activeFindIndex)
+  }
+
+  function replaceAllFindResults() {
+    if (!editorRef.current || !findQuery.trim()) return
+    const expression = new RegExp(escapeRegExp(findQuery), 'gi')
+    collectTextNodes(editorRef.current).forEach((node) => {
+      node.textContent = (node.textContent ?? '').replace(expression, replaceValue)
+    })
+    saveEditorContent()
+    refreshFindHighlights(findQuery, 0)
+    setActiveFindIndex(0)
+  }
+
+  function scrollRangeIntoView(range: Range, forceCenter = false) {
+    const scrollEl = editorScrollRef.current
+    if (!scrollEl) return
+    const rect = range.getBoundingClientRect()
+    if (!rect || (rect.width === 0 && rect.height === 0)) return
+    const scrollRect = scrollEl.getBoundingClientRect()
+    const desiredCenter = scrollRect.top + scrollRect.height / 2
+    const currentCenter = rect.top + rect.height / 2
+    const delta = currentCenter - desiredCenter
+    if (forceCenter || Math.abs(delta) > scrollRect.height * 0.18) {
+      scrollEl.scrollTop += delta
+    }
+  }
+
+  function scrollSelectionIntoTypewriterPosition() {
+    if (!typewriterScrollEnabled) return
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0 || !editorRef.current) return
+    const range = selection.getRangeAt(0)
+    if (!editorRef.current.contains(range.commonAncestorContainer)) return
+    requestAnimationFrame(() => scrollRangeIntoView(range))
+  }
+
+  function updateActiveParagraphFocus() {
+    if (!editorRef.current) return
+    const blocks = Array.from(editorRef.current.querySelectorAll('[data-typewriter-focused="true"]'))
+    blocks.forEach((block) => block.removeAttribute('data-typewriter-focused'))
+    editorRef.current.classList.toggle('typewriter-paragraph-focus', paragraphFocusEnabled)
+    if (!paragraphFocusEnabled) return
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0) return
+    const range = selection.getRangeAt(0)
+    if (!editorRef.current.contains(range.commonAncestorContainer)) return
+    const node = range.commonAncestorContainer
+    const element = (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement) as Element | null
+    const block = element?.closest('p, h1, h2, h3, h4, h5, h6, blockquote, li, pre, div')
+    if (block && editorRef.current.contains(block)) block.setAttribute('data-typewriter-focused', 'true')
+  }
+
+  useEffect(() => {
+    updateActiveParagraphFocus()
+  }, [paragraphFocusEnabled])
+
+  useEffect(() => {
+    refreshFindHighlights(findQuery, activeFindIndex)
+  }, [findQuery, activeFindIndex, activeId])
+
   function saveEditorContent() {
     const currentDocument = getCurrentActiveDocument()
     if (!currentDocument || !editorRef.current) return
     const rawText = editorRef.current.innerText.trim()
-    if (!rawText) return
+    refreshEditorStats()
     const autoTitle =
       currentDocument.title === 'Nieuw tekstdocument' && rawText
         ? rawText.split('\n')[0].slice(0, 60) || 'Nieuw tekstdocument'
@@ -435,6 +656,12 @@ export default function TypewriterPage({ joinDocId }: Props) {
     setDocuments(nextDocuments)
     setStatus('Opgeslagen')
     syncDocument(updated)
+  }
+
+  function handleEditorInput() {
+    saveEditorContent()
+    refreshFindHighlights(findQuery, activeFindIndex)
+    scrollSelectionIntoTypewriterPosition()
   }
 
   function applyFormat(command: string, value?: string) {
@@ -477,6 +704,8 @@ export default function TypewriterPage({ joinDocId }: Props) {
       document.execCommand(command, false, value)
     }
     saveEditorContent()
+    refreshFindHighlights(findQuery, activeFindIndex)
+    scrollSelectionIntoTypewriterPosition()
     refreshSelection()
   }
 
@@ -529,6 +758,8 @@ export default function TypewriterPage({ joinDocId }: Props) {
     if (!insert) return
     document.execCommand('insertHTML', false, insert)
     saveEditorContent()
+    refreshFindHighlights(findQuery, activeFindIndex)
+    scrollSelectionIntoTypewriterPosition()
   }
 
   function startTextLink(text: string) {
@@ -638,12 +869,13 @@ export default function TypewriterPage({ joinDocId }: Props) {
   const effectiveRightPanelWidth = rightPanelWidth
 
   return (
-    <main className="h-full overflow-hidden bg-[#0a0a0a] text-white" onClick={() => setContextMenu(null)}>
+    <main className={['h-full overflow-hidden bg-[#0a0a0a] text-white', focusMode ? 'typewriter-focus-mode' : ''].join(' ')} onClick={() => setContextMenu(null)}>
       <div
         className={['grid h-full', rightPanelResizing ? '' : 'transition-[grid-template-columns] duration-300'].join(' ')}
-        style={{ gridTemplateColumns: `minmax(0, 1fr) ${rightPanelOpen ? rightPanelWidth : RIGHT_PANEL_COLLAPSED_WIDTH}px` }}
+        style={{ gridTemplateColumns: focusMode ? 'minmax(0, 1fr)' : `minmax(0, 1fr) ${rightPanelOpen ? rightPanelWidth : RIGHT_PANEL_COLLAPSED_WIDTH}px` }}
       >
         <section className="flex min-w-0 flex-col overflow-hidden">
+          {!focusMode && (
           <header className="flex-shrink-0 bg-[#131313]">
             <div className="flex items-end border-b border-white/[0.08]">
               {openDocIds.map((docId) => {
@@ -699,6 +931,41 @@ export default function TypewriterPage({ joinDocId }: Props) {
                 </svg>
               </button>
               <div className="ml-auto flex flex-shrink-0 items-center gap-2 mb-2 mr-3">
+                <span className="hidden rounded-full bg-white/[0.04] px-3 py-1 text-[11px] text-white/35 lg:inline-flex">
+                  {editorStats.words} woorden · {editorStats.characters} tekens · {editorStats.readingMinutes || 0} min lezen
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setFindOpen((open) => !open)}
+                  className={['rounded-full px-3 py-1 text-[11px] transition-colors', findOpen ? 'bg-[#facc15]/15 text-[#facc15]' : 'bg-white/[0.04] text-white/35 hover:text-white/70'].join(' ')}
+                  title="Zoek en vervang (Cmd+F)"
+                >
+                  Zoek
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFocusMode(true)}
+                  className="rounded-full bg-white/[0.04] px-3 py-1 text-[11px] text-white/35 transition-colors hover:text-white/70"
+                  title="Focus mode (Cmd+Shift+F)"
+                >
+                  Focus
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTypewriterScrollEnabled((enabled) => !enabled)}
+                  className={['rounded-full px-3 py-1 text-[11px] transition-colors', typewriterScrollEnabled ? 'bg-[#facc15]/15 text-[#facc15]' : 'bg-white/[0.04] text-white/35 hover:text-white/70'].join(' ')}
+                  title="Typewriter scrolling aan/uit"
+                >
+                  Midden
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setParagraphFocusEnabled((enabled) => !enabled)}
+                  className={['rounded-full px-3 py-1 text-[11px] transition-colors', paragraphFocusEnabled ? 'bg-[#facc15]/15 text-[#facc15]' : 'bg-white/[0.04] text-white/35 hover:text-white/70'].join(' ')}
+                  title="Huidige alinea focussen"
+                >
+                  Alinea
+                </button>
                 {status && <span className="rounded-full bg-white/[0.05] px-3 py-1 text-[11px] text-white/35">{status}</span>}
                 {docIsLive && docShareCode ? (
                   <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/[0.08] pl-2.5 pr-1 py-1 text-[11px] text-emerald-400/80">
@@ -731,18 +998,54 @@ export default function TypewriterPage({ joinDocId }: Props) {
               </div>
             </div>
           </header>
+          )}
 
-          <div className="flex-1 overflow-y-auto px-7 py-7">
-            <div className="mx-auto max-w-[860px]">
+          {findOpen && (
+            <div className="flex-shrink-0 border-b border-white/[0.08] bg-[#101010] px-7 py-3">
+              <div className="mx-auto flex max-w-[860px] items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.035] p-2">
+                <input
+                  id="typewriter-find-input"
+                  value={findQuery}
+                  onChange={(event) => { setFindQuery(event.target.value); setActiveFindIndex(0) }}
+                  placeholder="Zoeken..."
+                  className="h-8 min-w-0 flex-1 rounded-lg border border-white/[0.08] bg-black/20 px-3 text-sm text-white/80 outline-none placeholder:text-white/25 focus:border-[#facc15]/35"
+                />
+                <span className="w-16 text-center text-[11px] text-white/35">
+                  {findMatches ? `${activeFindIndex + 1}/${findMatches}` : '0/0'}
+                </span>
+                <button type="button" onClick={() => moveFindResult(-1)} className="h-8 rounded-lg border border-white/[0.08] px-2.5 text-sm text-white/45 hover:text-white" title="Vorige">↑</button>
+                <button type="button" onClick={() => moveFindResult(1)} className="h-8 rounded-lg border border-white/[0.08] px-2.5 text-sm text-white/45 hover:text-white" title="Volgende">↓</button>
+                <input
+                  value={replaceValue}
+                  onChange={(event) => setReplaceValue(event.target.value)}
+                  placeholder="Vervangen door..."
+                  className="h-8 min-w-0 flex-1 rounded-lg border border-white/[0.08] bg-black/20 px-3 text-sm text-white/80 outline-none placeholder:text-white/25 focus:border-[#facc15]/35"
+                />
+                <button type="button" onClick={replaceCurrentFindResult} className="h-8 rounded-lg border border-white/[0.08] px-3 text-[11px] font-semibold text-white/50 transition-colors hover:border-[#facc15]/30 hover:text-[#facc15]">Vervang</button>
+                <button type="button" onClick={replaceAllFindResults} className="h-8 rounded-lg border border-white/[0.08] px-3 text-[11px] font-semibold text-white/50 transition-colors hover:border-[#facc15]/30 hover:text-[#facc15]">Alles</button>
+                <button
+                  type="button"
+                  onClick={() => { setFindOpen(false); setFindQuery(''); clearFindHighlights() }}
+                  className="h-8 rounded-lg px-2.5 text-white/30 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+                  title="Zoekbalk sluiten"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div ref={editorScrollRef} className={['flex-1 overflow-y-auto px-7 py-7', focusMode ? 'px-10 py-10' : ''].join(' ')}>
+            <div className={['mx-auto', focusMode ? 'max-w-[920px]' : 'max-w-[860px]'].join(' ')}>
               <div
                 ref={editorRef}
                 contentEditable
                 suppressContentEditableWarning
-                onInput={saveEditorContent}
+                onInput={handleEditorInput}
                 onPaste={handlePaste}
                 onBlur={() => syncDocuments(loadTypewriterDocuments(), activeId)}
                 onMouseUp={refreshSelection}
-                onKeyUp={refreshSelection}
+                onKeyUp={() => { refreshSelection(); scrollSelectionIntoTypewriterPosition() }}
                 onContextMenu={handleContextMenu}
                 dir="ltr"
                 className="typewriter-editor min-h-[calc(100vh-170px)] w-full rounded-[6px] border border-white/[0.08] bg-[#ffffff] px-14 py-12 text-left text-[17px] leading-8 text-[#161616] shadow-2xl outline-none empty:before:text-black/30 empty:before:content-[attr(data-placeholder)]"
@@ -753,6 +1056,7 @@ export default function TypewriterPage({ joinDocId }: Props) {
           </div>
         </section>
 
+        {!focusMode && (
         <aside className={[RIGHT_PANEL_STYLE.shellBase, RIGHT_PANEL_STYLE.shellSurface].join(' ')}>
           <div
             role="separator"
@@ -856,7 +1160,30 @@ export default function TypewriterPage({ joinDocId }: Props) {
             </div>
           </div>
         </aside>
+        )}
       </div>
+
+      {focusMode && (
+        <div className="fixed right-6 top-5 z-[320] flex items-center gap-2 rounded-full border border-white/[0.10] bg-[#111]/90 px-2 py-2 shadow-2xl backdrop-blur">
+          <span className="hidden px-2 text-[11px] text-white/35 sm:inline">
+            {editorStats.words} woorden · {editorStats.readingMinutes || 0} min lezen
+          </span>
+          <button
+            type="button"
+            onClick={() => setFindOpen((open) => !open)}
+            className={['rounded-full px-3 py-1.5 text-[11px] transition-colors', findOpen ? 'bg-[#facc15]/15 text-[#facc15]' : 'bg-white/[0.06] text-white/45 hover:text-white'].join(' ')}
+          >
+            Zoek
+          </button>
+          <button
+            type="button"
+            onClick={() => setFocusMode(false)}
+            className="rounded-full bg-[#facc15] px-3 py-1.5 text-[11px] font-semibold text-black transition-colors hover:bg-[#ffe46b]"
+          >
+            Terug
+          </button>
+        </div>
+      )}
 
       {contextMenu && (
         <div
@@ -975,10 +1302,10 @@ function EditTab({
             defaultValue="p"
             onChange={(value) => onFormat('formatBlock', value)}
             options={[
-              ['p', 'Paragraaf'],
-              ['h1', 'Kop 1'],
-              ['h2', 'Kop 2'],
-              ['h3', 'Kop 3'],
+              ['p', 'Body'],
+              ['h1', 'Title'],
+              ['h2', 'Subtitle'],
+              ['h3', 'H3'],
               ['blockquote', 'Citaat'],
               ['pre', 'Code'],
             ]}
@@ -1117,6 +1444,23 @@ function EditTab({
             </InlineButton>
             <InlineButton title="Opmaak wissen" onBeforeAction={onBeforeToolbarAction} onClick={() => onFormat('removeFormat')}>
               <ClearFormatIcon />
+            </InlineButton>
+          </div>
+          <div className="grid grid-cols-2 divide-x divide-white/[0.10] border-t border-white/[0.10]">
+            <InlineButton
+              title="Hyperlink toevoegen"
+              onBeforeAction={onBeforeToolbarAction}
+              onClick={() => {
+                const url = window.prompt('URL voor de link')
+                if (!url?.trim()) return
+                const normalized = /^https?:\/\//i.test(url.trim()) ? url.trim() : `https://${url.trim()}`
+                onFormat('createLink', normalized)
+              }}
+            >
+              <LinkIcon />
+            </InlineButton>
+            <InlineButton title="Hyperlink verwijderen" onBeforeAction={onBeforeToolbarAction} onClick={() => onFormat('unlink')}>
+              <UnlinkIcon />
             </InlineButton>
           </div>
         </div>
@@ -1326,6 +1670,26 @@ function ClearFormatIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 7V4h16v3" /><path d="M5 20h6" /><path d="M13 4 8 20" /><line x1="17" y1="12" x2="22" y2="17" /><line x1="22" y1="12" x2="17" y2="17" />
+    </svg>
+  )
+}
+
+function LinkIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </svg>
+  )
+}
+
+function UnlinkIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 7h2a5 5 0 0 1 0 10h-2" />
+      <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+      <line x1="8" y1="12" x2="16" y2="12" />
+      <line x1="3" y1="3" x2="21" y2="21" />
     </svg>
   )
 }

@@ -38,6 +38,7 @@ import AnimatedPixelBackground from '../components/AnimatedPixelBackground'
 import MeetingNotesDrawer from '../components/MeetingNotesDrawer'
 import PdfExportCapture from '../components/PdfExportCapture'
 import { useCalibration, type CalibrationReport } from '../hooks/useCalibration'
+import { notifyCreditsRequired, notifyIfCreditsRequired } from '../lib/credits-required'
 import AtelierCreationModeButtons, {
   ATELIER_CREATION_OPTIONS,
   type AtelierCreationSelection,
@@ -3611,6 +3612,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
       const wallet = walletData as any
       const totalBalance = (wallet?.personal_balance ?? 0) + (wallet?.company_balance ?? 0)
       if (totalBalance < IMAGE_COST_CENTS) {
+        notifyCreditsRequired({ message: 'Je hebt onvoldoende credits voor beeldgeneratie. Waardeer je wallet op om verder te gaan.' })
         patchGenState(blockId, { loading: false, error: 'Onvoldoende credits. Laad credits op via Instellingen → Billing.' })
         return
       }
@@ -3667,6 +3669,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
           if (model) {
             const data = await (window as any).api.generateAtelierImage(prompt, model, systemPrompt)
             if (!data?.ok) {
+              notifyIfCreditsRequired(data)
               patchGenState(blockId, { loading: false, error: data?.error ?? 'Genereren mislukt' })
               return
             }
@@ -3688,6 +3691,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
       }
       patchGenState(blockId, { loading: false, error: 'Geen image-agent gevonden voor Atelier.' })
     } catch (err: any) {
+      notifyIfCreditsRequired(err)
       patchGenState(blockId, { loading: false, error: err.message ?? 'Fout bij genereren' })
     }
   }
