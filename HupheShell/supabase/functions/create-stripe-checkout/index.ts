@@ -10,9 +10,9 @@ const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') as string, {
 })
 
 const PACKAGES = [
-  { id: 'starter',  euros: 5,  millicredits: 500_000,  label: '500 credits' },
-  { id: 'standard', euros: 10, millicredits: 1_100_000, label: '1100 credits (+10% bonus)' },
-  { id: 'pro',      euros: 25, millicredits: 3_000_000, label: '3000 credits (+20% bonus)' },
+  { id: 'starter',  euros: 5,  millicredits: 500_000,  label: '5.000 credits' },
+  { id: 'standard', euros: 10, millicredits: 1_100_000, label: '11.000 credits (+10% bonus)' },
+  { id: 'pro',      euros: 25, millicredits: 3_000_000, label: '30.000 credits (+20% bonus)' },
 ]
 
 serve(async (req: Request) => {
@@ -105,9 +105,22 @@ serve(async (req: Request) => {
 
   } catch (err: any) {
     console.error('Checkout error:', err)
-    return json(
-      { error: err.message || 'Interne serverfout' },
-      err.status || 500
-    )
+
+    // Stripe configuratiefouten (verlopen key, ongeldige key, etc.) nooit tonen aan gebruikers
+    const isStripeConfigError = err?.type === 'StripeAuthenticationError'
+      || err?.message?.toLowerCase().includes('api key')
+      || err?.message?.toLowerCase().includes('expired')
+      || err?.message?.toLowerCase().includes('authentication')
+
+    if (isStripeConfigError) {
+      return json({ error: 'Betaling tijdelijk niet beschikbaar. Probeer het later opnieuw.' }, 503)
+    }
+
+    // Stripe gebruikersfouten (ongeldige kaart etc.) wel tonen
+    if (err?.type?.startsWith('Stripe') && err?.statusCode < 500) {
+      return json({ error: err.message || 'Betaling mislukt.' }, err.statusCode || 400)
+    }
+
+    return json({ error: 'Interne serverfout' }, 500)
   }
 })

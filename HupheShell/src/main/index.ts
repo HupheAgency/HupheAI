@@ -280,6 +280,54 @@ function toHupheFileUrl(input: string): string {
   return `huphe://file/${encodeURIComponent(filePath)}`
 }
 
+// PNG iTXt chunk writer — stores UTF-8 prompt metadata inside the PNG file.
+// iTXt format: keyword\0 compressionFlag(0) compressionMethod(0) langTag\0 transKeyword\0 text(UTF-8)
+function makePngItxtChunk(keyword: string, text: string): Buffer {
+  const kwBuf  = Buffer.from(keyword, 'latin1')
+  const txtBuf = Buffer.from(text, 'utf8')
+  const data   = Buffer.concat([kwBuf, Buffer.from([0, 0, 0, 0, 0]), txtBuf])
+  const type   = Buffer.from('iTXt')
+  const len    = Buffer.alloc(4); len.writeUInt32BE(data.length, 0)
+  const crcBuf = Buffer.alloc(4); crcBuf.writeUInt32BE(pngCrc32(Buffer.concat([type, data])), 0)
+  return Buffer.concat([len, type, data, crcBuf])
+}
+
+function pngCrc32(buf: Buffer): number {
+  if (!pngCrc32.table) {
+    pngCrc32.table = new Uint32Array(256)
+    for (let i = 0; i < 256; i++) {
+      let c = i
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
+      pngCrc32.table[i] = c
+    }
+  }
+  let crc = 0xFFFFFFFF
+  for (const byte of buf) crc = (crc >>> 8) ^ pngCrc32.table[(crc ^ byte) & 0xFF]
+  return (crc ^ 0xFFFFFFFF) >>> 0
+}
+pngCrc32.table = null as Uint32Array | null
+
+function writePngPromptMetadata(filePath: string, meta: { prompt: string; model: string; modelLabel: string; createdAt: string }) {
+  if (!filePath.endsWith('.png')) return
+  try {
+    const buf = readFileSync(filePath)
+    const PNG_SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+    if (!buf.slice(0, 8).equals(PNG_SIG)) return
+    // Parse past IHDR (8 sig + 4 len + 4 type + 13 data + 4 crc = 33 bytes)
+    const ihdrLen = buf.readUInt32BE(8)
+    const afterIhdr = 8 + 4 + 4 + ihdrLen + 4
+    const chunks = Buffer.concat([
+      makePngItxtChunk('huphe:prompt',     meta.prompt),
+      makePngItxtChunk('huphe:model',      meta.model),
+      makePngItxtChunk('huphe:modelLabel', meta.modelLabel),
+      makePngItxtChunk('huphe:createdAt',  meta.createdAt),
+    ])
+    writeFileSync(filePath, Buffer.concat([buf.slice(0, afterIhdr), chunks, buf.slice(afterIhdr)]))
+  } catch (e) {
+    console.warn('[writePngPromptMetadata] kon metadata niet schrijven:', e)
+  }
+}
+
 function rewriteLocalFileUrls(html: string): string {
   return html.replace(/file:\/\/([^"'\s)<>]+)/g, (match) => {
     try { return toHupheFileUrl(match) } catch { return match }
@@ -351,8 +399,8 @@ function buildRendererCsp(): string {
     "default-src 'self' file: hupheai:",
     app.isPackaged ? "script-src 'self'" : "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "img-src 'self' data: blob: file: https: hupheai:",
-    "media-src 'self' data: blob: file: https: hupheai:",
+    "img-src 'self' data: blob: file: https: huphe: hupheai:",
+    "media-src 'self' data: blob: file: https: huphe: hupheai:",
     "font-src 'self' data: file: https://fonts.gstatic.com https://use.typekit.net",
     `connect-src ${connectSrc}`,
     "frame-src 'none'",
@@ -2075,9 +2123,11 @@ ipcMain.handle('credits:checkout', async (_event, payload: { amountCents: number
         'line_items[0][price_data][product_data][name]': 'HupheAI Credits',
         'line_items[0][price_data][product_data][description]': `${(amountCents / 100).toFixed(2)} EUR aan genereer-credits`,
         'line_items[0][quantity]': '1',
+        client_reference_id: userId,
         'metadata[user_id]': userId,
         'metadata[amount_cents]': String(amountCents),
         'metadata[fee_pct]': String(feePct),
+        'metadata[millicredits]': String(Math.floor(amountCents * 1000 * (1 - feePct / 100))),
         success_url: 'https://hupheai.app/credits/success?session_id={CHECKOUT_SESSION_ID}',
         cancel_url: 'https://hupheai.app/credits/cancel',
       }).toString(),
@@ -2199,12 +2249,37 @@ async function generateViaComfyUICloud(prompt: string): Promise<{ ok: boolean; f
 ipcMain.handle('image:download-url', async (_event, url: string) => {
   try {
     url = parseIpcPayload('image:download-url', HttpsUrlSchema, url)
-    const response = await fetch(url)
+    const response = await fetch(url, { signal: AbortSignal.timeout(30000) })
     if (!response.ok) return { ok: false, error: `Download fout: ${response.status}` }
-    const filePath = join(tmpdir(), `huphe_generated_${Date.now()}.jpg`)
-    writeFileSync(filePath, Buffer.from(await response.arrayBuffer()))
+    const buf = Buffer.from(await response.arrayBuffer())
+    const ct = response.headers.get('content-type') ?? ''
+    const ext = ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : 'jpg'
+    const dir = join(app.getPath('userData'), 'generated-images')
+    mkdirSync(dir, { recursive: true })
+    const filePath = join(dir, `huphe_generated_${Date.now()}.${ext}`)
+    writeFileSync(filePath, buf)
     console.log('[image:download-url] opgeslagen:', filePath)
-    return { ok: true, filePath }
+    return { ok: true, filePath: toHupheFileUrl(filePath) }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('image:delete-file', async (_event, filePath: string) => {
+  try {
+    let raw: string
+    if (filePath.startsWith('file://')) {
+      raw = decodeURIComponent(filePath.slice(7))
+    } else if (filePath.startsWith('huphe://file/')) {
+      raw = decodeURIComponent(filePath.slice('huphe://file/'.length))
+    } else {
+      raw = filePath
+    }
+    const resolved = resolve(raw)
+    const allowedDir = resolve(join(app.getPath('userData'), 'generated-images'))
+    if (!resolved.startsWith(allowedDir + sep)) return { ok: false, error: 'Niet toegestaan' }
+    if (existsSync(resolved)) unlinkSync(resolved)
+    return { ok: true }
   } catch (err: any) {
     return { ok: false, error: err.message }
   }
@@ -2223,15 +2298,19 @@ ipcMain.handle('image:generate', async (_event, prompt: string, provider: string
   }
 })
 
-ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; model: string; systemPrompt?: string; referenceImageSrc?: string; accessToken?: string }) => {
+ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; model: string; modelLabel?: string; systemPrompt?: string; referenceImageSrc?: string; accessToken?: string }) => {
   payload = parseIpcPayload('image:generate-ai', z.object({
     prompt: z.string().trim().min(1).max(12000),
     model: z.string().trim().min(1).max(200),
+    modelLabel: z.string().max(200).optional(),
     systemPrompt: z.string().max(6000).optional(),
     referenceImageSrc: z.string().max(20 * 1024 * 1024).optional(),
+    maskImageSrc: z.string().max(20 * 1024 * 1024).optional(),
     accessToken: AccessTokenSchema,
   }), payload)
-  let { prompt, model, systemPrompt, referenceImageSrc, accessToken } = payload
+  let { prompt, model, modelLabel, systemPrompt, referenceImageSrc, maskImageSrc, accessToken } = payload
+  const originalPrompt = prompt
+  const hasMaskInput = Boolean(maskImageSrc)
 
   // Converteer file:// referentie naar base64 data URL zodat OpenRouter hem kan lezen
   let referenceImage: string | null = null
@@ -2248,7 +2327,8 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
     }
   }
   const isEdit = referenceImage !== null
-  if (!accessToken) {
+  const effectiveJwt = accessToken ?? cachedJwt
+  if (!effectiveJwt) {
     return { ok: false, error: 'Niet ingelogd.' }
   }
   const { callOpenRouter } = await import('./lib/proxy')
@@ -2266,7 +2346,7 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
           { role: 'user', content: prompt },
         ],
         max_tokens: 300,
-      }, accessToken)
+      }, effectiveJwt)
       if (transRes.ok) {
         const transJson = await transRes.json() as any
         const translated = transJson?.choices?.[0]?.message?.content?.trim()
@@ -2295,7 +2375,9 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
       const isLLM = targetModalities.includes('text')
 
       let finalPrompt: string
-      if (isEdit && isLLM) {
+      if (hasMaskInput && isLLM) {
+        finalPrompt = `Je bent een AI-beeldeditor. Je ontvangt een originele afbeelding en een masker. In het masker zijn de WITTE gebieden de regio's die je moet aanpassen; de ZWARTE gebieden blijven ongewijzigd. Pas de afbeelding aan volgens de instructie, maar alleen binnen de witte (gemaskerde) regio's. Behoud de rest van de afbeelding exact. Genereer de aangepaste afbeelding en geef GEEN tekstuele reactie.\n\nInstructie: ${prompt}`
+      } else if (isEdit && isLLM) {
         finalPrompt = `Pas de bijgevoegde afbeelding aan op basis van de volgende instructie. Gebruik de bijgevoegde afbeelding als directe referentie en behoud compositie, uitsnede, stijl, belichting, achtergrond en alle niet-genoemde details zo exact mogelijk. Wijzig alleen wat expliciet in de instructie staat. Genereer de aangepaste afbeelding en geef geen tekstuele reactie.\n\nInstructie: ${prompt}`
       } else if (isLLM) {
         finalPrompt = `Genereer een afbeelding op basis van de volgende beschrijving. Geef GEEN tekstuele reactie, genereer uitsluitend de afbeelding.\n\nBeschrijving: ${prompt}`
@@ -2306,10 +2388,14 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
       }
 
       const messages: any[] = []
-      if (isLLM && systemPrompt && !isEdit) messages.push({ role: 'system', content: systemPrompt })
+      if (isLLM && systemPrompt && !isEdit && !hasMaskInput) messages.push({ role: 'system', content: systemPrompt })
 
       const contentParts: any[] = []
       if (referenceImage) contentParts.push({ type: 'image_url', image_url: { url: referenceImage } })
+      if (maskImageSrc) {
+        contentParts.push({ type: 'text', text: 'Masker (wit = aanpassen, zwart = behouden):' })
+        contentParts.push({ type: 'image_url', image_url: { url: maskImageSrc } })
+      }
       contentParts.push({ type: 'text', text: finalPrompt })
       const content: any = contentParts.length === 1 ? contentParts[0].text : contentParts
       messages.push({ role: 'user', content })
@@ -2320,7 +2406,7 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
         messages,
       }
 
-      return callOpenRouter(payload, accessToken!)
+      return callOpenRouter(payload, effectiveJwt)
     }
 
     let res = await performOpenRouterRequest(['image', 'text'])
@@ -2341,7 +2427,13 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
       if (raw.toLowerCase().includes('output modalities') || raw.toLowerCase().includes('requested output modalities')) {
         return { ok: false, error: 'Dit model ondersteunt geen beeldgeneratie via OpenRouter. Kies een model met image-output, zoals Nano Banana of een Flux/Imagen-model.' }
       }
-      return { ok: false, error: raw.slice(0, 200) }
+      let errorMsg = raw.slice(0, 200)
+      try {
+        const parsed = JSON.parse(raw)
+        errorMsg = parsed?.error?.message ?? parsed?.error ?? parsed?.message ?? errorMsg
+        if (typeof errorMsg !== 'string') errorMsg = raw.slice(0, 200)
+      } catch {}
+      return { ok: false, error: errorMsg }
     }
 
     let json: any
@@ -2379,6 +2471,7 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
         }
       }
 
+      const pngMeta = { prompt: originalPrompt, model, modelLabel: modelLabel ?? model, createdAt: new Date().toISOString() }
       if (b64) {
         b64 = b64.replace(/^data:image\/\w+;base64,/, '')
         const ext = b64.startsWith('iVBORw0KGgo') ? 'png' : 'jpg'
@@ -2386,8 +2479,9 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
         mkdirSync(dir, { recursive: true })
         const filePath = join(dir, `huphe_generated_${Date.now()}.${ext}`)
         writeFileSync(filePath, Buffer.from(b64, 'base64'))
+        writePngPromptMetadata(filePath, pngMeta)
         console.log('[image:generate-ai] ✓ base64 afbeelding opgeslagen:', filePath)
-        return { ok: true, filePath }
+        return { ok: true, filePath: toHupheFileUrl(filePath) }
       } else if (url) {
         // Download meteen zodat de URL niet verloopt (bijv. Gemini-tijdelijke URLs)
         try {
@@ -2400,8 +2494,9 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
             mkdirSync(dir, { recursive: true })
             const filePath = join(dir, `huphe_generated_${Date.now()}.${ext}`)
             writeFileSync(filePath, buf)
+            writePngPromptMetadata(filePath, pngMeta)
             console.log('[image:generate-ai] ✓ URL gedownload en opgeslagen:', filePath)
-            return { ok: true, filePath }
+            return { ok: true, filePath: toHupheFileUrl(filePath) }
           }
         } catch (downloadErr: any) {
           console.warn('[image:generate-ai] download mislukt, URL als fallback:', downloadErr.message)
@@ -2412,7 +2507,7 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
     }
 
     // Fallback: soms geeft OpenRouter een URL terug in de content
-    const content: string = message?.content ?? ''
+    const content: string = typeof message?.content === 'string' ? message.content : ''
     const urlMatch = content.match(/https?:\/\/[^\s)\]'"]+/i)
     if (urlMatch) {
       const contentUrl = urlMatch[0]
@@ -2426,8 +2521,9 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
           mkdirSync(dir2, { recursive: true })
           const filePath2 = join(dir2, `huphe_generated_${Date.now()}.${ext2}`)
           writeFileSync(filePath2, buf2)
+          writePngPromptMetadata(filePath2, pngMeta)
           console.log('[image:generate-ai] ✓ content-URL gedownload:', filePath2)
-          return { ok: true, filePath: filePath2 }
+          return { ok: true, filePath: toHupheFileUrl(filePath2) }
         }
       } catch {}
       console.log('[image:generate-ai] ✓ URL gevonden in content:', contentUrl)
@@ -2451,7 +2547,8 @@ ipcMain.handle('video:generate-ai', async (_event, payload: { prompt: string; mo
     accessToken: AccessTokenSchema,
   }), payload)
   const { prompt, model, systemPrompt, accessToken } = payload
-  if (!accessToken) return { ok: false, error: 'Niet ingelogd.' }
+  const effectiveJwtVideo = accessToken ?? cachedJwt
+  if (!effectiveJwtVideo) return { ok: false, error: 'Niet ingelogd.' }
   const { callOpenRouter } = await import('./lib/proxy')
 
   async function performOpenRouterRequest(targetModalities: string[]) {
@@ -2464,7 +2561,7 @@ ipcMain.handle('video:generate-ai', async (_event, payload: { prompt: string; mo
       modalities: targetModalities,
       messages: [{ role: 'user', content: finalPrompt }],
       stream: false,
-    }, accessToken!)
+    }, effectiveJwtVideo)
   }
 
   try {

@@ -5,8 +5,8 @@ interface Props {
   onTopUp: () => void
 }
 
-function formatCredits(cents: number): string {
-  return new Intl.NumberFormat('nl-NL').format(Math.max(0, cents) * 10)
+function formatCredits(millicredits: number): string {
+  return new Intl.NumberFormat('nl-NL').format(Math.floor(Math.max(0, millicredits) / 100))
 }
 
 export default function WalletBar({

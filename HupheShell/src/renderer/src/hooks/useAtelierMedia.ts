@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { upsertAsset as upsertLibraryAsset } from '../lib/asset-library'
+import { supabase } from '../lib/supabase'
+import { notifyIfCreditsRequired } from '../lib/credits-required'
 
 export type AtelierMediaProjectType = 'images' | 'video'
 
@@ -199,7 +201,7 @@ export function useAtelierMediaCreator({
     })
   }
 
-  async function handleGenerate(event: FormEvent<HTMLFormElement>) {
+  async function handleGenerate(event: FormEvent<HTMLFormElement>, maskDataUrl?: string) {
     event.preventDefault()
     if (!canGenerate || !selectedModel || !mediaType) return
     const promptText = prompt.trim()
@@ -213,16 +215,32 @@ export function useAtelierMediaCreator({
     setError('')
     try {
       const api = (window as any).api
+      const { data: { session } } = await supabase!.auth.getSession()
+      const accessToken = session?.access_token ?? undefined
       const res = mediaType === 'images'
-        ? await api.generateAtelierImage(promptText, selectedModel.model, undefined, referenceImageSrc)
-        : await api.generateAtelierVideo(promptText, selectedModel.model)
+        ? await api.generateAtelierImage(promptText, selectedModel.model, undefined, referenceImageSrc, accessToken, selectedModel.label, maskDataUrl)
+        : await api.generateAtelierVideo(promptText, selectedModel.model, undefined, accessToken)
       if (!res?.ok) {
-        setError(res?.error ?? 'Genereren mislukt.')
+        const errMsg = res?.error ?? 'Genereren mislukt.'
+        if (!notifyIfCreditsRequired(errMsg)) {
+          setError(errMsg)
+        }
         return
       }
-      const src = res.filePath
-        ? (res.filePath.startsWith('file://') ? res.filePath : `file://${res.filePath}`)
+      const isLocalUrl = (s: string) => s.startsWith('file://') || s.startsWith('huphe://')
+      let src = res.filePath
+        ? (isLocalUrl(res.filePath) ? res.filePath : `file://${res.filePath}`)
         : (res.imageUrl ?? res.videoUrl ?? '')
+      // When main couldn't download the URL immediately, retry from renderer
+      if (!res.filePath && res.imageUrl) {
+        try {
+          const dlRes = await api.downloadImageUrl(res.imageUrl)
+          if (dlRes?.ok && dlRes.filePath) {
+            src = isLocalUrl(dlRes.filePath) ? dlRes.filePath : `file://${dlRes.filePath}`
+          }
+        } catch {}
+      }
+      console.log('[useAtelierMedia] res.filePath:', res.filePath, 'res.imageUrl:', res.imageUrl, '→ src:', src)
       if (!src) {
         setError(mediaType === 'images' ? 'Geen afbeelding ontvangen.' : 'Geen video ontvangen.')
         return
@@ -236,6 +254,22 @@ export function useAtelierMediaCreator({
         model: selectedModel.model,
         modelLabel: selectedModel.label,
         createdAt,
+      }
+      // Log to Supabase when logged in — always with is_live=false; updated when published
+      if (supabase && session?.user?.id) {
+        supabase.from('generations').insert({
+          user_id: session.user.id,
+          prompt: promptText,
+          model: selectedModel.model,
+          model_label: selectedModel.label,
+          media_type: mediaType,
+          file_name: src.split('/').pop() ?? '',
+          project_id: project?.id ?? null,
+          is_live: false,
+          created_at: createdAt,
+        }).then(({ error }) => {
+          if (error) console.warn('[useAtelierMedia] Supabase generation log mislukt:', error.message)
+        })
       }
       upsertLibraryAsset({
         id: asset.id,
@@ -263,9 +297,43 @@ export function useAtelierMediaCreator({
         createdAt: project?.createdAt ?? createdAt,
       })
     } catch (err: any) {
-      setError(err.message ?? 'Genereren mislukt.')
+      const errMsg = err.message ?? 'Genereren mislukt.'
+      if (!notifyIfCreditsRequired(err)) {
+        setError(errMsg)
+      }
     } finally {
       setGenerating(false)
+    }
+  }
+
+  async function handleDeleteAsset(assetId: string) {
+    const asset = resultItems.find((item) => item.id === assetId)
+    if (!asset) return
+    const nextItems = resultItems.filter((item) => item.id !== assetId)
+    setResultItems(nextItems)
+    if (nextItems.length === 0) {
+      setActiveResultIndex(null)
+    } else if (activeResultIndex != null) {
+      const newIndex = Math.min(activeResultIndex, nextItems.length - 1)
+      setActiveResultIndex(newIndex)
+    }
+    if (asset.src.startsWith('file://') || asset.src.startsWith('huphe://')) {
+      try { await (window as any).api.deleteLocalFile(asset.src) } catch {}
+    }
+    if (nextItems.length > 0) {
+      const activeSrc = nextItems[Math.min(activeResultIndex ?? 0, nextItems.length - 1)]?.src ?? nextItems[nextItems.length - 1].src
+      onProjectGenerated?.({
+        id: project?.id ?? createAtelierProjectId(),
+        type: (mediaType ?? 'images') as AtelierMediaProjectType,
+        title: project?.title ?? createAtelierProjectTitle(asset.prompt, (mediaType ?? 'images') as AtelierMediaProjectType),
+        prompt: asset.prompt,
+        modelId: asset.modelId,
+        model: asset.model,
+        modelLabel: asset.modelLabel,
+        src: activeSrc,
+        assets: nextItems,
+        createdAt: project?.createdAt ?? asset.createdAt,
+      })
     }
   }
 
@@ -301,6 +369,7 @@ export function useAtelierMediaCreator({
     canGenerate,
     handleGenerate,
     handleSaveResult,
+    handleDeleteAsset,
     stepLightbox,
   }
 }

@@ -97,19 +97,25 @@ export default function TopUpModal({
 
         <label className="block">
           <span className="block text-white/45 text-xs font-medium mb-2">
-            Eigen bedrag
+            Kies jouw bedrag
           </span>
-          <div className="flex items-center gap-2 bg-[#0a0a0a] border border-white/[0.07] focus-within:border-amber-400/40 rounded-xl px-3">
+          <div className={['flex items-center gap-2 bg-[#0a0a0a] border rounded-xl px-3 transition-colors', customAmount.trim() ? 'border-amber-400/40' : 'border-white/[0.07] focus-within:border-amber-400/40'].join(' ')}>
             <span className="text-white/25 text-sm">€</span>
             <input
               type="number"
               min={1}
               max={500}
               step={1}
-              value={customAmount}
+              value={customAmount.trim() ? customAmount : (selectedAmount ?? '')}
               onChange={(event) => {
                 setCustomAmount(event.target.value)
                 setSelectedAmount(null)
+              }}
+              onFocus={() => {
+                if (!customAmount.trim() && selectedAmount) {
+                  setCustomAmount(String(selectedAmount))
+                  setSelectedAmount(null)
+                }
               }}
               placeholder="Bijv. 25"
               className="w-full bg-transparent outline-none text-white text-sm py-3 placeholder:text-white/25"

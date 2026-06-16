@@ -5292,6 +5292,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
             initialImageSrc={initialImageSrc}
             mediaAssets={mediaAssets}
             onSaveMediaAsset={handleSaveMediaAsset}
+            onShellLevel={setShellLevel}
           />
         )}
       />

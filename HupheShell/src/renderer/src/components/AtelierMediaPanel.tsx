@@ -11,6 +11,7 @@ import AtelierRightPanel, { type AtelierProjectsPanelConfig } from './AtelierRig
 import AtelierCreationModeButtons, { ATELIER_CREATION_OPTIONS } from './AtelierCreationModeButtons'
 import type { AtelierCreationType } from './AtelierCreationModeButtons'
 import { AtelierModelIcon, PlusTinyIcon, AtelierModeChip, CloseTinyIcon, AtelierSaveImageIcon, AtelierExpandImageIcon } from './AtelierSharedUI'
+import { LeftToolTooltip } from './LeftPanelShell'
 import type { MediaAsset } from '../lib/media-asset-store'
 import { supabase } from '../lib/supabase'
 import { Toggle } from './Toggle'
@@ -23,6 +24,7 @@ export function AtelierMediaCreationPanel({
   onClearCreationType,
   projectsPanel,
   initialImageSrc,
+  onShellLevel,
 }: {
   type: AtelierCreationType
   project?: AtelierMediaProject | null
@@ -33,14 +35,26 @@ export function AtelierMediaCreationPanel({
   initialImageSrc?: string | null
   mediaAssets?: MediaAsset[]
   onSaveMediaAsset?: (asset: MediaAsset) => void
+  onShellLevel?: (level: 'landing' | 'funnel' | 'editor') => void
 }) {
   const option = ATELIER_CREATION_OPTIONS.find((item) => item.id === type) ?? ATELIER_CREATION_OPTIONS[0]
   const mediaType = type === 'images' || type === 'video' ? type : null
+  const tools = mediaType === 'images' ? IMAGE_EDIT_TOOLS : (mediaType === 'video' ? VIDEO_EDIT_TOOLS : [])
+  const [activeToolId, setActiveToolId] = useState(tools[0]?.id ?? '')
   const [inputFileSrc, setInputFileSrc] = useState<string | null>(null)
   const [inputFileName, setInputFileName] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const promptInputRef = useRef<HTMLInputElement>(null)
   const projectCreatedRef = useRef(false)
+
+  useEffect(() => {
+    onShellLevel?.('editor')
+    return () => onShellLevel?.('funnel')
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    setActiveToolId(tools[0]?.id ?? '')
+  }, [mediaType]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!initialImageSrc || !mediaType || !onProjectGenerated) return
@@ -94,6 +108,7 @@ export function AtelierMediaCreationPanel({
     canGenerate,
     handleGenerate,
     handleSaveResult,
+    handleDeleteAsset,
     stepLightbox,
   } = useAtelierMediaCreator({
     mediaType,
@@ -106,6 +121,216 @@ export function AtelierMediaCreationPanel({
   const canvasRef = useRef<HTMLDivElement>(null)
   const isDragging = useRef(false)
   const dragStart = useRef({ mx: 0, my: 0, ox: 0, oy: 0 })
+
+  // ── Masker ────────────────────────────────────────────────────────────────
+  const maskCanvasRef = useRef<HTMLCanvasElement>(null)
+  const maskCursorRef = useRef<HTMLDivElement>(null)
+  const maskDrawingRef = useRef(false)
+  const lastMaskPos = useRef<{ x: number; y: number } | null>(null)
+  const maskHistory = useRef<ImageData[]>([])
+  const maskRedo = useRef<ImageData[]>([])
+  const [brushSize, setBrushSize] = useState(30)
+  const [hasMask, setHasMask] = useState(false)
+  const [maskHistoryLen, setMaskHistoryLen] = useState(0)
+  const [maskRedoLen, setMaskRedoLen] = useState(0)
+  const [maskCursorVisible, setMaskCursorVisible] = useState(false)
+  const isMaskMode = activeToolId === 'mask'
+
+  // Ref-callback: fires synchronously when canvas mounts — guarantees 1:1 pixel mapping before any drawing.
+  const initMaskCanvas = useCallback((canvas: HTMLCanvasElement | null) => {
+    maskCanvasRef.current = canvas
+    maskHistory.current = []
+    maskRedo.current = []
+    setMaskHistoryLen(0)
+    setMaskRedoLen(0)
+    if (!canvas) return
+    const container = canvasRef.current
+    if (!container) return
+    canvas.width = container.clientWidth
+    canvas.height = container.clientHeight
+    canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+    setHasMask(false)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    // Clear mask when the active image changes
+    const canvas = maskCanvasRef.current
+    if (!canvas) return
+    canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+    maskHistory.current = []
+    maskRedo.current = []
+    setMaskHistoryLen(0)
+    setMaskRedoLen(0)
+    setHasMask(false)
+  }, [activeResultIndex])
+
+  // Keep cursor div size in sync when brush size slider changes
+  useEffect(() => {
+    const cursor = maskCursorRef.current
+    if (!cursor) return
+    cursor.style.width = `${brushSize}px`
+    cursor.style.height = `${brushSize}px`
+  }, [brushSize])
+
+  function clearMask() {
+    const canvas = maskCanvasRef.current
+    if (!canvas) return
+    canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+    maskHistory.current = []
+    maskRedo.current = []
+    setMaskHistoryLen(0)
+    setMaskRedoLen(0)
+    setHasMask(false)
+  }
+
+  function saveMaskSnapshot() {
+    const canvas = maskCanvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    maskHistory.current.push(ctx.getImageData(0, 0, canvas.width, canvas.height))
+    if (maskHistory.current.length > 30) maskHistory.current.shift()
+    // New stroke clears redo
+    maskRedo.current = []
+    setMaskHistoryLen(maskHistory.current.length)
+    setMaskRedoLen(0)
+  }
+
+  function getCurrentSnapshot(): ImageData | null {
+    const canvas = maskCanvasRef.current
+    if (!canvas) return null
+    return canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
+  }
+
+  function applySnapshot(ctx: CanvasRenderingContext2D, snapshot: ImageData | undefined) {
+    if (snapshot) {
+      ctx.putImageData(snapshot, 0, 0)
+      setHasMask(snapshot.data.some((v, i) => i % 4 === 3 && v > 10))
+    } else {
+      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height)
+      setHasMask(false)
+    }
+  }
+
+  // Stable refs so keyboard listener always calls latest version
+  const undoMaskFn = useRef<() => void>(() => {})
+  const redoMaskFn = useRef<() => void>(() => {})
+
+  function undoMask() {
+    const canvas = maskCanvasRef.current
+    if (!canvas || maskHistory.current.length === 0) return
+    const current = getCurrentSnapshot()
+    if (current) { maskRedo.current.push(current); setMaskRedoLen(maskRedo.current.length) }
+    const prev = maskHistory.current.pop()
+    setMaskHistoryLen(maskHistory.current.length)
+    applySnapshot(canvas.getContext('2d')!, prev)
+  }
+
+  function redoMask() {
+    const canvas = maskCanvasRef.current
+    if (!canvas || maskRedo.current.length === 0) return
+    const current = getCurrentSnapshot()
+    if (current) { maskHistory.current.push(current); setMaskHistoryLen(maskHistory.current.length) }
+    const next = maskRedo.current.pop()
+    setMaskRedoLen(maskRedo.current.length)
+    applySnapshot(canvas.getContext('2d')!, next)
+  }
+
+  undoMaskFn.current = undoMask
+  redoMaskFn.current = redoMask
+
+  useEffect(() => {
+    if (!isMaskMode) return
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) redoMaskFn.current()
+        else undoMaskFn.current()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [isMaskMode])
+
+  function exportMaskDataUrl(): string | null {
+    const canvas = maskCanvasRef.current
+    if (!canvas || !hasMask) return null
+    const out = document.createElement('canvas')
+    out.width = canvas.width
+    out.height = canvas.height
+    const ctx = out.getContext('2d')!
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, out.width, out.height)
+    const srcData = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
+    const outData = ctx.createImageData(canvas.width, canvas.height)
+    for (let i = 0; i < srcData.data.length; i += 4) {
+      const v = srcData.data[i + 3] > 10 ? 255 : 0
+      outData.data[i] = v; outData.data[i + 1] = v; outData.data[i + 2] = v; outData.data[i + 3] = 255
+    }
+    ctx.putImageData(outData, 0, 0)
+    return out.toDataURL('image/png')
+  }
+
+  function getMaskCoords(e: React.PointerEvent<HTMLCanvasElement>) {
+    const canvas = maskCanvasRef.current!
+    const rect = canvas.getBoundingClientRect()
+    // canvas.width === container.clientWidth so scale is always 1:1
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (canvas.height / rect.height),
+    }
+  }
+
+  function moveMaskCursor(e: React.PointerEvent<HTMLCanvasElement>) {
+    const cursor = maskCursorRef.current
+    if (!cursor) return
+    // Fixed-position div: top-left corner offset by half brushSize so circle center = pointer
+    cursor.style.left = `${e.clientX - brushSize / 2}px`
+    cursor.style.top = `${e.clientY - brushSize / 2}px`
+  }
+
+  function paintMask(x: number, y: number) {
+    const canvas = maskCanvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')!
+    const last = lastMaskPos.current
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.fillStyle = 'rgba(255, 80, 0, 0.60)'
+    ctx.strokeStyle = 'rgba(255, 80, 0, 0.60)'
+    ctx.lineWidth = brushSize
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    if (last) {
+      ctx.beginPath()
+      ctx.moveTo(last.x, last.y)
+      ctx.lineTo(x, y)
+      ctx.stroke()
+    }
+    ctx.beginPath()
+    ctx.arc(x, y, brushSize / 2, 0, Math.PI * 2)
+    ctx.fill()
+    lastMaskPos.current = { x, y }
+    setHasMask(true)
+  }
+
+  function onMaskPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    saveMaskSnapshot()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    maskDrawingRef.current = true
+    moveMaskCursor(e)
+    paintMask(...Object.values(getMaskCoords(e)) as [number, number])
+  }
+
+  function onMaskPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+    moveMaskCursor(e)
+    if (!maskDrawingRef.current) return
+    paintMask(...Object.values(getMaskCoords(e)) as [number, number])
+  }
+
+  function onMaskPointerUp() {
+    maskDrawingRef.current = false
+    lastMaskPos.current = null
+  }
 
   useEffect(() => {
     if (lightboxIndex == null) return
@@ -130,7 +355,8 @@ export function AtelierMediaCreationPanel({
   }, [activeResultIndex])
 
   function handleGenerateWithFocus(event: React.FormEvent<HTMLFormElement>) {
-    void handleGenerate(event).finally(() => {
+    const maskDataUrl = isMaskMode && hasMask ? exportMaskDataUrl() : null
+    void handleGenerate(event, maskDataUrl ?? undefined).finally(() => {
       requestAnimationFrame(() => promptInputRef.current?.focus())
     })
     requestAnimationFrame(() => promptInputRef.current?.focus())
@@ -166,6 +392,7 @@ export function AtelierMediaCreationPanel({
     if (!el) return
     const onMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return
+      if (isMaskMode) return
       isDragging.current = true
       dragStart.current = { mx: e.clientX, my: e.clientY, ox: 0, oy: 0 }
       setCanvasOffset(prev => {
@@ -209,6 +436,42 @@ export function AtelierMediaCreationPanel({
 
   return (
     <div className="relative z-10 flex h-full w-full overflow-hidden">
+      {/* Brush cursor — fixed overlay, exactly brushSize px, center = pointer */}
+      {isMaskMode && (
+        <div
+          ref={maskCursorRef}
+          className="pointer-events-none fixed z-[9999] rounded-full border-2 border-orange-400 bg-orange-500/25"
+          style={{
+            width: brushSize,
+            height: brushSize,
+            left: 0,
+            top: 0,
+            opacity: maskCursorVisible ? 1 : 0,
+            transition: 'opacity 0.1s',
+          }}
+        />
+      )}
+      {/* Left vertical tool toolbar */}
+      <div className="flex w-14 flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0f0f0f] py-3">
+        {tools.map((tool) => (
+          <LeftToolTooltip key={tool.id} label={tool.label}>
+            <button
+              type="button"
+              onClick={() => setActiveToolId(tool.id)}
+              aria-label={tool.label}
+              aria-pressed={tool.id === activeToolId}
+              className={[
+                'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl transition-colors',
+                tool.id === activeToolId
+                  ? 'bg-[#facc15]/15 text-[#facc15]'
+                  : 'text-white/35 hover:bg-white/[0.06] hover:text-white/70',
+              ].join(' ')}
+            >
+              <AtelierEditToolIcon icon={tool.icon} />
+            </button>
+          </LeftToolTooltip>
+        ))}
+      </div>
       <section className="relative flex min-w-0 flex-1 flex-col">
       <div ref={canvasRef} className="relative min-h-0 flex-1 overflow-hidden flex items-center justify-center select-none cursor-grab active:cursor-grabbing">
         {!activeItem && !generating && (
@@ -239,6 +502,7 @@ export function AtelierMediaCreationPanel({
                   className={['max-h-full max-w-full object-contain', generating ? 'opacity-30' : ''].join(' ')}
                   style={{ maxHeight: 'calc(100vh - 220px)' }}
                   draggable={false}
+                  onError={(e) => console.error('[AtelierMedia] img load failed, src:', (e.target as HTMLImageElement).src)}
                 />
               ) : (
                 <video
@@ -249,6 +513,20 @@ export function AtelierMediaCreationPanel({
                 />
               )}
             </div>
+
+            {/* Mask canvas — only active when masker tool is selected */}
+            {isMaskMode && mediaType === 'images' && (
+              <canvas
+                ref={initMaskCanvas}
+                className="absolute inset-0 h-full w-full"
+                style={{ cursor: 'none', touchAction: 'none' }}
+                onPointerDown={onMaskPointerDown}
+                onPointerMove={onMaskPointerMove}
+                onPointerUp={onMaskPointerUp}
+                onPointerEnter={() => setMaskCursorVisible(true)}
+                onPointerLeave={() => { setMaskCursorVisible(false); onMaskPointerUp() }}
+              />
+            )}
 
             {generating && (
               <div className="absolute inset-0 flex items-center justify-center">
@@ -262,14 +540,24 @@ export function AtelierMediaCreationPanel({
             )}
 
             {!generating && mediaType === 'images' && (
-              <button
-                type="button"
-                onClick={() => handleSaveResult(activeItem.src)}
-                className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.14] bg-black/35 text-white/70 opacity-0 shadow-lg backdrop-blur-md transition-opacity hover:bg-black/60 hover:text-white group-hover:opacity-100 [div:hover>&]:opacity-100"
-                title="Afbeelding opslaan"
-              >
-                <AtelierSaveImageIcon />
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleSaveResult(activeItem.src)}
+                  className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.14] bg-black/35 text-white/70 opacity-0 shadow-lg backdrop-blur-md transition-opacity hover:bg-black/60 hover:text-white group-hover:opacity-100 [div:hover>&]:opacity-100"
+                  title="Afbeelding opslaan"
+                >
+                  <AtelierSaveImageIcon />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteAsset(activeItem.id)}
+                  className="absolute right-16 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.14] bg-black/35 text-white/70 opacity-0 shadow-lg backdrop-blur-md transition-opacity hover:bg-black/60 hover:text-red-400 group-hover:opacity-100 [div:hover>&]:opacity-100"
+                  title="Afbeelding verwijderen"
+                >
+                  <CloseTinyIcon />
+                </button>
+              </>
             )}
           </div>
         )}
@@ -280,18 +568,27 @@ export function AtelierMediaCreationPanel({
           {resultItems.map((item, i) => {
             const isActive = i === (activeResultIndex ?? resultItems.length - 1)
             return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setActiveResultIndex(i)}
-                className={['h-11 w-11 flex-shrink-0 overflow-hidden rounded-lg border transition-all', isActive ? 'border-white/50 opacity-100' : 'border-white/[0.08] opacity-50 hover:opacity-75'].join(' ')}
-              >
-                {mediaType === 'images' ? (
-                  <img src={item.src} alt="" className="h-full w-full object-cover" draggable={false} />
-                ) : (
-                  <video src={item.src} className="h-full w-full object-cover" />
-                )}
-              </button>
+              <div key={item.id} className="group/thumb relative flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setActiveResultIndex(i)}
+                  className={['h-11 w-11 overflow-hidden rounded-lg border transition-all', isActive ? 'border-white/50 opacity-100' : 'border-white/[0.08] opacity-50 hover:opacity-75'].join(' ')}
+                >
+                  {mediaType === 'images' ? (
+                    <img src={item.src} alt="" className="h-full w-full object-cover" draggable={false} />
+                  ) : (
+                    <video src={item.src} className="h-full w-full object-cover" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); handleDeleteAsset(item.id) }}
+                  className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-white/[0.20] bg-[#111] text-white/60 opacity-0 transition-opacity hover:text-red-400 group-hover/thumb:opacity-100"
+                  title="Verwijderen"
+                >
+                  <CloseTinyIcon />
+                </button>
+              </div>
             )
           })}
         </div>
@@ -495,7 +792,21 @@ export function AtelierMediaCreationPanel({
         )}
       </div>
       </section>
-      <AtelierMediaEditSidebar mediaType={mediaType} projectsPanel={projectsPanel} currentImageSrc={activeItem?.src} />
+      <AtelierMediaEditSidebar
+        mediaType={mediaType}
+        projectsPanel={projectsPanel}
+        currentImageSrc={activeItem?.src}
+        activeToolId={activeToolId}
+        onToolSelect={setActiveToolId}
+        brushSize={brushSize}
+        onBrushSizeChange={setBrushSize}
+        hasMask={hasMask}
+        onClearMask={clearMask}
+        onUndoMask={undoMask}
+        onRedoMask={redoMask}
+        maskHistoryLen={maskHistoryLen}
+        maskRedoLen={maskRedoLen}
+      />
     </div>
   )
 }
@@ -540,36 +851,48 @@ function AtelierMediaEditSidebar({
   mediaType,
   projectsPanel,
   currentImageSrc,
+  activeToolId,
+  onToolSelect,
+  brushSize,
+  onBrushSizeChange,
+  hasMask,
+  onClearMask,
+  onUndoMask,
+  onRedoMask,
+  maskHistoryLen,
+  maskRedoLen,
 }: {
   mediaType: AtelierMediaProjectType
   projectsPanel?: AtelierProjectsPanelConfig
   currentImageSrc?: string
+  activeToolId?: string
+  onToolSelect?: (id: string) => void
+  brushSize?: number
+  onBrushSizeChange?: (size: number) => void
+  hasMask?: boolean
+  onClearMask?: () => void
+  onUndoMask?: () => void
+  onRedoMask?: () => void
+  maskHistoryLen?: number
+  maskRedoLen?: number
 }) {
   const tools = mediaType === 'images' ? IMAGE_EDIT_TOOLS : VIDEO_EDIT_TOOLS
-  const [activeToolId, setActiveToolId] = useState(tools[0]?.id ?? '')
-
-  useEffect(() => {
-    setActiveToolId(tools[0]?.id ?? '')
-  }, [mediaType])
-
   const activeTool = tools.find((tool) => tool.id === activeToolId) ?? tools[0]
 
   return (
     <AtelierRightPanel projectsPanel={projectsPanel} convertContent={<AdToHtmlToolPanel currentImageSrc={currentImageSrc} />}>
-      <div className="px-4 pb-2 pt-4">
-        <div className="grid grid-cols-4 gap-1.5">
-          {tools.map((tool) => (
-            <AtelierToolGridButton
-              key={tool.id}
-              tool={tool}
-              active={tool.id === activeToolId}
-              onClick={() => setActiveToolId(tool.id)}
-            />
-          ))}
-        </div>
-      </div>
-      <div className="mx-4 mt-4 border-t border-white/[0.06]" />
-      <AtelierToolDetailPanel tool={activeTool} mediaType={mediaType} />
+      <AtelierToolDetailPanel
+        tool={activeTool}
+        mediaType={mediaType}
+        brushSize={brushSize}
+        onBrushSizeChange={onBrushSizeChange}
+        hasMask={hasMask}
+        onClearMask={onClearMask}
+        onUndoMask={onUndoMask}
+        onRedoMask={onRedoMask}
+        maskHistoryLen={maskHistoryLen}
+        maskRedoLen={maskRedoLen}
+      />
     </AtelierRightPanel>
   )
 }
@@ -817,11 +1140,28 @@ export function AdToHtmlToolPanel({ currentImageSrc }: { currentImageSrc?: strin
 function AtelierToolDetailPanel({
   tool,
   mediaType,
+  brushSize,
+  onBrushSizeChange,
+  hasMask,
+  onClearMask,
+  onUndoMask,
+  onRedoMask,
+  maskHistoryLen,
+  maskRedoLen,
 }: {
   tool?: AtelierEditTool
   mediaType: AtelierMediaProjectType
+  brushSize?: number
+  onBrushSizeChange?: (size: number) => void
+  hasMask?: boolean
+  onClearMask?: () => void
+  onUndoMask?: () => void
+  onRedoMask?: () => void
+  maskHistoryLen?: number
+  maskRedoLen?: number
 }) {
   if (!tool) return null
+
   return (
     <div className="px-5 py-5">
       <div className="mb-4 flex items-center gap-3">
@@ -833,12 +1173,90 @@ function AtelierToolDetailPanel({
           <p className="text-xs leading-relaxed text-white/35">{tool.description}</p>
         </div>
       </div>
-      <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
-        <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Status</p>
-        <p className="mt-3 text-sm leading-relaxed text-white/42">
-          UI klaar. Deze optie wordt later gekoppeld aan de {mediaType === 'images' ? 'beeldbewerking' : 'videobewerking'}.
-        </p>
-      </div>
+
+      {tool.id === 'mask' && mediaType === 'images' ? (
+        <div className="space-y-3">
+          {/* Brush size */}
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Penseelgrootte</p>
+              <span className="text-xs font-semibold text-white/55">{brushSize ?? 30}px</span>
+            </div>
+            <input
+              type="range"
+              min={5}
+              max={120}
+              step={1}
+              value={brushSize ?? 30}
+              onChange={(e) => onBrushSizeChange?.(Number(e.target.value))}
+              className="w-full accent-[#facc15]"
+            />
+            <div className="mt-3 flex items-center justify-between text-[10px] text-white/25">
+              <span>Fijn</span>
+              <span>Breed</span>
+            </div>
+          </div>
+
+          {/* Status + clear */}
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <div className="flex items-center gap-2.5">
+              <div className={['h-2 w-2 flex-shrink-0 rounded-full', hasMask ? 'bg-orange-400' : 'bg-white/[0.15]'].join(' ')} />
+              <p className="text-xs text-white/50">
+                {hasMask ? 'Masker getekend — typ een instructie en druk op verzenden' : 'Teken op de afbeelding om een masker aan te maken'}
+              </p>
+            </div>
+            {hasMask && (
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={onUndoMask}
+                  disabled={!maskHistoryLen}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-white/[0.08] px-3 py-2 text-xs text-white/40 transition-colors hover:border-white/[0.15] hover:text-white/70 disabled:opacity-30"
+                  title="Stap terug (⌘Z)"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 7v6h6" /><path d="M3 13C5 7.5 10 4 16 5a9 9 0 0 1 5 8" />
+                  </svg>
+                  {maskHistoryLen ? maskHistoryLen : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={onRedoMask}
+                  disabled={!maskRedoLen}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-white/[0.08] px-3 py-2 text-xs text-white/40 transition-colors hover:border-white/[0.15] hover:text-white/70 disabled:opacity-30"
+                  title="Opnieuw (⌘⇧Z)"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 7v6h-6" /><path d="M21 13C19 7.5 14 4 8 5a9 9 0 0 0-5 8" />
+                  </svg>
+                  {maskRedoLen ? maskRedoLen : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={onClearMask}
+                  className="rounded-xl border border-white/[0.08] px-3 py-2 text-xs text-white/40 transition-colors hover:border-red-500/30 hover:text-red-400"
+                  title="Alles wissen"
+                >
+                  Wis
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-white/[0.06] bg-[#0f0f0f] p-3">
+            <p className="text-[10px] leading-relaxed text-white/25">
+              Teken het gebied dat je wilt aanpassen. Typ daarna een instructie, bijv. <span className="text-white/40">"verwijder dit element"</span> of <span className="text-white/40">"maak dit blauw"</span>.
+            </p>
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+          <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Status</p>
+          <p className="mt-3 text-sm leading-relaxed text-white/42">
+            UI klaar. Deze optie wordt later gekoppeld aan de {mediaType === 'images' ? 'beeldbewerking' : 'videobewerking'}.
+          </p>
+        </div>
+      )}
     </div>
   )
 }

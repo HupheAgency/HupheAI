@@ -131,8 +131,8 @@ const MODULES: ModuleConfig[] = [
   },
 ]
 
-function formatCredits(cents: number): string {
-  return new Intl.NumberFormat('nl-NL').format(Math.max(0, cents) * 10)
+function formatCredits(millicredits: number): string {
+  return new Intl.NumberFormat('nl-NL').format(Math.floor(Math.max(0, millicredits) / 100))
 }
 
 interface Props {
@@ -258,8 +258,20 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
       setTopUpOpen(true)
     }
 
+    function onCreditsPaid() {
+      setTopUpOpen(false)
+      setTopUpError('')
+      // Ververs saldo na korte vertraging zodat webhook tijd heeft om te verwerken
+      setTimeout(refreshWallet, 2000)
+      setTimeout(refreshWallet, 6000)
+    }
+
     window.addEventListener(CREDITS_REQUIRED_EVENT, onCreditsRequired)
-    return () => window.removeEventListener(CREDITS_REQUIRED_EVENT, onCreditsRequired)
+    window.addEventListener('huphe:credits-paid', onCreditsPaid)
+    return () => {
+      window.removeEventListener(CREDITS_REQUIRED_EVENT, onCreditsRequired)
+      window.removeEventListener('huphe:credits-paid', onCreditsPaid)
+    }
   }, [])
 
   async function handleCheckout(amountCents: number) {
@@ -835,8 +847,8 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
 
       {/* Body: sidebar + content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar pill — hidden when Atelier editor is active */}
-        {!(active === 'atelier' && atelierShellLevel === 'editor') && <div className="flex-shrink-0 flex flex-col items-center justify-center pl-5 pr-3 relative z-20">
+        {/* Sidebar pill — hidden when Atelier editor is active or Typewriter is open */}
+        {!(active === 'atelier' && atelierShellLevel === 'editor') && active !== 'typewriter' && <div className="flex-shrink-0 flex flex-col items-center justify-center pl-5 pr-3 relative z-20">
           <nav
             className="bg-white rounded-[28px] flex flex-col items-center gap-0.5 py-3 px-2 w-[64px]"
             style={{ boxShadow: '0 24px 70px rgba(0,0,0,0.38), 0 0 0 1px rgba(255,255,255,0.92)' }}

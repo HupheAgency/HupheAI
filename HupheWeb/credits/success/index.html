@@ -76,6 +76,12 @@
       width: 100%;
     }
     .btn:hover { background: #fde047; }
+    .hint {
+      color: rgba(244,241,232,0.4);
+      font-size: 13px;
+      margin-bottom: 16px;
+      min-height: 20px;
+    }
     .wordmark {
       margin-top: 32px;
       font-family: "Baloo 2", sans-serif;
@@ -96,18 +102,25 @@
     <h1>Betaling geslaagd</h1>
     <p class="subtitle">Je credits worden bijgeschreven op je account.</p>
     <p class="note">Dit duurt meestal minder dan een minuut. Je kunt het saldo controleren via Instellingen in de app.</p>
-    <a href="hupheai://" class="btn" id="open-btn">Terug naar HupheAI</a>
+    <p class="hint" id="hint">HupheAI wordt zo geopend…</p>
+    <a href="hupheai://" class="btn" id="open-btn">Open HupheAI</a>
     <p class="wordmark">Huphe<span>AI</span></p>
   </div>
   <script>
-    // If the deep link doesn't work (e.g. browser blocks it), fall back to landing page after a moment
-    const btn = document.getElementById('open-btn');
-    btn.addEventListener('click', function(e) {
-      e.preventDefault();
-      window.location.href = 'hupheai://';
+    // Auto-redirect on load — browser zal vragen HupheAI te openen
+    window.addEventListener('load', function() {
+      window.location.href = 'hupheai://credits/success';
+
+      // Na 2 seconden: als de app niet open ging, toon knop met uitleg
       setTimeout(function() {
-        window.location.href = '/';
-      }, 1500);
+        var hint = document.getElementById('hint');
+        if (hint) hint.textContent = 'Klik op "Sta toe" of "HupheAI openen" in de popup van je browser.';
+      }, 2000);
+    });
+
+    document.getElementById('open-btn').addEventListener('click', function(e) {
+      e.preventDefault();
+      window.location.href = 'hupheai://credits/success';
     });
   </script>
 </body>

@@ -210,6 +210,13 @@ export default function App() {
       const url = (e as CustomEvent<string>).detail
       try {
         const parsed = new URL(url)
+
+        // Credits betaald — sluit modal en ververs saldo
+        if (parsed.hostname === 'credits' || parsed.pathname?.startsWith('/credits')) {
+          window.dispatchEvent(new CustomEvent('huphe:credits-paid'))
+          return
+        }
+
         const code = parsed.searchParams.get('code')
         if (code) {
           await client.auth.exchangeCodeForSession(code)

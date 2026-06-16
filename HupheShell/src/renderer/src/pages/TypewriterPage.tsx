@@ -45,7 +45,8 @@ import { IcoPanelToggle } from '../components/Icons'
 import { PanelTabBar, RIGHT_PANEL_STYLE } from '../components/RightPanelShell'
 import { sanitizeHtml } from '../lib/html-sanitize'
 
-type RightTab = 'edit' | 'files' | 'comments' | 'history'
+type RightTab = 'edit' | 'link' | 'files' | 'comments' | 'history'
+type ReadingSize = 'small' | 'medium' | 'large'
 
 const CommentMark = Mark.create({
   name: 'comment',
@@ -233,7 +234,8 @@ export default function TypewriterPage({ joinDocId }: Props) {
   const [activeId, setActiveId] = useState('')
   const [selectedText, setSelectedText] = useState('')
   const [status, setStatus] = useState('')
-  const [rightTab, setRightTab] = useState<RightTab>('edit')
+  const [rightTab, setRightTab] = useState<RightTab>('link')
+  const [readingSize, setReadingSize] = useState<ReadingSize>('medium')
   const [rightPanelOpen, setRightPanelOpen] = useState(true)
   const [rightPanelWidth, setRightPanelWidth] = useState(RIGHT_PANEL_DEFAULT_WIDTH)
   const [rightPanelResizing, setRightPanelResizing] = useState(false)
@@ -373,6 +375,8 @@ export default function TypewriterPage({ joinDocId }: Props) {
       .tw-comment-mark[data-resolved="true"] { background: transparent; border-bottom: 2px solid rgba(255,255,255,0.12); }
       .collaboration-cursor__caret { border-left: 2px solid; border-right: 0; margin-left: -1px; margin-right: -1px; pointer-events: none; position: relative; word-break: normal; }
       .collaboration-cursor__label { border-radius: 3px 3px 3px 0; color: #fff; font-size: 11px; font-weight: 600; left: -1px; line-height: 1.3; padding: 2px 5px; position: absolute; top: -1.5em; user-select: none; white-space: nowrap; pointer-events: none; }
+      .tw-reading-small .ProseMirror { font-size: 13px; line-height: 1.65; }
+      .tw-reading-large .ProseMirror { font-size: 20px; line-height: 1.75; }
     `
     document.head.appendChild(style)
     return () => {
@@ -1155,9 +1159,9 @@ export default function TypewriterPage({ joinDocId }: Props) {
   function startTextLink(text: string) {
     setPendingLink({ text })
     setSelectedText(text)
-    setRightTab('files')
+    setRightTab('link')
     setContextMenu(null)
-    setStatus('Sleep de koppeling naar een live document')
+    setStatus('')
   }
 
   const linkTargets = useMemo<TypewriterLinkTarget[]>(() => {
@@ -1255,6 +1259,18 @@ export default function TypewriterPage({ joinDocId }: Props) {
     setStatus(role === 'document-text' ? 'Tekstvlak losgekoppeld' : `Tekstvlak: ${ROLE_LABELS[role] ?? role}`)
   }
 
+  function replaceLinkedSelectionText(selectionId: string, newText: string) {
+    const currentDocument = getCurrentActiveDocument()
+    if (!currentDocument || !newText.trim()) return
+    persistDocument({
+      ...currentDocument,
+      linkedSelections: currentDocument.linkedSelections.map((selection) =>
+        selection.id === selectionId ? { ...selection, text: newText.trim() } : selection
+      ),
+    })
+    setStatus('Gekoppelde tekst bijgewerkt')
+  }
+
   if (!activeDocument) return null
   const effectiveRightPanelWidth = rightPanelWidth
 
@@ -1262,8 +1278,16 @@ export default function TypewriterPage({ joinDocId }: Props) {
     <main className={['h-full overflow-hidden bg-[#0a0a0a] text-white', focusMode ? 'typewriter-focus-mode' : ''].join(' ')} onClick={() => setContextMenu(null)}>
       <div
         className={['grid h-full', rightPanelResizing ? '' : 'transition-[grid-template-columns] duration-300'].join(' ')}
-        style={{ gridTemplateColumns: focusMode ? 'minmax(0, 1fr)' : `minmax(0, 1fr) ${rightPanelOpen ? rightPanelWidth : RIGHT_PANEL_COLLAPSED_WIDTH}px` }}
+        style={{ gridTemplateColumns: focusMode ? 'minmax(0, 1fr)' : `56px minmax(0, 1fr) ${rightPanelOpen ? rightPanelWidth : RIGHT_PANEL_COLLAPSED_WIDTH}px` }}
       >
+        {/* ── Left formatting toolbar ─────────────────── */}
+        {!focusMode && <WritingToolbar
+          activeFormats={activeFormats}
+          readingSize={readingSize}
+          onFormat={applyFormat}
+          onBeforeAction={saveEditorSelection}
+          onReadingSizeChange={setReadingSize}
+        />}
         <section className="flex min-w-0 flex-col overflow-hidden">
           {!focusMode && (
           <header className="flex-shrink-0 bg-[#181818]">
@@ -1320,52 +1344,48 @@ export default function TypewriterPage({ joinDocId }: Props) {
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
               </button>
-              <div className="ml-auto flex flex-shrink-0 items-center gap-2 mb-2 mr-3">
-                <span className="hidden rounded-full bg-white/[0.07] px-3 py-1 text-[11px] text-white/50 lg:inline-flex">
-                  {editorStats.words} woorden · {editorStats.characters} tekens · {editorStats.readingMinutes || 0} min lezen
-                </span>
+              <div className="ml-auto flex flex-shrink-0 items-center gap-1.5 mb-2 mr-3">
+                {editorStats.words > 0 && (
+                  <span className="hidden text-[11px] text-white/30 lg:inline">
+                    {editorStats.words}w
+                  </span>
+                )}
+                <div className="mx-1 h-3 w-px bg-white/[0.10]" />
                 <button
                   type="button"
                   onClick={() => setFindOpen((open) => !open)}
-                  className={['rounded-full px-3 py-1 text-[11px] transition-colors', findOpen ? 'bg-[#facc15]/15 text-[#facc15]' : 'bg-white/[0.07] text-white/50 hover:text-white/80'].join(' ')}
                   title="Zoek en vervang (Cmd+F)"
+                  className={['flex h-7 w-7 items-center justify-center rounded-md transition-colors', findOpen ? 'bg-[#facc15]/15 text-[#facc15]' : 'text-white/40 hover:bg-white/[0.07] hover:text-white/75'].join(' ')}
                 >
-                  Zoek
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                  </svg>
                 </button>
                 <button
                   type="button"
                   onClick={() => setFocusMode(true)}
-                  className="rounded-full bg-white/[0.04] px-3 py-1 text-[11px] text-white/35 transition-colors hover:text-white/70"
                   title="Focus mode (Cmd+Shift+F)"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-white/40 transition-colors hover:bg-white/[0.07] hover:text-white/75"
                 >
-                  Focus
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+                  </svg>
                 </button>
                 <button
                   type="button"
                   onClick={() => setTypewriterScrollEnabled((enabled) => !enabled)}
-                  className={['rounded-full px-3 py-1 text-[11px] transition-colors', typewriterScrollEnabled ? 'bg-[#facc15]/15 text-[#facc15]' : 'bg-white/[0.07] text-white/50 hover:text-white/80'].join(' ')}
-                  title="Typewriter scrolling aan/uit"
+                  title={typewriterScrollEnabled ? 'Typewriter-scroll uitzetten' : 'Typewriter-scroll aanzetten'}
+                  className={['flex h-7 w-7 items-center justify-center rounded-md transition-colors', typewriterScrollEnabled ? 'bg-[#facc15]/12 text-[#facc15]/80' : 'text-white/30 hover:bg-white/[0.06] hover:text-white/60'].join(' ')}
                 >
-                  Midden
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="3" y1="12" x2="21" y2="12"/><polyline points="8 8 12 4 16 8"/><polyline points="16 16 12 20 8 16"/>
+                  </svg>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setParagraphFocusEnabled((enabled) => !enabled)}
-                  className={['rounded-full px-3 py-1 text-[11px] transition-colors', paragraphFocusEnabled ? 'bg-[#facc15]/15 text-[#facc15]' : 'bg-white/[0.07] text-white/50 hover:text-white/80'].join(' ')}
-                  title="Huidige alinea focussen"
-                >
-                  Alinea
-                </button>
-                {status && <span className="rounded-full bg-white/[0.05] px-3 py-1 text-[11px] text-white/35">{status}</span>}
+                <div className="mx-1 h-3 w-px bg-white/[0.10]" />
                 {liveUsers.length > 0 && (
                   <span className="flex items-center gap-1" title={liveUsers.map((u) => u.name).join(', ')}>
-                    {liveUsers.slice(0, 5).map((u, i) => (
-                      <span
-                        key={i}
-                        className="flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold text-white shadow"
-                        style={{ backgroundColor: u.color }}
-                        title={u.name}
-                      >
+                    {liveUsers.slice(0, 4).map((u, i) => (
+                      <span key={i} className="flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold text-white shadow" style={{ backgroundColor: u.color }} title={u.name}>
                         {u.name.slice(0, 1).toUpperCase()}
                       </span>
                     ))}
@@ -1378,27 +1398,18 @@ export default function TypewriterPage({ joinDocId }: Props) {
                       <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
                     </span>
                     Live
-                    <button
-                      type="button"
-                      onClick={() => { navigator.clipboard.writeText(docShareCode); setStatus('Code gekopieerd') }}
-                      className="ml-1 rounded-md bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] font-bold tracking-widest text-emerald-300 transition-colors hover:bg-emerald-500/25"
-                      title="Klik om code te kopiëren"
-                    >
+                    <button type="button" onClick={() => { navigator.clipboard.writeText(docShareCode); setStatus('Code gekopieerd') }} className="ml-1 rounded-md bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] font-bold tracking-widest text-emerald-300 transition-colors hover:bg-emerald-500/25" title="Klik om code te kopiëren">
                       {docShareCode}
                     </button>
                   </span>
                 ) : syncIndicator === 'live' && ownerId ? (
-                  <button
-                    type="button"
-                    onClick={handleGoLive}
-                    disabled={goingLive}
-                    className="flex items-center gap-1.5 rounded-full border border-white/[0.10] bg-white/[0.03] px-3 py-1 text-[11px] text-white/35 transition-colors hover:border-[#facc15]/30 hover:text-[#facc15]/70 disabled:opacity-40"
-                  >
-                    {goingLive ? 'Even wachten…' : '↑ Live zetten'}
+                  <button type="button" onClick={handleGoLive} disabled={goingLive} className="flex items-center gap-1.5 rounded-full border border-white/[0.10] bg-white/[0.03] px-2.5 py-1 text-[11px] text-white/35 transition-colors hover:border-[#facc15]/30 hover:text-[#facc15]/70 disabled:opacity-40">
+                    {goingLive ? '…' : '↑ Live'}
                   </button>
                 ) : syncIndicator === 'syncing' ? (
-                  <span className="text-[11px] text-white/25">Synchroniseren…</span>
+                  <span className="text-[11px] text-white/20">•</span>
                 ) : null}
+                {status && <span className="text-[11px] text-white/30">{status}</span>}
               </div>
             </div>
           </header>
@@ -1439,10 +1450,17 @@ export default function TypewriterPage({ joinDocId }: Props) {
             </div>
           )}
 
-          <div ref={editorScrollRef} className={['flex-1 overflow-y-auto px-7 py-7', focusMode ? 'px-10 py-10' : ''].join(' ')}>
+          <div
+            ref={editorScrollRef}
+            className={[
+              'flex-1 overflow-y-auto px-7 py-7',
+              readingSize === 'small' ? 'tw-reading-small' : readingSize === 'large' ? 'tw-reading-large' : '',
+              focusMode ? 'px-10 py-10' : '',
+            ].join(' ')}
+          >
             <BubbleToolbar
               editor={editor}
-              onStartComment={() => { saveEditorSelection(); setComposingComment(true); setRightTab('edit') }}
+              onStartComment={() => { saveEditorSelection(); setComposingComment(true); setRightTab('link') }}
             />
             <div className={['mx-auto', focusMode ? 'max-w-[920px]' : 'max-w-[860px]'].join(' ')}>
               <div
@@ -1488,10 +1506,9 @@ export default function TypewriterPage({ joinDocId }: Props) {
           <div className={[RIGHT_PANEL_STYLE.contentColumn, rightPanelOpen ? RIGHT_PANEL_STYLE.contentOpen : `${RIGHT_PANEL_STYLE.contentClosed} hidden`].join(' ')}>
             <PanelTabBar
               tabs={[
-                { id: 'edit', label: 'Bewerken' },
-                { id: 'comments', label: threads.length > 0 ? `Opmerkingen (${threads.filter(t => !t.resolved).length || threads.length})` : 'Opmerkingen' },
+                { id: 'link', label: 'Koppelen' },
+                { id: 'comments', label: threads.length > 0 ? `Notities (${threads.filter(t => !t.resolved).length || threads.length})` : 'Notities' },
                 { id: 'history', label: versions.length > 0 ? `Versies (${versions.length})` : 'Versies' },
-                { id: 'files', label: 'Bestanden' },
               ]}
               activeTab={rightTab}
               onTabChange={(id) => setRightTab(id as typeof rightTab)}
@@ -1511,26 +1528,70 @@ export default function TypewriterPage({ joinDocId }: Props) {
               }
             />
             <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-6 pt-4">
-              {rightTab === 'edit' ? (
-                <EditTab
+              {rightTab === 'link' ? (
+                <KoppelenTab
                   activeDocument={activeDocument}
                   documents={documents}
                   selectedText={selectedText}
-                  activeFormats={activeFormats}
-                  outlineItems={outlineItems}
-                  onFormat={applyFormat}
-                  onBeforeToolbarAction={saveEditorSelection}
-                  onJumpToOutlineItem={jumpToOutlineItem}
-                  onStartLink={() => startTextLink(selectedText)}
-                  onUnlinkSelection={unlinkTextSelection}
-                  onUpdateSelectionRole={updateLinkedSelectionRole}
+                  pendingLink={pendingLink}
+                  linkTargets={linkTargets}
                   composingComment={composingComment}
                   pendingCommentBody={pendingCommentBody}
-                  onStartComment={() => { saveEditorSelection(); setComposingComment(true); setRightTab('edit') }}
+                  onStartLink={() => startTextLink(selectedText)}
+                  onPickLinkTarget={(target) => linkTextToTarget(target)}
+                  onCancelLink={() => { setPendingLink(null); setStatus('') }}
+                  onUnlinkSelection={unlinkTextSelection}
+                  onUpdateSelectionRole={updateLinkedSelectionRole}
+                  onStartComment={() => { saveEditorSelection(); setComposingComment(true); setRightTab('link') }}
                   onPendingCommentBodyChange={setPendingCommentBody}
                   onSubmitComment={handleAddComment}
                   onCancelComment={() => { setComposingComment(false); setPendingCommentBody('') }}
-                  onExport={handleExport}
+                  onReplaceSelectionText={(selectionId) => replaceLinkedSelectionText(selectionId, selectedText)}
+                  onJumpToSelection={(text) => {
+                    if (!editor) return
+                    // Search through full document text to handle multi-node selections
+                    const fullText = editor.state.doc.textContent
+                    const textIndex = fullText.indexOf(text)
+                    if (textIndex === -1) return
+
+                    // Map text index back to ProseMirror positions
+                    let charCount = 0
+                    let foundFrom = -1
+                    let foundTo = -1
+                    editor.state.doc.descendants((node, pos) => {
+                      if (foundTo !== -1) return false
+                      if (node.isText && node.text) {
+                        const start = charCount
+                        const end = charCount + node.text.length
+                        if (foundFrom === -1 && textIndex >= start && textIndex < end) {
+                          foundFrom = pos + (textIndex - start)
+                        }
+                        if (foundFrom !== -1) {
+                          const endIndex = textIndex + text.length
+                          if (endIndex <= end) {
+                            foundTo = pos + (endIndex - start)
+                          }
+                        }
+                        charCount += node.text.length
+                      }
+                    })
+                    if (foundFrom === -1 || foundTo === -1) return
+
+                    editor.commands.setTextSelection({ from: foundFrom, to: foundTo })
+                    editor.commands.focus()
+
+                    // Scroll the outer container so the selection lands in view
+                    requestAnimationFrame(() => {
+                      const { node } = editor.view.domAtPos(foundFrom)
+                      const el = node instanceof Element ? node : node.parentElement
+                      const container = editorScrollRef.current
+                      if (!el || !container) return
+                      const containerRect = container.getBoundingClientRect()
+                      const elRect = el.getBoundingClientRect()
+                      const targetScrollTop = container.scrollTop + elRect.top - containerRect.top - containerRect.height / 2 + elRect.height / 2
+                      container.scrollTo({ top: targetScrollTop, behavior: 'smooth' })
+                    })
+                  }}
                 />
               ) : rightTab === 'comments' ? (
                 <CommentsTab
@@ -1550,48 +1611,12 @@ export default function TypewriterPage({ joinDocId }: Props) {
                     el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
                   }}
                 />
-              ) : rightTab === 'history' ? (
+              ) : (
                 <HistoryTab
                   versions={versions}
                   saving={savingSnapshot}
                   onSave={handleSaveSnapshot}
                   onRestore={handleRestoreVersion}
-                />
-              ) : (
-                <FilesTab
-                  documents={documents}
-                  activeDocument={activeDocument}
-                  targets={linkTargets}
-                  pendingLink={pendingLink}
-                  onSelectDocument={(document) => {
-                    saveEditorContent()
-                    syncDocuments(loadTypewriterDocuments(), document.id)
-                    setOpenDocIds((prev) =>
-                      prev.includes(document.id) ? prev : [...prev, document.id]
-                    )
-                    setSelectedText('')
-                    setStatus('')
-                  }}
-                  onArchiveDocument={(docId) => {
-                    if (documents.length <= 1) return
-                    const allAfterArchive = archiveTypewriterDocument(docId)
-                    const archived = allAfterArchive.find((d) => d.id === docId)
-                    if (archived && ownerId) pushDocumentToSupabase(archived, ownerId)
-                    syncDocuments(allAfterArchive.filter((d) => !d.deletedAt))
-                    setOpenDocIds((prev) => prev.filter((id) => id !== docId))
-                    setSelectedText('')
-                    setStatus('Document gearchiveerd')
-                  }}
-                  onRenameDocument={(docId, newTitle) => {
-                    const doc = documentsRef.current.find((d) => d.id === docId)
-                    if (!doc) return
-                    const updated = { ...doc, title: newTitle, updatedAt: new Date().toISOString() }
-                    const nextDocs = upsertTypewriterDocument(updated).filter((d) => !d.deletedAt)
-                    documentsRef.current = nextDocs
-                    setDocuments(nextDocs)
-                  }}
-                  onDragStart={() => setStatus('Sleep naar een live document')}
-                  onDropLink={linkTextToTarget}
                 />
               )}
             </div>
@@ -1649,6 +1674,121 @@ export default function TypewriterPage({ joinDocId }: Props) {
     </main>
   )
 }
+
+// ─── WritingToolbar (left vertical bar) ──────────────────────────────────────
+
+function WritingToolbar({
+  activeFormats,
+  readingSize,
+  onFormat,
+  onBeforeAction,
+  onReadingSizeChange,
+}: {
+  activeFormats: Set<string>
+  readingSize: ReadingSize
+  onFormat: (command: string, value?: string) => void
+  onBeforeAction: () => void
+  onReadingSizeChange: (s: ReadingSize) => void
+}) {
+  function Btn({ title, active = false, onClick, children }: { title: string; active?: boolean; onClick: () => void; children: React.ReactNode }) {
+    return (
+      <button
+        type="button"
+        title={title}
+        onClick={() => { onBeforeAction(); onClick() }}
+        className={[
+          'flex items-center justify-center rounded-xl border p-2 w-full transition-colors',
+          active
+            ? 'border-[#facc15]/40 bg-[#facc15]/12 text-[#facc15]'
+            : 'border-transparent text-white/40 hover:border-white/[0.10] hover:bg-white/[0.05] hover:text-white/75',
+        ].join(' ')}
+      >
+        {children}
+      </button>
+    )
+  }
+
+  function Sep() {
+    return <div className="w-full h-px bg-white/[0.07] my-px" />
+  }
+
+  return (
+    <aside className="flex h-full w-14 flex-shrink-0 flex-col items-center border-r border-white/[0.06] bg-[#111] overflow-y-auto py-2 px-1.5 gap-px">
+      {/* Tekststijl */}
+      <Btn title="Bold (Cmd+B)" active={activeFormats.has('bold')} onClick={() => onFormat('bold')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/></svg>
+      </Btn>
+      <Btn title="Italic (Cmd+I)" active={activeFormats.has('italic')} onClick={() => onFormat('italic')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/></svg>
+      </Btn>
+      <Btn title="Underline (Cmd+U)" active={activeFormats.has('underline')} onClick={() => onFormat('underline')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 3v7a6 6 0 0 0 6 6 6 6 0 0 0 6-6V3"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
+      </Btn>
+      <Btn title="Doorhalen" active={activeFormats.has('strikethrough')} onClick={() => onFormat('strikeThrough')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><path d="M16 6C16 6 14.5 4 12 4C9.5 4 7 5.5 7 8C7 10.5 9 11.5 12 12.5C15 13.5 17 14.5 17 17C17 19.5 14.5 21 12 21C9.5 21 7.5 19 7.5 19"/></svg>
+      </Btn>
+
+      <Sep />
+
+      {/* Alineastijl */}
+      <Btn title="Body tekst" active={false} onClick={() => onFormat('formatBlock', 'p')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="15" y2="18"/></svg>
+      </Btn>
+      <Btn title="Titel (H1)" active={false} onClick={() => onFormat('formatBlock', 'h1')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h16M4 12h8M4 18h8"/></svg>
+      </Btn>
+      <Btn title="Ondertitel (H2)" active={false} onClick={() => onFormat('formatBlock', 'h2')}>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h12M4 12h8M4 18h8"/></svg>
+      </Btn>
+      <Btn title="Kop (H3)" active={false} onClick={() => onFormat('formatBlock', 'h3')}>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h8M4 12h8M4 18h8"/></svg>
+      </Btn>
+
+      <Sep />
+
+      {/* Uitlijning */}
+      <Btn title="Links uitlijnen" active={activeFormats.has('justifyLeft')} onClick={() => onFormat('justifyLeft')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>
+      </Btn>
+      <Btn title="Centreren" active={activeFormats.has('justifyCenter')} onClick={() => onFormat('justifyCenter')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+      </Btn>
+
+      <Sep />
+
+      {/* Lijst */}
+      <Btn title="Opsommingslijst" active={activeFormats.has('insertUnorderedList')} onClick={() => onFormat('insertUnorderedList')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>
+      </Btn>
+      <Btn title="Genummerde lijst" active={activeFormats.has('insertOrderedList')} onClick={() => onFormat('insertOrderedList')}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>
+      </Btn>
+
+      <Sep />
+
+      {/* Leesgrootte */}
+      {(['small', 'medium', 'large'] as ReadingSize[]).map((size, i) => (
+        <button
+          key={size}
+          type="button"
+          title={size === 'small' ? 'Klein (13px)' : size === 'medium' ? 'Middel (16px)' : 'Groot (20px)'}
+          onClick={() => onReadingSizeChange(size)}
+          className={[
+            'flex items-center justify-center rounded-xl border p-2 w-full transition-colors',
+            readingSize === size
+              ? 'border-[#facc15]/40 bg-[#facc15]/12 text-[#facc15]'
+              : 'border-transparent text-white/40 hover:border-white/[0.10] hover:bg-white/[0.05] hover:text-white/75',
+          ].join(' ')}
+        >
+          <span style={{ fontSize: [11, 13, 15][i], lineHeight: 1, fontWeight: 600 }}>A</span>
+        </button>
+      ))}
+
+    </aside>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function BubbleToolbar({
   editor,
@@ -1797,46 +1937,208 @@ function CollapsibleSection({
   )
 }
 
-function EditTab({
+// ─── KoppelenTab ──────────────────────────────────────────────────────────────
+
+function KoppelenTab({
   activeDocument,
   documents,
   selectedText,
-  activeFormats,
-  outlineItems,
-  onFormat,
-  onBeforeToolbarAction,
-  onJumpToOutlineItem,
-  onStartLink,
-  onUnlinkSelection,
-  onUpdateSelectionRole,
+  pendingLink,
+  linkTargets,
   composingComment,
   pendingCommentBody,
+  onStartLink,
+  onPickLinkTarget,
+  onCancelLink,
+  onUnlinkSelection,
+  onUpdateSelectionRole,
   onStartComment,
   onPendingCommentBodyChange,
   onSubmitComment,
   onCancelComment,
-  onExport,
+  onReplaceSelectionText,
+  onJumpToSelection,
 }: {
   activeDocument: TypewriterDocument
   documents: TypewriterDocument[]
   selectedText: string
-  activeFormats: Set<string>
-  outlineItems: OutlineItem[]
-  onFormat: (command: string, value?: string) => void
-  onBeforeToolbarAction: () => void
-  onJumpToOutlineItem: (itemId: string) => void
-  onStartLink: () => void
-  onUnlinkSelection: (selectionId: string) => void
-  onUpdateSelectionRole: (selectionId: string, role: TypewriterLinkRole) => void
+  pendingLink: { text: string } | null
+  linkTargets: TypewriterLinkTarget[]
   composingComment: boolean
   pendingCommentBody: string
+  onStartLink: () => void
+  onPickLinkTarget: (target: TypewriterLinkTarget) => void
+  onCancelLink: () => void
+  onUnlinkSelection: (selectionId: string) => void
+  onUpdateSelectionRole: (selectionId: string, role: TypewriterLinkRole) => void
   onStartComment: () => void
   onPendingCommentBodyChange: (v: string) => void
   onSubmitComment: () => void
   onCancelComment: () => void
+  onReplaceSelectionText: (selectionId: string) => void
+  onJumpToSelection: (text: string) => void
+}) {
+  const [linkSearch, setLinkSearch] = React.useState('')
+  const filteredTargets = linkSearch.trim()
+    ? linkTargets.filter((t) => t.label.toLowerCase().includes(linkSearch.toLowerCase()))
+    : linkTargets
+
+  return (
+    <div className="space-y-3">
+
+      {/* ── Selectiebalk met koppelknop ───────────── */}
+      <div className="flex overflow-hidden rounded-lg border border-white/[0.14] bg-[#1a1a1a]">
+        <div className="flex flex-1 items-center min-w-0 px-2.5 h-9">
+          <p className="truncate text-[11px] text-white/50">
+            {selectedText || 'Selecteer tekst om te koppelen'}
+          </p>
+        </div>
+        <div className="w-px bg-white/[0.10]" />
+        <button
+          type="button"
+          title="Koppel aan project of document"
+          disabled={!selectedText}
+          onClick={onStartLink}
+          className={['flex h-9 w-9 flex-shrink-0 items-center justify-center transition-colors disabled:opacity-30', pendingLink ? 'text-[#facc15]' : 'text-white/40 hover:text-white/80'].join(' ')}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+          </svg>
+        </button>
+      </div>
+
+      {/* ── Dropdown doelkeuze ────────────────────── */}
+      {pendingLink && (
+        <div className="rounded-lg border border-white/[0.12] bg-[#161616] overflow-hidden">
+          <div className="border-b border-white/[0.08] px-2.5 py-2">
+            <input
+              autoFocus
+              value={linkSearch}
+              onChange={(e) => setLinkSearch(e.target.value)}
+              placeholder="Zoek project of document…"
+              className="w-full bg-transparent text-[12px] text-white/80 outline-none placeholder:text-white/30"
+            />
+          </div>
+          <div className="max-h-52 overflow-y-auto py-1">
+            {filteredTargets.length === 0 && (
+              <p className="py-3 text-center text-[12px] text-white/30">Geen resultaten</p>
+            )}
+            {filteredTargets.map((target) => (
+              <button
+                key={target.id}
+                type="button"
+                onClick={() => { onPickLinkTarget(target); setLinkSearch('') }}
+                className="flex w-full items-center gap-2.5 px-2.5 py-2 text-left transition-colors hover:bg-white/[0.05]"
+              >
+                <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded bg-white/[0.06] text-[8px] font-bold uppercase text-white/35">
+                  {target.type === 'document' ? 'TW' : target.type === 'print' ? 'PR' : target.type === 'banners' ? 'BN' : 'MD'}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[12px] text-white/65">{target.label}</span>
+              </button>
+            ))}
+          </div>
+          <div className="border-t border-white/[0.08] px-2.5 py-1.5">
+            <button type="button" onClick={onCancelLink} className="text-[11px] text-white/30 hover:text-white/55">
+              Annuleren
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Gekoppelde blokjes ────────────────────── */}
+      {activeDocument.linkedSelections.map((selection) => {
+              const targetDocument = documents.find((document) => document.id === selection.targetDocumentId)
+              const targetName = selection.targetName ?? targetDocument?.title
+              return (
+                <div key={selection.id} className="rounded-xl border border-white/[0.12] bg-white/[0.04] p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <select
+                        value={selection.role}
+                        onChange={(event) => onUpdateSelectionRole(selection.id, event.target.value as TypewriterLinkRole)}
+                        className={[
+                          'h-7 max-w-full rounded-lg border bg-[#111] px-2 pr-7 text-[11px] font-semibold uppercase tracking-[0.14em] outline-none transition-colors',
+                          selection.role === 'document-text'
+                            ? 'border-white/[0.10] text-white/35 hover:border-[#facc15]/35 hover:text-[#facc15]'
+                            : 'border-[#facc15]/25 text-[#facc15]',
+                        ].join(' ')}
+                        title="Kies tekstvlak"
+                      >
+                        {linkRoleOptionsForSelection(selection).map((option) => (
+                          <option key={option.value} value={option.value} className="bg-[#111] text-white">
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      {targetName && <p className="mt-0.5 truncate text-[11px] text-white/35">→ {targetName}</p>}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onUnlinkSelection(selection.id)}
+                      className="flex-shrink-0 rounded-md border border-white/[0.10] px-2 py-1 text-[10px] font-medium text-white/38 transition-colors hover:border-red-400/35 hover:bg-red-500/[0.08] hover:text-red-300"
+                      title="Koppeling verwijderen"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onJumpToSelection(selection.text)}
+                    className="mt-1.5 w-full text-left group"
+                    title="Spring naar tekst in document"
+                  >
+                    <p className="line-clamp-3 text-sm leading-5 text-white/55 transition-colors group-hover:text-white/85">
+                      {selection.text}
+                    </p>
+                    <span className="mt-1 flex items-center gap-1 text-[10px] text-white/20 transition-colors group-hover:text-[#facc15]/60">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+                      Spring naar tekst
+                    </span>
+                  </button>
+                  {selectedText && selectedText !== selection.text && (
+                    <button
+                      type="button"
+                      onClick={() => onReplaceSelectionText(selection.id)}
+                      className="mt-2 flex w-full items-center gap-1.5 rounded-lg border border-[#facc15]/30 bg-[#facc15]/[0.07] px-2.5 py-1.5 text-left text-[11px] text-[#facc15]/80 transition-colors hover:border-[#facc15]/50 hover:bg-[#facc15]/[0.12] hover:text-[#facc15]"
+                      title="Vervang gekoppelde tekst door huidige selectie"
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+                      Vervang met huidige selectie
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+    </div>
+  )
+}
+
+// ─── EditTab ──────────────────────────────────────────────────────────────────
+
+function EditTab({
+  activeDocument,
+  activeFormats,
+  outlineItems,
+  readingSize,
+  onFormat,
+  onBeforeToolbarAction,
+  onJumpToOutlineItem,
+  onReadingSizeChange,
+  onExport,
+}: {
+  activeDocument: TypewriterDocument
+  activeFormats: Set<string>
+  outlineItems: OutlineItem[]
+  readingSize: ReadingSize
+  onFormat: (command: string, value?: string) => void
+  onBeforeToolbarAction: () => void
+  onJumpToOutlineItem: (itemId: string) => void
+  onReadingSizeChange: (size: ReadingSize) => void
   onExport: (format: string) => void
 }) {
-  const [textColor, setTextColor] = useState('#161616')
 
   return (
     <div className="divide-y divide-white/[0.07]">
@@ -1844,54 +2146,37 @@ function EditTab({
       {/* ── Tekststijl ────────────────────────────── */}
       <CollapsibleSection title="Tekststijl" defaultOpen>
         <div className="space-y-2">
-          <div className="grid grid-cols-2 gap-2">
-            <ToolbarSelect
-              label="Stijl"
-              onBeforeAction={onBeforeToolbarAction}
-              defaultValue="p"
-              onChange={(value) => onFormat('formatBlock', value)}
-              options={[
-                ['p', 'Body'],
-                ['h1', 'Title'],
-                ['h2', 'Subtitle'],
-                ['h3', 'H3'],
-                ['blockquote', 'Citaat'],
-                ['pre', 'Code'],
-              ]}
-            />
-            <ToolbarSelect
-              label="Lettertype"
-              onBeforeAction={onBeforeToolbarAction}
-              defaultValue="Inter"
-              onChange={(value) => onFormat('fontName', value)}
-              options={[
-                ['Inter', 'Inter'],
-                ['Arial', 'Arial'],
-                ['Georgia', 'Georgia'],
-                ['Times New Roman', 'Times'],
-                ['Courier New', 'Courier'],
-              ]}
-            />
-          </div>
-          <div className="grid grid-cols-[1fr_38px] gap-2">
-            <ToolbarSelect
-              label="Grootte"
-              onBeforeAction={onBeforeToolbarAction}
-              defaultValue="16px"
-              onChange={(value) => onFormat('fontSizePx', value)}
-              options={Array.from({ length: 39 }, (_, i) => [`${i + 10}px`, `${i + 10}px`] as [string, string])}
-            />
-            <div className="flex items-end">
-              <label className="relative flex h-8 w-full cursor-pointer items-center justify-center overflow-hidden rounded-lg border border-white/[0.14] bg-[#1a1a1a]" title="Tekstkleur">
-                <span className="pointer-events-none h-4 w-4 rounded-[3px] border border-white/30 shadow-[0_0_0_1px_rgba(0,0,0,0.45)]" style={{ backgroundColor: textColor }} />
-                <input
-                  type="color"
-                  value={textColor}
-                  onMouseDown={onBeforeToolbarAction}
-                  onChange={(e) => { setTextColor(e.target.value); onFormat('foreColor', e.target.value) }}
-                  className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                />
-              </label>
+          <ToolbarSelect
+            label="Stijl"
+            onBeforeAction={onBeforeToolbarAction}
+            defaultValue="p"
+            onChange={(value) => onFormat('formatBlock', value)}
+            options={[
+              ['p', 'Body'],
+              ['h1', 'Title'],
+              ['h2', 'Subtitle'],
+              ['h3', 'H3'],
+              ['blockquote', 'Citaat'],
+              ['pre', 'Code'],
+            ]}
+          />
+          <div className="space-y-1">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/35">Leesgrootte</p>
+            <div className="overflow-hidden rounded-lg border border-white/[0.14] bg-[#1a1a1a]">
+              <div className="grid grid-cols-3 divide-x divide-white/[0.10]">
+                {(['small', 'medium', 'large'] as ReadingSize[]).map((size, i) => (
+                  <button
+                    key={size}
+                    type="button"
+                    onClick={() => onReadingSizeChange(size)}
+                    className={['flex flex-col items-center justify-center gap-0.5 py-2.5 transition-colors', readingSize === size ? 'bg-white/[0.08] text-white/90' : 'text-white/40 hover:text-white/70'].join(' ')}
+                    title={size === 'small' ? 'Klein (13px)' : size === 'medium' ? 'Middel (16px)' : 'Groot (20px)'}
+                  >
+                    <span style={{ fontSize: [11, 13, 16][i] }}>{['A', 'A', 'A'][i]}</span>
+                    <span className="text-[9px] uppercase tracking-[0.12em]">{['S', 'M', 'L'][i]}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -2005,66 +2290,6 @@ function EditTab({
         </div>
       </CollapsibleSection>
 
-      {/* ── Koppelen & reageren ───────────────────── */}
-      <CollapsibleSection title="Koppelen & reageren" defaultOpen={false}>
-        <div className="space-y-2">
-          <div className="flex h-8 overflow-hidden rounded-lg border border-white/[0.14] bg-[#1a1a1a]">
-            <div className="flex flex-1 items-center min-w-0 px-2.5">
-              <p className="truncate text-[11px] text-white/50">
-                {selectedText || 'Selecteer tekst om te koppelen'}
-              </p>
-            </div>
-            <div className="w-px bg-white/[0.10]" />
-            <div className="flex w-9 flex-shrink-0">
-              <InlineButton title="Koppel aan document" onClick={onStartLink} disabled={!selectedText}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                </svg>
-              </InlineButton>
-            </div>
-            <div className="w-px bg-white/[0.10]" />
-            <div className="flex w-9 flex-shrink-0">
-              <InlineButton title="Opmerking toevoegen" onClick={onStartComment} disabled={!selectedText} active={composingComment}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-              </InlineButton>
-            </div>
-          </div>
-          {composingComment && (
-            <div className="rounded-lg border border-[#facc15]/30 bg-[#facc15]/[0.04] p-3">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#facc15]/70">Opmerking</p>
-              <textarea
-                autoFocus
-                rows={3}
-                value={pendingCommentBody}
-                onChange={(e) => onPendingCommentBodyChange(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) onSubmitComment()
-                  if (e.key === 'Escape') onCancelComment()
-                }}
-                placeholder="Schrijf je opmerking..."
-                className="w-full resize-none rounded-md border border-white/[0.12] bg-black/25 px-3 py-2 text-[13px] leading-5 text-white/85 outline-none placeholder:text-white/30 focus:border-[#facc15]/40"
-              />
-              <div className="mt-2 flex justify-end gap-2">
-                <button type="button" onClick={onCancelComment} className="rounded-lg px-3 py-1.5 text-[12px] text-white/40 hover:text-white/65">
-                  Annuleren
-                </button>
-                <button
-                  type="button"
-                  onClick={onSubmitComment}
-                  disabled={!pendingCommentBody.trim()}
-                  className="rounded-lg bg-[#facc15] px-3 py-1.5 text-[12px] font-semibold text-black disabled:opacity-40 hover:bg-[#ffe46b]"
-                >
-                  Plaatsen
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </CollapsibleSection>
-
       {/* ── Outline ───────────────────────────────── */}
       <CollapsibleSection
         title="Outline"
@@ -2124,76 +2349,6 @@ function EditTab({
         </div>
       </CollapsibleSection>
 
-      {/* ── Huphe output ─────────────────────────── */}
-      {activeDocument.linkedSelections.length > 0 && (
-        <CollapsibleSection
-          title="Huphe output"
-          defaultOpen
-          badge={
-            <span className="rounded-full bg-[#facc15]/15 px-1.5 py-0.5 text-[9px] font-semibold text-[#facc15]/80">
-              {activeDocument.linkedSelections.length}
-            </span>
-          }
-        >
-          <div className="space-y-2">
-            <div className="rounded-lg border border-[#facc15]/20 bg-[#facc15]/[0.045] p-3">
-              <div className="space-y-1.5">
-                {activeDocument.linkedSelections.slice(0, 4).map((selection) => (
-                  <div key={`output-${selection.id}`} className="flex items-center gap-2 text-[11px] leading-4">
-                    <span className="max-w-[45%] truncate text-white/65">{selection.targetName ?? 'Onbekend doel'}</span>
-                    <span className="text-white/20">→</span>
-                    <span className="min-w-0 truncate text-[#facc15]/75">{ROLE_LABELS[selection.role] ?? selection.role}</span>
-                  </div>
-                ))}
-                {activeDocument.linkedSelections.length > 4 && (
-                  <p className="text-[11px] text-white/30">+ {activeDocument.linkedSelections.length - 4} extra koppelingen</p>
-                )}
-              </div>
-            </div>
-            {activeDocument.linkedSelections.map((selection) => {
-              const targetDocument = documents.find((document) => document.id === selection.targetDocumentId)
-              const targetName = selection.targetName ?? targetDocument?.title
-              return (
-                <div key={selection.id} className="rounded-xl border border-white/[0.12] bg-white/[0.04] p-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <select
-                        value={selection.role}
-                        onChange={(event) => onUpdateSelectionRole(selection.id, event.target.value as TypewriterLinkRole)}
-                        className={[
-                          'h-7 max-w-full rounded-lg border bg-[#111] px-2 pr-7 text-[11px] font-semibold uppercase tracking-[0.14em] outline-none transition-colors',
-                          selection.role === 'document-text'
-                            ? 'border-white/[0.10] text-white/35 hover:border-[#facc15]/35 hover:text-[#facc15]'
-                            : 'border-[#facc15]/25 text-[#facc15]',
-                        ].join(' ')}
-                        title="Kies tekstvlak"
-                      >
-                        {linkRoleOptionsForSelection(selection).map((option) => (
-                          <option key={option.value} value={option.value} className="bg-[#111] text-white">
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      {targetName && <p className="mt-0.5 truncate text-[11px] text-white/35">→ {targetName}</p>}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => onUnlinkSelection(selection.id)}
-                      className="flex-shrink-0 rounded-md border border-white/[0.10] px-2 py-1 text-[10px] font-medium text-white/38 transition-colors hover:border-red-400/35 hover:bg-red-500/[0.08] hover:text-red-300"
-                      title="Koppeling verwijderen"
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M18 6 6 18" /><path d="m6 6 12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                  <p className="mt-1.5 line-clamp-3 text-sm leading-5 text-white/60">{selection.text}</p>
-                </div>
-              )
-            })}
-          </div>
-        </CollapsibleSection>
-      )}
     </div>
   )
 }
