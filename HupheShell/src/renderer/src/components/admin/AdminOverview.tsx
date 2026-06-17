@@ -147,13 +147,13 @@ export function AdminOverview({
           onNavigate={onNavigate}
         />
         <WidgetCard
-          title="Globale modules"
-          description="Modules aan- of uitzetten voor iedereen"
+          title="Modeltoegang"
+          description="Beschikbare modellen per module"
           items={[
             { label: 'Actief', value: activeModuleCount },
             { label: 'Templates', value: templateCount },
           ]}
-          actions={[{ label: 'Modulebeheer', tab: 'modules_globaal' }]}
+          actions={[{ label: 'Beheer modellen', tab: 'modules_models' }]}
           onNavigate={onNavigate}
         />
       </div>

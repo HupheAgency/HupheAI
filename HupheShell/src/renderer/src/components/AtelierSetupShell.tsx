@@ -6,7 +6,7 @@ import AtelierCreationModeButtons, {
 import AtelierRightPanel, { type AtelierProjectsPanelConfig } from './AtelierRightPanel'
 import { AtelierModeChip, PlusTinyIcon } from './AtelierSharedUI'
 import type { AtelierMediaModel } from '../hooks/useAtelierMedia'
-import { AtelierModelPickerButton } from './AtelierModelPickerButton'
+import { AtelierPromptBar } from './AtelierPromptBar'
 import spinnerSrc from '../assets/spinner.png'
 
 export default function AtelierSetupShell({
@@ -39,9 +39,7 @@ export default function AtelierSetupShell({
   convertContent?: ReactNode
 }) {
   const option = ATELIER_CREATION_OPTIONS.find((item) => item.id === type) ?? ATELIER_CREATION_OPTIONS[0]
-  const [promptValue, setPromptValue] = useState('')
   const [isWaiting, setIsWaiting] = useState(false)
-  const promptInputRef = useRef<HTMLInputElement>(null)
   const promptScrollRef = useRef<HTMLDivElement>(null)
   const hasPromptChat = promptMessages.length > 0
 
@@ -95,36 +93,26 @@ export default function AtelierSetupShell({
               </div>
             </div>
           )}
-          <form
-            onSubmit={(event) => {
-              event.preventDefault()
-              const prompt = promptValue.trim()
-              if (prompt && !isWaiting) {
-                setPromptValue('')
-                requestAnimationFrame(() => promptInputRef.current?.focus())
+          <div className={hasPromptChat ? 'mx-auto w-full max-w-3xl' : 'w-full'}>
+            <AtelierPromptBar
+              placeholder={inputPlaceholder.replace(/…/g, '...')}
+              busyPlaceholder="Atelier denkt na..."
+              loading={isWaiting}
+              disabled={isWaiting}
+              models={chatModels}
+              selectedModelId={chatSelectedModelId}
+              modelsLoading={chatModelsLoading}
+              dropdownPosition={hasPromptChat ? 'top' : 'bottom'}
+              onModelSelect={(id) => onChatModelSelect?.(id)}
+              onSubmit={(prompt) => {
                 const result = onPromptSubmit?.(prompt)
                 if (result instanceof Promise) {
                   setIsWaiting(true)
-                  result.finally(() => {
-                    setIsWaiting(false)
-                    requestAnimationFrame(() => promptInputRef.current?.focus())
-                  })
+                  result.finally(() => setIsWaiting(false))
                 }
-              }
-            }}
-            className={[
-              'flex w-full flex-col gap-2 rounded-[2rem] border border-white/[0.05] bg-[#1e1e1e] px-4 py-3 text-left shadow-sm transition-[border-color] duration-300 focus-within:border-white/[0.15]',
-              hasPromptChat ? 'mx-auto max-w-3xl' : '',
-            ].join(' ')}
-          >
-            <input
-              ref={promptInputRef}
-              value={promptValue}
-              onChange={(event) => setPromptValue(event.target.value)}
-              placeholder={isWaiting ? 'Atelier denkt na…' : inputPlaceholder}
-              className="h-10 w-full min-w-0 border-none bg-transparent px-3 text-base text-white outline-none placeholder:text-white/40"
-            />
-            <div className="flex w-full items-center gap-2">
+              }}
+              leading={(
+                <div className="flex min-w-0 items-center gap-2">
               <button
                 type="button"
                 className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-white/65 transition-colors hover:bg-white/[0.08] hover:text-white"
@@ -149,37 +137,10 @@ export default function AtelierSetupShell({
                   )}
                 </>
               )}
-              <div className="ml-auto flex flex-shrink-0 items-center gap-2">
-                <AtelierModelPickerButton
-                  models={chatModels}
-                  selectedModelId={chatSelectedModelId}
-                  loading={chatModelsLoading}
-                  dropdownPosition={hasPromptChat ? 'top' : 'bottom'}
-                  onSelect={(id) => onChatModelSelect?.(id)}
-                />
-
-                <button
-                  type="submit"
-                  disabled={isWaiting || !promptValue.trim()}
-                  className={[
-                    'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors',
-                    isWaiting ? 'bg-white/[0.08] text-white/40' : promptValue.trim() ? 'bg-white text-black' : 'bg-white/[0.05] text-white/20',
-                  ].join(' ')}
-                  aria-label="Verzenden"
-                >
-                  {isWaiting ? (
-                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>
-                  ) : (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M5 12h14M12 5l7 7-7 7" />
-                    </svg>
-                  )}
-                </button>
               </div>
-            </div>
-          </form>
+              )}
+            />
+          </div>
           {!hasPromptChat && onCreationTypeSelect && (
             <AtelierCreationModeButtons
               activeType={type}

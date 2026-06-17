@@ -1,4 +1,4 @@
-import { app, ipcMain, BrowserWindow, safeStorage } from 'electron'
+import { app, ipcMain, BrowserWindow, safeStorage, dialog } from 'electron'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import { createWriteStream, existsSync as fsExistsSync, rmSync } from 'fs'
@@ -1113,11 +1113,6 @@ export function registerEngineIPC(win: BrowserWindow): void {
         src: z.string().max(5_000_000),
         name: z.string().max(160).optional(),
       }), payload)
-      const imagesDir = savedImagesDir()
-      mkdirSync(imagesDir, { recursive: true })
-
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-      const baseName = payload.name ?? `huphe_${timestamp}`
 
       let buffer: Buffer
       let ext = 'png'
@@ -1127,19 +1122,29 @@ export function registerEngineIPC(win: BrowserWindow): void {
         if (!match) return { ok: false, error: 'Ongeldig data URL' }
         ext = match[1] === 'jpeg' ? 'jpg' : match[1]
         buffer = Buffer.from(match[2], 'base64')
-      } else if (payload.src.startsWith('file://')) {
-        const filePath = payload.src.replace('file://', '')
+      } else if (payload.src.startsWith('file://') || payload.src.startsWith('huphe://file/')) {
+        const filePath = payload.src.startsWith('huphe://file/')
+          ? decodeURIComponent(payload.src.slice('huphe://file/'.length))
+          : payload.src.replace('file://', '')
         buffer = readFileSync(filePath)
-        const fileExt = filePath.split('.').pop()
-        if (fileExt) ext = fileExt
+        ext = filePath.split('.').pop() ?? 'png'
       } else {
         return { ok: false, error: 'Onbekend afbeeldingsformaat' }
       }
 
-      const fileName = `${baseName}.${ext}`
-      const destPath = join(imagesDir, fileName)
-      writeFileSync(destPath, buffer)
-      return { ok: true, path: destPath, name: fileName }
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      const defaultName = `${payload.name ?? `huphe_${timestamp}`}.${ext}`
+      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const { canceled, filePath: chosen } = await dialog.showSaveDialog(win, {
+        defaultPath: join(app.getPath('downloads'), defaultName),
+        filters: [
+          { name: 'Afbeelding', extensions: [ext, 'png', 'jpg', 'webp'].filter((v, i, a) => a.indexOf(v) === i) },
+        ],
+      })
+      if (canceled || !chosen) return { ok: false, canceled: true }
+
+      writeFileSync(chosen, buffer)
+      return { ok: true, path: chosen }
     } catch (err: any) {
       return { ok: false, error: err.message }
     }

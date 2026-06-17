@@ -1255,7 +1255,7 @@ export default function SettingsPage({ onBack, embedded, onShowPrivacy }: Props)
             <div className="mb-5">
               <h1 className="text-white font-semibold text-[17px]">Modellen</h1>
               <p className="text-white/35 text-sm mt-1">
-                Voeg OpenRouter-modellen toe aan de Engine-chatbalk. Ollama-modellen (lokaal) worden automatisch gedetecteerd.
+                Voeg zelf OpenRouter-modellen toe aan je persoonlijke modelbibliotheek. Admin bepaalt per module welke basismodellen beschikbaar zijn; jouw extra tekstmodellen verschijnen in tekstpromptbars.
               </p>
             </div>
             <ModelenSection />

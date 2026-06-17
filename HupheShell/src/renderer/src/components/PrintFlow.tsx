@@ -19,7 +19,7 @@ import type { CrossFormatSeed } from '../lib/atelier-cross-format'
 import type { MediaAsset } from '../lib/media-asset-store'
 import { loadAssets as loadLegacyMediaAssets, upsertAsset as upsertLegacyMediaAsset } from '../lib/media-asset-store'
 import { loadAtelierMediaProjects, type AtelierMediaModel } from '../hooks/useAtelierMedia'
-import { AtelierModelPickerButton } from './AtelierModelPickerButton'
+import { AtelierPromptBar } from './AtelierPromptBar'
 import MediaAssetPicker from './MediaAssetPicker'
 import PrintFunnelStep, { MEDIA_FORMATS, type PrintFunnelPayload } from './PrintFunnelStep'
 import { AdToHtmlToolPanel as AdToHtmlConvertPanel } from './AtelierMediaPanel'
@@ -285,8 +285,6 @@ function PrintResultView({
   tabBar?: React.ReactNode
 }) {
   const [activeFormatId, setActiveFormatId] = useState(items[0]?.formatId ?? '')
-  const [prompt, setPrompt] = useState('')
-  const promptInputRef = useRef<HTMLInputElement>(null)
   const [chatMessages, setChatMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string; model?: string }>>([])
   const [isWaiting, setIsWaiting] = useState(false)
   const [streamTokens, setStreamTokens] = useState(0)
@@ -1248,13 +1246,9 @@ Antwoord UITSLUITEND als dit JSON (GEEN markdown, GEEN tekst erbuiten):
     })
   }
 
-  function handlePromptSubmit(event: React.FormEvent) {
-    event.preventDefault()
-    const userPrompt = prompt.trim()
+  function handlePromptSubmit(userPrompt: string) {
     if (!userPrompt || isWaiting) return
-    setPrompt('')
-    requestAnimationFrame(() => promptInputRef.current?.focus())
-    submitPrompt(userPrompt)
+    void submitPrompt(userPrompt)
   }
 
   function handleBack() {
@@ -1877,72 +1871,39 @@ Antwoord UITSLUITEND als dit JSON (GEEN markdown, GEEN tekst erbuiten):
 
           {/* Promptbar */}
           <div className="absolute bottom-6 left-1/2 flex w-[min(760px,calc(100%-64px))] -translate-x-1/2 flex-col gap-2">
-            <form
+            <AtelierPromptBar
+              placeholder={chatMessages.length === 0 ? 'Beschrijf wat je wilt maken...' : 'Geef een nieuwe opdracht of aanpassing...'}
+              busyPlaceholder={streamTokens > 0 ? `AI ontwerpt... (${streamTokens} tokens)` : 'AI is aan het werk...'}
+              loading={isWaiting}
+              disabled={isWaiting}
+              models={chatModels}
+              selectedModelId={selectedModelId}
+              modelsLoading={chatModelsLoading}
+              dropdownPosition="top"
+              onModelSelect={(id) => onChatModelSelect?.(id)}
               onSubmit={handlePromptSubmit}
-              className="flex w-full items-center gap-2 rounded-[2rem] border border-white/[0.05] bg-[#1e1e1e] pl-4 pr-2 shadow-sm transition-[border-color] duration-300 focus-within:border-white/[0.15]"
-              style={{ height: '48px' }}
-            >
-              <input
-                ref={promptInputRef}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder={
-                  isWaiting
-                    ? (streamTokens > 0 ? `AI ontwerpt… (${streamTokens} tokens)` : 'AI is aan het werk…')
-                    : chatMessages.length === 0
-                      ? 'Beschrijf wat je wilt maken…'
-                      : 'Geef een nieuwe opdracht of aanpassing…'
-                }
-                className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/40"
-              />
-              {brandResearchLoading && (
+              trailing={<>
+                {brandResearchLoading && (
                 <span className="flex flex-shrink-0 items-center gap-1 text-xs text-white/25">
                   <svg className="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                   </svg>
                 </span>
-              )}
-              {briefLoading && (
+                )}
+                {briefLoading && (
                 <span className="flex flex-shrink-0 items-center gap-1 text-xs text-white/25">
                   <svg className="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                   </svg>
                 </span>
-              )}
-              {designBrief && !briefLoading && (
+                )}
+                {designBrief && !briefLoading && (
                 <span className="max-w-[160px] flex-shrink-0 truncate rounded-full border border-[#facc15]/15 bg-[#facc15]/[0.04] px-2 py-0.5 text-xs text-[#facc15]/50" title={designBrief}>
                   {designBrief}
                 </span>
-              )}
-              <div className="flex flex-shrink-0 items-center gap-1.5">
-                <AtelierModelPickerButton
-                  models={chatModels}
-                  selectedModelId={selectedModelId}
-                  loading={chatModelsLoading}
-                  dropdownPosition="top"
-                  onSelect={(id) => onChatModelSelect?.(id)}
-                />
-                <button
-                  type="submit"
-                  disabled={isWaiting || !prompt.trim()}
-                  className={[
-                    'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors',
-                    isWaiting ? 'bg-white/[0.08] text-white/40' : prompt.trim() ? 'bg-white text-black' : 'bg-white/[0.05] text-white/20',
-                  ].join(' ')}
-                  aria-label="Verzenden"
-                >
-                  {isWaiting ? (
-                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>
-                  ) : (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M5 12h14" /><path d="m12 5 7 7-7 7" />
-                    </svg>
-                  )}
-                </button>
-              </div>
-            </form>
+                )}
+              </>}
+            />
           </div>
         </div>
 

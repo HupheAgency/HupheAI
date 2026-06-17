@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import {
   useAtelierMediaCreator,
   createAtelierProjectId,
@@ -40,7 +41,7 @@ export function AtelierMediaCreationPanel({
   const option = ATELIER_CREATION_OPTIONS.find((item) => item.id === type) ?? ATELIER_CREATION_OPTIONS[0]
   const mediaType = type === 'images' || type === 'video' ? type : null
   const tools = mediaType === 'images' ? IMAGE_EDIT_TOOLS : (mediaType === 'video' ? VIDEO_EDIT_TOOLS : [])
-  const [activeToolId, setActiveToolId] = useState(tools[0]?.id ?? '')
+  const [activeToolId, setActiveToolId] = useState('select')
   const [inputFileSrc, setInputFileSrc] = useState<string | null>(null)
   const [inputFileName, setInputFileName] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -53,7 +54,7 @@ export function AtelierMediaCreationPanel({
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    setActiveToolId(tools[0]?.id ?? '')
+    setActiveToolId('select')
   }, [mediaType]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -121,6 +122,12 @@ export function AtelierMediaCreationPanel({
   const canvasRef = useRef<HTMLDivElement>(null)
   const isDragging = useRef(false)
   const dragStart = useRef({ mx: 0, my: 0, ox: 0, oy: 0 })
+  const isMaskModeRef = useRef(false)
+  const [deleteConfirmAssetId, setDeleteConfirmAssetId] = useState<string | null>(null)
+  const [fullscreenAsset, setFullscreenAsset] = useState<AtelierMediaAsset | null>(null)
+  const fullscreenRef = useRef<HTMLDivElement>(null)
+  const fullscreenTouchStartX = useRef<number | null>(null)
+  const fullscreenWheelLock = useRef(false)
 
   // ── Masker ────────────────────────────────────────────────────────────────
   const maskCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -135,6 +142,23 @@ export function AtelierMediaCreationPanel({
   const [maskRedoLen, setMaskRedoLen] = useState(0)
   const [maskCursorVisible, setMaskCursorVisible] = useState(false)
   const isMaskMode = activeToolId === 'mask'
+  isMaskModeRef.current = isMaskMode
+  const inputFileIsImage = Boolean(inputFileSrc && (
+    inputFileSrc.startsWith('data:image') ||
+    /\.(png|jpe?g|webp|gif)(?:$|[?#])/i.test(inputFileSrc)
+  ))
+
+  const stepFullscreenAsset = useCallback((direction: -1 | 1) => {
+    if (resultItems.length <= 1) return
+    setFullscreenAsset((current) => {
+      const base = current
+        ? resultItems.findIndex((item) => item.id === current.id)
+        : activeResultIndex ?? resultItems.length - 1
+      const nextIndex = ((base >= 0 ? base : 0) + direction + resultItems.length) % resultItems.length
+      setActiveResultIndex(nextIndex)
+      return resultItems[nextIndex]
+    })
+  }, [activeResultIndex, resultItems, setActiveResultIndex])
 
   // Ref-callback: fires synchronously when canvas mounts — guarantees 1:1 pixel mapping before any drawing.
   const initMaskCanvas = useCallback((canvas: HTMLCanvasElement | null) => {
@@ -163,6 +187,36 @@ export function AtelierMediaCreationPanel({
     setMaskRedoLen(0)
     setHasMask(false)
   }, [activeResultIndex])
+
+  useEffect(() => {
+    const api = (window as any).api
+    if (!fullscreenAsset) {
+      void api?.setFullScreen?.(false)
+      return
+    }
+    void api?.setFullScreen?.(true)
+    function onFullscreenChange() {
+      if (!document.fullscreenElement) setFullscreenAsset(null)
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }, [fullscreenAsset])
+
+  useEffect(() => {
+    if (!fullscreenAsset) return
+    function onKeyDown(e: globalThis.KeyboardEvent) {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setFullscreenAsset(null)
+        return
+      }
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      e.preventDefault()
+      stepFullscreenAsset(e.key === 'ArrowLeft' ? -1 : 1)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [fullscreenAsset, stepFullscreenAsset])
 
   // Keep cursor div size in sync when brush size slider changes
   useEffect(() => {
@@ -252,23 +306,31 @@ export function AtelierMediaCreationPanel({
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [isMaskMode])
 
-  function exportMaskDataUrl(): string | null {
-    const canvas = maskCanvasRef.current
-    if (!canvas || !hasMask) return null
-    const out = document.createElement('canvas')
-    out.width = canvas.width
-    out.height = canvas.height
-    const ctx = out.getContext('2d')!
-    ctx.fillStyle = '#000'
-    ctx.fillRect(0, 0, out.width, out.height)
-    const srcData = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
-    const outData = ctx.createImageData(canvas.width, canvas.height)
-    for (let i = 0; i < srcData.data.length; i += 4) {
-      const v = srcData.data[i + 3] > 10 ? 255 : 0
-      outData.data[i] = v; outData.data[i + 1] = v; outData.data[i + 2] = v; outData.data[i + 3] = 255
-    }
-    ctx.putImageData(outData, 0, 0)
-    return out.toDataURL('image/png')
+  // Exporteert de originele afbeelding met de oranje overlay als composite PNG.
+  // Het model ziet zo exact welk gebied aanpast moet worden.
+  async function exportMaskCompositeDataUrl(): Promise<string | null> {
+    const maskCanvas = maskCanvasRef.current
+    if (!maskCanvas || !hasMask) return null
+    const activeItem = activeResultIndex != null && resultItems[activeResultIndex]
+      ? resultItems[activeResultIndex]
+      : (resultItems.length > 0 ? resultItems[resultItems.length - 1] : null)
+    if (!activeItem?.src) return null
+
+    return new Promise((resolve) => {
+      const img = new Image()
+      img.onload = () => {
+        const out = document.createElement('canvas')
+        out.width = maskCanvas.width
+        out.height = maskCanvas.height
+        const ctx = out.getContext('2d')!
+        ctx.drawImage(img, 0, 0, out.width, out.height)
+        ctx.drawImage(maskCanvas, 0, 0)
+        resolve(out.toDataURL('image/png'))
+      }
+      img.onerror = () => resolve(null)
+      img.crossOrigin = 'anonymous'
+      img.src = activeItem.src
+    })
   }
 
   function getMaskCoords(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -350,16 +412,44 @@ export function AtelierMediaCreationPanel({
   }, [lightboxIndex, resultItems.length])
 
   useEffect(() => {
+    if (mediaType !== 'images' || resultItems.length <= 1 || lightboxIndex != null || deleteConfirmAssetId) return
+    function handleKeyDown(e: globalThis.KeyboardEvent) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      const target = e.target as HTMLElement | null
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
+      e.preventDefault()
+      const direction = e.key === 'ArrowLeft' ? -1 : 1
+      setActiveResultIndex((current) => {
+        const base = current ?? resultItems.length - 1
+        return (base + direction + resultItems.length) % resultItems.length
+      })
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [mediaType, resultItems.length, lightboxIndex, deleteConfirmAssetId, setActiveResultIndex])
+
+  useEffect(() => {
     setCanvasScale(1)
     setCanvasOffset({ x: 0, y: 0 })
   }, [activeResultIndex])
 
-  function handleGenerateWithFocus(event: React.FormEvent<HTMLFormElement>) {
-    const maskDataUrl = isMaskMode && hasMask ? exportMaskDataUrl() : null
-    void handleGenerate(event, maskDataUrl ?? undefined).finally(() => {
+  async function handleGenerateWithFocus(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    let maskDataUrl: string | undefined
+    if (isMaskMode && hasMask) {
+      maskDataUrl = (await exportMaskCompositeDataUrl()) ?? undefined
+    }
+    const videoStartImage = mediaType === 'video' && inputFileIsImage ? inputFileSrc ?? undefined : undefined
+    void handleGenerate(event, maskDataUrl, videoStartImage).finally(() => {
       requestAnimationFrame(() => promptInputRef.current?.focus())
     })
     requestAnimationFrame(() => promptInputRef.current?.focus())
+  }
+
+  function handleImageToVideo(src: string) {
+    setInputFileSrc(src)
+    setInputFileName('Startbeeld')
+    onCreationTypeSelect?.('video')
   }
 
   useEffect(() => {
@@ -392,7 +482,7 @@ export function AtelierMediaCreationPanel({
     if (!el) return
     const onMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return
-      if (isMaskMode) return
+      if (isMaskModeRef.current) return
       isDragging.current = true
       dragStart.current = { mx: e.clientX, my: e.clientY, ox: 0, oy: 0 }
       setCanvasOffset(prev => {
@@ -427,6 +517,9 @@ export function AtelierMediaCreationPanel({
   const activeItem = activeResultIndex != null && resultItems[activeResultIndex]
     ? resultItems[activeResultIndex]
     : (resultItems.length > 0 ? resultItems[resultItems.length - 1] : null)
+  const deleteConfirmAsset = deleteConfirmAssetId
+    ? resultItems.find((item) => item.id === deleteConfirmAssetId) ?? null
+    : null
   const promptBarShellClass = activeItem
     ? 'flex-shrink-0 px-4 pb-6 pt-2'
     : 'absolute left-1/2 top-[calc(50%+34px)] z-30 w-full max-w-3xl -translate-x-1/2 px-8'
@@ -451,8 +544,8 @@ export function AtelierMediaCreationPanel({
           }}
         />
       )}
-      {/* Left vertical tool toolbar */}
-      <div className="flex w-14 flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0f0f0f] py-3">
+      {/* Left vertical tool toolbar — only when an image is loaded */}
+      <div className={['flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0f0f0f] py-3', activeItem ? 'flex w-14' : 'hidden'].join(' ')}>
         {tools.map((tool) => (
           <LeftToolTooltip key={tool.id} label={tool.label}>
             <button
@@ -543,6 +636,29 @@ export function AtelierMediaCreationPanel({
               <>
                 <button
                   type="button"
+                  onClick={() => setFullscreenAsset(activeItem)}
+                  className="absolute right-28 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.14] bg-black/35 text-white/70 opacity-0 shadow-lg backdrop-blur-md transition-opacity hover:bg-black/60 hover:text-white group-hover:opacity-100 [div:hover>&]:opacity-100"
+                  title="Volledig scherm"
+                  aria-label="Afbeelding volledig scherm openen"
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M16 3h3a2 2 0 0 1 2 2v3" />
+                    <path d="M8 21H5a2 2 0 0 1-2-2v-3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleImageToVideo(activeItem.src)}
+                  className="absolute right-40 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.14] bg-black/35 text-white/70 opacity-0 shadow-lg backdrop-blur-md transition-opacity hover:bg-black/60 hover:text-[#facc15] group-hover:opacity-100 [div:hover>&]:opacity-100"
+                  title="Maak video van deze afbeelding"
+                  aria-label="Afbeelding openen in videomodus"
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="5" width="13" height="14" rx="2" /><path d="m16 10 5-3v10l-5-3" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
                   onClick={() => handleSaveResult(activeItem.src)}
                   className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.14] bg-black/35 text-white/70 opacity-0 shadow-lg backdrop-blur-md transition-opacity hover:bg-black/60 hover:text-white group-hover:opacity-100 [div:hover>&]:opacity-100"
                   title="Afbeelding opslaan"
@@ -551,7 +667,7 @@ export function AtelierMediaCreationPanel({
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleDeleteAsset(activeItem.id)}
+                  onClick={() => setDeleteConfirmAssetId(activeItem.id)}
                   className="absolute right-16 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.14] bg-black/35 text-white/70 opacity-0 shadow-lg backdrop-blur-md transition-opacity hover:bg-black/60 hover:text-red-400 group-hover:opacity-100 [div:hover>&]:opacity-100"
                   title="Afbeelding verwijderen"
                 >
@@ -582,7 +698,7 @@ export function AtelierMediaCreationPanel({
                 </button>
                 <button
                   type="button"
-                  onClick={(e) => { e.stopPropagation(); handleDeleteAsset(item.id) }}
+                  onClick={(e) => { e.stopPropagation(); setDeleteConfirmAssetId(item.id) }}
                   className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-white/[0.20] bg-[#111] text-white/60 opacity-0 transition-opacity hover:text-red-400 group-hover/thumb:opacity-100"
                   title="Verwijderen"
                 >
@@ -603,7 +719,7 @@ export function AtelierMediaCreationPanel({
         <input
           ref={fileInputRef}
           type="file"
-          accept={mediaType === 'images' ? 'image/png,image/jpeg,image/webp,image/gif' : 'video/mp4,video/webm,video/quicktime'}
+          accept={mediaType === 'images' ? 'image/png,image/jpeg,image/webp,image/gif' : 'image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime'}
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0]
@@ -626,14 +742,14 @@ export function AtelierMediaCreationPanel({
         >
           {inputFileSrc && (
             <div className="flex items-center gap-2 px-3 pt-1">
-              {mediaType === 'images' ? (
+              {mediaType === 'images' || inputFileIsImage ? (
                 <div className="relative flex-shrink-0">
                   <img src={inputFileSrc} alt="" className="h-10 w-10 rounded-lg object-cover border border-white/[0.10]" />
                   <button
                     type="button"
                     onClick={() => { setInputFileSrc(null); setInputFileName(null) }}
                     className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#1e1e1e] border border-white/[0.15] text-white/60 hover:text-white"
-                    aria-label="Afbeelding verwijderen"
+                    aria-label="Startbeeld verwijderen"
                   >
                     <CloseTinyIcon />
                   </button>
@@ -807,12 +923,123 @@ export function AtelierMediaCreationPanel({
         maskHistoryLen={maskHistoryLen}
         maskRedoLen={maskRedoLen}
       />
+      {fullscreenAsset && createPortal(
+        <div
+          ref={fullscreenRef}
+          // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+          tabIndex={-1}
+          // eslint-disable-next-line jsx-a11y/no-autofocus
+          autoFocus
+          className="fixed inset-0 z-[99999] flex items-center justify-center bg-black outline-none"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { e.preventDefault(); setFullscreenAsset(null); return }
+            if (e.key === 'ArrowLeft') { e.preventDefault(); stepFullscreenAsset(-1); return }
+            if (e.key === 'ArrowRight') { e.preventDefault(); stepFullscreenAsset(1) }
+          }}
+          onWheel={(event) => {
+            if (resultItems.length <= 1 || fullscreenWheelLock.current) return
+            const dominantHorizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+            if (!dominantHorizontal || Math.abs(event.deltaX) < 24) return
+            fullscreenWheelLock.current = true
+            stepFullscreenAsset(event.deltaX > 0 ? 1 : -1)
+            window.setTimeout(() => { fullscreenWheelLock.current = false }, 450)
+          }}
+          onTouchStart={(event) => {
+            fullscreenTouchStartX.current = event.touches[0]?.clientX ?? null
+          }}
+          onTouchEnd={(event) => {
+            const startX = fullscreenTouchStartX.current
+            fullscreenTouchStartX.current = null
+            if (startX == null || resultItems.length <= 1) return
+            const endX = event.changedTouches[0]?.clientX ?? startX
+            const delta = endX - startX
+            if (Math.abs(delta) < 48) return
+            stepFullscreenAsset(delta < 0 ? 1 : -1)
+          }}
+        >
+          <img
+            src={fullscreenAsset.src}
+            alt="Volledig scherm"
+            className="h-screen w-screen object-contain"
+            draggable={false}
+          />
+          {resultItems.length > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={() => stepFullscreenAsset(-1)}
+                className="absolute left-6 top-1/2 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/55 backdrop-blur-md transition-colors hover:bg-black/65 hover:text-white"
+                aria-label="Vorige afbeelding"
+                title="Vorige afbeelding"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => stepFullscreenAsset(1)}
+                className="absolute right-20 top-1/2 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/55 backdrop-blur-md transition-colors hover:bg-black/65 hover:text-white"
+                aria-label="Volgende afbeelding"
+                title="Volgende afbeelding"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (document.fullscreenElement) void document.exitFullscreen()
+              setFullscreenAsset(null)
+            }}
+            className="absolute right-6 top-6 flex h-11 w-11 items-center justify-center rounded-full border border-white/20 bg-black/45 text-white/70 backdrop-blur-md transition-colors hover:bg-black/70 hover:text-white"
+            aria-label="Volledig scherm sluiten"
+            title="Sluiten"
+          >
+            <CloseTinyIcon />
+          </button>
+        </div>,
+        document.body
+      )}
+      {deleteConfirmAsset && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 px-6 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-2xl border border-white/[0.10] bg-[#151515] p-5 shadow-2xl">
+            <h2 className="text-base font-semibold text-white">Afbeelding verwijderen?</h2>
+            <p className="mt-2 text-sm leading-relaxed text-white/45">
+              Weet je het zeker? Deze afbeelding wordt permanent verwijderd.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmAssetId(null)}
+                className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm font-medium text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white/80"
+              >
+                Annuleren
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const assetId = deleteConfirmAsset.id
+                  setDeleteConfirmAssetId(null)
+                  void handleDeleteAsset(assetId)
+                }}
+                className="rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-400"
+              >
+                Permanent verwijderen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 type AtelierEditIcon =
-  | 'mask' | 'subject' | 'remove' | 'background' | 'expand' | 'upscale' | 'light' | 'variation'
+  | 'select' | 'mask' | 'subject' | 'remove' | 'background' | 'expand' | 'upscale' | 'light' | 'variation'
   | 'frame' | 'motion' | 'stabilize' | 'extend' | 'cut' | 'captions' | 'audio' | 'loop'
 
 interface AtelierEditTool {
@@ -823,6 +1050,7 @@ interface AtelierEditTool {
 }
 
 const IMAGE_EDIT_TOOLS: AtelierEditTool[] = [
+  { id: 'select', label: 'Selecteren en slepen', description: 'Normale muisfunctie voor beeld slepen en zoomen.', icon: 'select' },
   { id: 'mask', label: 'Masker tekenen', description: 'Penseel, gum en zachte randen.', icon: 'mask' },
   { id: 'subject', label: 'Onderwerp selecteren', description: 'Persoon, object of product isoleren.', icon: 'subject' },
   { id: 'remove', label: 'Object verwijderen', description: 'Storende delen wegpoetsen.', icon: 'remove' },
@@ -834,6 +1062,7 @@ const IMAGE_EDIT_TOOLS: AtelierEditTool[] = [
 ]
 
 const VIDEO_EDIT_TOOLS: AtelierEditTool[] = [
+  { id: 'select', label: 'Selecteren en slepen', description: 'Normale muisfunctie voor video slepen en zoomen.', icon: 'select' },
   { id: 'frame', label: 'Start/eindframe', description: 'Frames kiezen voor richting en stijl.', icon: 'frame' },
   { id: 'motion', label: 'Camerabeweging', description: 'Push, pan, zoom of handheld.', icon: 'motion' },
   { id: 'subject', label: 'Onderwerp volgen', description: 'Tracking op persoon of object.', icon: 'subject' },
@@ -877,7 +1106,7 @@ function AtelierMediaEditSidebar({
   maskRedoLen?: number
 }) {
   const tools = mediaType === 'images' ? IMAGE_EDIT_TOOLS : VIDEO_EDIT_TOOLS
-  const activeTool = tools.find((tool) => tool.id === activeToolId) ?? tools[0]
+  const activeTool = tools.find((tool) => tool.id === activeToolId && tool.id !== 'select')
 
   return (
     <AtelierRightPanel projectsPanel={projectsPanel} convertContent={<AdToHtmlToolPanel currentImageSrc={currentImageSrc} />}>
@@ -1293,6 +1522,11 @@ function AtelierToolGridButton({
 }
 
 function AtelierEditToolIcon({ icon }: { icon: AtelierEditIcon }) {
+  if (icon === 'select') return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 3l7.5 17 2.5-7 7-2.5L4 3z" />
+    </svg>
+  )
   if (icon === 'mask') return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 20c5-1 9-5 10-10" /><path d="M14 4l6 6" /><path d="M13 5l6 6" />

@@ -160,7 +160,7 @@ contextBridge.exposeInMainWorld('api', {
   generateImage: (prompt: string, provider: string) => ipcRenderer.invoke('image:generate', prompt, provider),
   generateAtelierImage: (prompt: string, model: string, systemPrompt?: string, referenceImageSrc?: string, accessToken?: string, modelLabel?: string, maskImageSrc?: string) => ipcRenderer.invoke('image:generate-ai', { prompt, model, modelLabel, systemPrompt, referenceImageSrc, maskImageSrc, accessToken }),
   deleteLocalFile: (filePath: string) => ipcRenderer.invoke('image:delete-file', filePath),
-  generateAtelierVideo: (prompt: string, model: string, systemPrompt?: string, accessToken?: string) => ipcRenderer.invoke('video:generate-ai', { prompt, model, systemPrompt, accessToken }),
+  generateAtelierVideo: (prompt: string, model: string, systemPrompt?: string, accessToken?: string, referenceImageSrc?: string) => ipcRenderer.invoke('video:generate-ai', { prompt, model, systemPrompt, accessToken, referenceImageSrc }),
   importPresentation: (fileName: string, buffer: ArrayBuffer) =>
     ipcRenderer.invoke('presentation:import', { fileName, buffer }),
   importKeyAsProject: (filePath: string) =>
@@ -431,6 +431,10 @@ contextBridge.exposeInMainWorld('api', {
   //  Vision — lokaal visionmodel via Ollama
   // -------------------------------------------------------------------------
   setFullScreen: (flag: boolean): Promise<void> => ipcRenderer.invoke('window:set-fullscreen', flag),
+  importDocument: (): Promise<{ ok: boolean; html?: string; title?: string; canceled?: boolean; error?: string }> =>
+    ipcRenderer.invoke('document:import-file'),
+  importGoogleDoc: (url: string): Promise<{ ok: boolean; html?: string; title?: string; error?: string }> =>
+    ipcRenderer.invoke('document:import-google-docs', url),
   vision: {
     listModels: (): Promise<{ id: string; label: string; description: string; sizeGb: number; tag?: string; installed: boolean }[]> =>
       ipcRenderer.invoke('vision:list-models'),

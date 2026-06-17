@@ -267,6 +267,9 @@ export default function TypewriterPage({ joinDocId }: Props) {
   const [liveUsers, setLiveUsers] = useState<Array<{ name: string; color: string }>>([])
   const [versions, setVersions] = useState<TwVersion[]>([])
   const [savingSnapshot, setSavingSnapshot] = useState(false)
+  const [importMenuOpen, setImportMenuOpen] = useState(false)
+  const [googleDocsUrl, setGoogleDocsUrl] = useState('')
+  const [importingGoogleDocs, setImportingGoogleDocs] = useState(false)
   const editorRef = useRef<HTMLElement | null>(null)
   const editorScrollRef = useRef<HTMLDivElement>(null)
   const documentsRef = useRef<TypewriterDocument[]>(documents)
@@ -623,6 +626,62 @@ export default function TypewriterPage({ joinDocId }: Props) {
     setSelectedText('')
     setStatus('Nieuw document')
     requestAnimationFrame(() => editorRef.current?.focus())
+  }
+
+  function normalizeImportedHtml(html: string): string {
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    doc.querySelectorAll<HTMLElement>('*').forEach((el) => {
+      el.removeAttribute('style')
+      el.removeAttribute('class')
+      el.removeAttribute('id')
+    })
+    doc.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach((heading) => {
+      const p = doc.createElement('p')
+      const strong = doc.createElement('strong')
+      strong.innerHTML = heading.innerHTML
+      p.appendChild(strong)
+      heading.replaceWith(p)
+    })
+    return doc.body.innerHTML
+  }
+
+  function importDocumentFromHtml(html: string, title: string) {
+    saveEditorContent()
+    const normalized = normalizeImportedHtml(html)
+    const sanitized = sanitizeHtml(normalized)
+    const doc = createTypewriterDocument(title || 'Geïmporteerd document')
+    const withContent = { ...doc, content: sanitized }
+    upsertTypewriterDocument(withContent)
+    const nextDocuments = [withContent, ...documentsRef.current.filter((item) => !item.deletedAt)]
+    documentsRef.current = nextDocuments
+    setDocuments(nextDocuments)
+    setActiveId(withContent.id)
+    setOpenDocIds((prev) => [...prev, withContent.id])
+    setSelectedText('')
+    setStatus('Document geïmporteerd')
+  }
+
+  async function handleImportFile() {
+    setImportMenuOpen(false)
+    const result = await (window as any).api.importDocument()
+    if (!result || result.canceled) return
+    if (!result.ok) { setStatus(`Importfout: ${result.error}`); return }
+    importDocumentFromHtml(result.html, result.title)
+  }
+
+  async function handleImportGoogleDocs() {
+    const url = googleDocsUrl.trim()
+    if (!url) return
+    setImportingGoogleDocs(true)
+    try {
+      const result = await (window as any).api.importGoogleDoc(url)
+      if (!result.ok) { setStatus(`Importfout: ${result.error}`); return }
+      importDocumentFromHtml(result.html, result.title)
+      setGoogleDocsUrl('')
+      setImportMenuOpen(false)
+    } finally {
+      setImportingGoogleDocs(false)
+    }
   }
 
   function closeTab(docId: string) {
@@ -1344,6 +1403,58 @@ export default function TypewriterPage({ joinDocId }: Props) {
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
               </button>
+              <div className="relative mb-2 ml-0.5">
+                <button
+                  type="button"
+                  onClick={() => setImportMenuOpen((open) => !open)}
+                  className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-white/30 transition-colors hover:bg-white/[0.07] hover:text-white/65"
+                  title="Importeer document"
+                  aria-label="Importeer document"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                </button>
+                {importMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setImportMenuOpen(false)} />
+                    <div className="absolute left-0 top-8 z-50 w-72 rounded-xl border border-white/[0.10] bg-[#1a1a1a] p-3 shadow-2xl">
+                      <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-widest text-white/30">Importeer document</p>
+                      <button
+                        type="button"
+                        onClick={handleImportFile}
+                        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-[13px] text-white/70 transition-colors hover:bg-white/[0.07] hover:text-white/90"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                          <polyline points="14 2 14 8 20 8"/>
+                        </svg>
+                        Word (.docx) of Pages (.pages)
+                      </button>
+                      <div className="mt-2 space-y-1.5">
+                        <input
+                          type="url"
+                          value={googleDocsUrl}
+                          onChange={(e) => setGoogleDocsUrl(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') handleImportGoogleDocs() }}
+                          placeholder="Plak Google Docs-link..."
+                          className="w-full rounded-lg border border-white/[0.10] bg-white/[0.04] px-3 py-2 text-[12px] text-white/80 outline-none placeholder:text-white/25 focus:border-white/[0.20]"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleImportGoogleDocs}
+                          disabled={!googleDocsUrl.trim() || importingGoogleDocs}
+                          className="flex w-full items-center justify-center gap-2 rounded-lg bg-white/[0.07] px-3 py-2 text-[12px] text-white/60 transition-colors hover:bg-white/[0.12] hover:text-white/80 disabled:opacity-40"
+                        >
+                          {importingGoogleDocs ? 'Bezig...' : 'Importeer Google Docs'}
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
               <div className="ml-auto flex flex-shrink-0 items-center gap-1.5 mb-2 mr-3">
                 {editorStats.words > 0 && (
                   <span className="hidden text-[11px] text-white/30 lg:inline">

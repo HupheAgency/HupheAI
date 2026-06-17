@@ -66,7 +66,7 @@ import { loadSavedImagesAsMediaAssets, mergeMediaAssetSources } from '../lib/ate
 import { buildProjectFromRefs, type CrossFormatSeed } from '../lib/atelier-cross-format'
 import { findClientByTemplateHint, parseAtelierIntent, type AtelierIntent } from '../lib/atelier-intent'
 import { buildAtelierCreativePlan, summarizeCreativePlan, type AtelierCreativePlan } from '../lib/atelier-creative-plan'
-import { loadModulePrompt } from '../lib/atelier-module-config'
+import { loadModuleModels, loadModulePrompt } from '../lib/atelier-module-config'
 import {
   getHtmlPresentationTemplate,
   getKeynoteBackedClientIds,
@@ -224,11 +224,42 @@ type AtelierPromptMessage = { role: 'user' | 'assistant'; content: string; model
 const ATELIER_CHAT_MODEL_KEY = 'huphe:atelier-chat-model'
 const MEDIA_CHAT_MODEL_KEY = 'huphe:atelier-chat-model:media'
 const BANNER_CHAT_MODEL_KEY = 'huphe:atelier-chat-model:banner'
+const SAVED_OPENROUTER_MODELS_KEY = 'huphe:saved-openrouter-models'
 
 export const MODULE_DEFAULT_MODELS: Record<string, string> = {
   media: 'google/gemini-2.5-pro',
   banner: 'google/gemini-2.5-pro',
   presentation: 'anthropic/claude-sonnet-4-5',
+}
+
+function loadPersonalOpenRouterModels(): AtelierMediaModel[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAVED_OPENROUTER_MODELS_KEY) ?? '[]')
+    if (!Array.isArray(saved)) return []
+    return saved.map((model: any) => ({
+      id: model.id ?? model.model,
+      label: model.label ?? model.name ?? model.id ?? model.model,
+      model: model.model ?? model.id,
+    })).filter((model: AtelierMediaModel) => model.id && model.model)
+  } catch {
+    return []
+  }
+}
+
+function modelsForModule(moduleType: 'presentation' | 'banners' | 'print'): AtelierMediaModel[] {
+  const configured = loadModuleModels(moduleType).map((model) => ({
+    id: model.id,
+    label: model.label,
+    model: model.model,
+    description: model.provider,
+    modality: model.modality,
+  }))
+  const byId = new Map<string, AtelierMediaModel>()
+  for (const model of [...configured, ...loadPersonalOpenRouterModels()]) {
+    if (!model.id || model.modality === 'image' || model.modality === 'video') continue
+    byId.set(model.id, model)
+  }
+  return Array.from(byId.values())
 }
 
 type Mode = '1' | '2'
@@ -385,7 +416,9 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
   const [lastAtelierIntent, setLastAtelierIntent] = useState<AtelierIntent | null>(null)
   const [atelierCreationResetKey, setAtelierCreationResetKey] = useState(0)
   const [atelierMediaProjects, setAtelierMediaProjects] = useAtelierMediaProjects()
-  const [activeAtelierProjectId, setActiveAtelierProjectId] = useState<string | null>(initialMediaProjectId ?? null)
+  const [activeAtelierProjectId, setActiveAtelierProjectId] = useState<string | null>(
+    initialMediaProjectId ?? null
+  )
   const [crossFormatSeed, setCrossFormatSeed] = useState<CrossFormatSeed | null>(null)
   const [savedBannerProjects, setSavedBannerProjects] = useState<SavedBannerProject[]>(() => loadBannerProjects())
   const [activeBannerProjectId, setActiveBannerProjectId] = useState<string | null>(initialCreationType === 'banners' ? initialMediaProjectId ?? null : null)
@@ -449,21 +482,21 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
   useEffect(() => {
     let cancelled = false
     const api = (window as any).api
-    if (!api?.engine?.listAgents) {
-      setAtelierModelsLoading(false)
-      return
-    }
-    api.engine.listAgents().then((res: any) => {
+    Promise.resolve(api?.engine?.listAgents?.()).then((res: any) => {
       if (cancelled) return
       const agents: AtelierMediaModel[] = (res?.agents ?? []).map((agent: any) => ({
         id: agent.id,
         label: agent.label ?? agent.id,
         model: agent.model ?? agent.id,
       }))
-      setAtelierChatModels(agents)
+      const configured = modelsForModule('presentation')
+      const merged = new Map<string, AtelierMediaModel>()
+      for (const model of [...configured, ...agents]) merged.set(model.id, model)
+      const nextModels = Array.from(merged.values())
+      setAtelierChatModels(nextModels)
       const saved = localStorage.getItem(ATELIER_CHAT_MODEL_KEY)
       if (!saved) {
-        const first = agents[0]?.id ?? ''
+        const first = nextModels[0]?.id ?? ''
         if (first) {
           setAtelierSelectedModelId(first)
           localStorage.setItem(ATELIER_CHAT_MODEL_KEY, first)
@@ -475,6 +508,9 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
       cancelled = true
     }
   }, [])
+
+  const bannerChatModels = useMemo(() => modelsForModule('banners'), [])
+  const printChatModels = useMemo(() => modelsForModule('print'), [])
 
   useEffect(() => {
     if (atelierSelectedModelId) localStorage.setItem(ATELIER_CHAT_MODEL_KEY, atelierSelectedModelId)
@@ -5182,7 +5218,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
             onPromptSubmit={(prompt) => handleAtelierPromptSubmit(prompt, 'banners')}
             promptMessages={atelierCreationType === 'banners' ? atelierPromptMessages : undefined}
             autonomousInput={atelierCreationType === 'banners' ? pendingBannerAuto : null}
-            chatModels={atelierChatModels}
+            chatModels={bannerChatModels}
             chatModelsLoading={atelierModelsLoading}
             chatSelectedModelId={bannerSelectedModelId}
             onChatModelSelect={setBannerSelectedModelId}
@@ -5202,7 +5238,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
             seed: printSeed,
             onPromptSubmit: (prompt: string) => handleAtelierPromptSubmit(prompt, 'print'),
             promptMessages: atelierCreationType === 'print' ? atelierPromptMessages : undefined,
-            chatModels: atelierChatModels,
+            chatModels: printChatModels,
             chatModelsLoading: atelierModelsLoading,
             chatSelectedModelId: printSelectedModelId,
             onChatModelSelect: setPrintSelectedModelId,

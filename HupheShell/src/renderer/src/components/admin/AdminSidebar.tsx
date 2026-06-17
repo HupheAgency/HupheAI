@@ -6,6 +6,7 @@ export type AdminTabId =
   | 'templates'
   | 'modules'
   | 'modules_prompts'
+  | 'modules_models'
   | 'modules_globaal'
   | 'platform'
   | 'platform_fees'
@@ -52,6 +53,7 @@ export const ADMIN_NAV_GROUPS: Array<{
     description: 'Prompts en toegang',
     items: [
       { id: 'modules_prompts', label: 'AI-prompts',     description: 'Gedrag per module instellen' },
+      { id: 'modules_models',  label: 'Modellen',       description: 'Modelkeuze per module' },
       { id: 'modules_globaal', label: 'Globaal',        description: 'Modules aan/uitzetten' },
     ],
   },

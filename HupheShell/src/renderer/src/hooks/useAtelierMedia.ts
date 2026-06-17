@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { upsertAsset as upsertLibraryAsset } from '../lib/asset-library'
 import { supabase } from '../lib/supabase'
 import { notifyIfCreditsRequired } from '../lib/credits-required'
+import { loadModuleModels, loadImagePipelinePrompt, type ImagePipelineSlot } from '../lib/atelier-module-config'
 
 export type AtelierMediaProjectType = 'images' | 'video'
 
@@ -121,7 +122,16 @@ export function useAtelierMediaCreator({
       }
 
       if (cancelled) return
-      nextModels = nextModels.filter((model) => isAtelierModelForMedia(model, mediaType))
+      const allowedModels = loadModuleModels(mediaType)
+      const allowedIds = new Set(allowedModels.map((model) => model.id || model.model))
+      nextModels = nextModels
+        .filter((model) => isAtelierModelForMedia(model, mediaType))
+        .filter((model) => allowedIds.size === 0 || allowedIds.has(model.id) || allowedIds.has(model.model))
+      if (nextModels.length === 0 && allowedModels.length > 0) {
+        nextModels = allowedModels
+          .filter((model) => model.modality === (mediaType === 'images' ? 'image' : 'video'))
+          .map((model) => ({ id: model.id, label: model.label, model: model.model, modality: model.modality }))
+      }
       const preferredModelId = activeProject?.modelId
       const preferredModel = activeProject?.model
       setModels(nextModels)
@@ -201,7 +211,7 @@ export function useAtelierMediaCreator({
     })
   }
 
-  async function handleGenerate(event: FormEvent<HTMLFormElement>, maskDataUrl?: string) {
+  async function handleGenerate(event: FormEvent<HTMLFormElement>, maskDataUrl?: string, referenceImageOverride?: string) {
     event.preventDefault()
     if (!canGenerate || !selectedModel || !mediaType) return
     const promptText = prompt.trim()
@@ -210,7 +220,22 @@ export function useAtelierMediaCreator({
     const referenceAsset = activeResultIndex != null && resultItems[activeResultIndex]
       ? resultItems[activeResultIndex]
       : (resultItems.length > 0 ? resultItems[resultItems.length - 1] : null)
-    const referenceImageSrc = mediaType === 'images' ? referenceAsset?.src : undefined
+    const referenceImageSrc = mediaType === 'images' ? referenceAsset?.src : referenceImageOverride
+
+    let imagePipelineSystemPrompt: string | undefined
+    if (mediaType === 'images') {
+      let slot: ImagePipelineSlot
+      if (maskDataUrl) {
+        slot = 'mask-edit'
+      } else if (referenceImageSrc) {
+        slot = 'edit'
+      } else {
+        slot = 'generate'
+      }
+      const template = loadImagePipelinePrompt(slot)
+      imagePipelineSystemPrompt = template.replace('{{prompt}}', promptText)
+    }
+
     setGenerating(true)
     setError('')
     try {
@@ -218,8 +243,8 @@ export function useAtelierMediaCreator({
       const { data: { session } } = await supabase!.auth.getSession()
       const accessToken = session?.access_token ?? undefined
       const res = mediaType === 'images'
-        ? await api.generateAtelierImage(promptText, selectedModel.model, undefined, referenceImageSrc, accessToken, selectedModel.label, maskDataUrl)
-        : await api.generateAtelierVideo(promptText, selectedModel.model, undefined, accessToken)
+        ? await api.generateAtelierImage(promptText, selectedModel.model, imagePipelineSystemPrompt, referenceImageSrc, accessToken, selectedModel.label, maskDataUrl)
+        : await api.generateAtelierVideo(promptText, selectedModel.model, undefined, accessToken, referenceImageSrc)
       if (!res?.ok) {
         const errMsg = res?.error ?? 'Genereren mislukt.'
         if (!notifyIfCreditsRequired(errMsg)) {
@@ -341,7 +366,7 @@ export function useAtelierMediaCreator({
     try {
       const api = (window as any).api
       const res = await api.engine.saveImage({ src })
-      if (!res?.ok) setError(res?.error ?? 'Afbeelding opslaan mislukt.')
+      if (!res?.ok && !res?.canceled) setError(res?.error ?? 'Afbeelding opslaan mislukt.')
     } catch (err: any) {
       setError(err.message ?? 'Afbeelding opslaan mislukt.')
     }

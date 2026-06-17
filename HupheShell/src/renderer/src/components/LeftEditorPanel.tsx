@@ -8,6 +8,7 @@ import ImportResultBanner from './ImportResultBanner'
 import ImportFidelityReport from './ImportFidelityReport'
 import SlidePreviewCard from './SlidePreviewCard'
 import SlideAnnotationOverlay from './SlideAnnotationOverlay'
+import { AtelierPromptBar } from './AtelierPromptBar'
 
 type BlockCbs = {
   onFieldEdit: (role: string, newText: string) => void
@@ -234,8 +235,6 @@ export default function LeftEditorPanel({
   // so the thumbnail strip stays at the drop position instead of jumping away.
   const suppressThumbScrollRef = React.useRef(false)
   const [imageHovered, setImageHovered] = React.useState(false)
-  const [canvasPrompt, setCanvasPrompt] = React.useState('')
-  const canvasPromptRef = React.useRef<HTMLInputElement>(null)
 
   React.useEffect(() => {
     if (viewMode !== 'focus') return
@@ -253,7 +252,6 @@ export default function LeftEditorPanel({
     // Keep zoom when navigating — only re-center the offset.
     setCanvasOffset({ x: 0, y: 0 })
     setImageHovered(false)
-    setCanvasPrompt('')
   }, [activeIdx])
 
   React.useEffect(() => {
@@ -837,45 +835,15 @@ export default function LeftEditorPanel({
             className="flex-shrink-0 px-4 pb-6 pt-1 transition-opacity duration-150"
             style={{ opacity: imageHovered ? 0 : 1, pointerEvents: imageHovered ? 'none' : 'auto' }}
           >
-            <form
-              onSubmit={(e) => {
-                e.preventDefault()
-                const trimmed = canvasPrompt.trim()
-                if (!trimmed || canvasPromptLoading || !onCanvasPromptSubmit) return
-                onCanvasPromptSubmit(trimmed)
-                setCanvasPrompt('')
-                requestAnimationFrame(() => canvasPromptRef.current?.focus())
-              }}
-              className="flex w-full items-center gap-2 rounded-[2rem] border border-white/[0.05] bg-[#1e1e1e] pl-5 pr-2 shadow-sm transition-[border-color] duration-300 focus-within:border-white/[0.15] mx-auto max-w-3xl"
-              style={{ height: 48 }}
-            >
-              <input
-                ref={canvasPromptRef}
-                value={canvasPrompt}
-                onChange={(e) => setCanvasPrompt(e.target.value)}
-                placeholder="Verander iets op deze slide…"
-                disabled={canvasPromptLoading}
-                className="flex-1 min-w-0 border-none bg-transparent text-base text-white outline-none placeholder:text-white/40"
+            <div className="mx-auto max-w-3xl">
+              <AtelierPromptBar
+                placeholder="Verander iets op deze slide..."
+                busyPlaceholder="AI past de slide aan..."
+                loading={canvasPromptLoading}
+                disabled={canvasPromptLoading || !onCanvasPromptSubmit}
+                onSubmit={(prompt) => onCanvasPromptSubmit?.(prompt)}
               />
-              <button
-                type="submit"
-                disabled={canvasPromptLoading || !canvasPrompt.trim()}
-                style={{
-                  width: 32, height: 32, borderRadius: 999, border: 0, flexShrink: 0,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: canvasPromptLoading || !canvasPrompt.trim() ? 'rgba(255,255,255,0.10)' : '#facc15',
-                  color: canvasPromptLoading || !canvasPrompt.trim() ? 'rgba(255,255,255,0.35)' : '#000',
-                  cursor: canvasPromptLoading || !canvasPrompt.trim() ? 'default' : 'pointer',
-                  transition: 'background 0.15s ease',
-                }}
-              >
-                {canvasPromptLoading ? (
-                  <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
-                ) : (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
-                )}
-              </button>
-            </form>
+            </div>
           </div>
 
         </div>

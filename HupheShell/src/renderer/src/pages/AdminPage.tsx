@@ -9,7 +9,25 @@ import { AdminOverview } from '../components/admin/AdminOverview'
 import { Toggle } from '../components/Toggle'
 import { clearAtelierSubTypeCache } from '../components/AtelierCreationModeButtons'
 import UserModulePanel from './UserModulePanel'
-import { MODULE_TYPES, MODULE_LABELS, loadModulePrompt, saveModulePrompt, resetModulePrompt, getDefaultModulePrompt } from '../lib/atelier-module-config'
+import {
+  MODULE_TYPES,
+  MODULE_LABELS,
+  loadModulePrompt,
+  saveModulePrompt,
+  resetModulePrompt,
+  getDefaultModulePrompt,
+  loadModuleModels,
+  saveModuleModels,
+  resetModuleModels,
+  getDefaultModuleModels,
+  type ModuleModelConfig,
+  IMAGE_PIPELINE_SLOTS,
+  loadImagePipelinePrompt,
+  saveImagePipelinePrompt,
+  resetImagePipelinePrompt,
+  getDefaultImagePipelinePrompt,
+  type ImagePipelineSlot,
+} from '../lib/atelier-module-config'
 import {
   deleteAdminHtmlTemplate,
   htmlTemplateToTemplateData,
@@ -106,7 +124,50 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
   const [modulePromptDrafts, setModulePromptDrafts] = useState<Record<string, string>>(() =>
     Object.fromEntries(MODULE_TYPES.map((type) => [type, loadModulePrompt(type)]))
   )
+  const [pipelineDrafts, setPipelineDrafts] = useState<Record<ImagePipelineSlot, string>>(() => ({
+    generate: loadImagePipelinePrompt('generate'),
+    edit: loadImagePipelinePrompt('edit'),
+    'mask-edit': loadImagePipelinePrompt('mask-edit'),
+  }))
+  const [pipelineSaved, setPipelineSaved] = useState<Record<string, boolean>>({})
+  const [moduleModelDrafts, setModuleModelDrafts] = useState<Record<string, ModuleModelConfig[]>>(() =>
+    Object.fromEntries(MODULE_TYPES.map((type) => [type, loadModuleModels(type)]))
+  )
+  const [moduleModelInputs, setModuleModelInputs] = useState<Record<string, string>>({})
   const [moduleSaved, setModuleSaved] = useState<Record<string, boolean>>({})
+  const [moduleModelsSaved, setModuleModelsSaved] = useState<Record<string, boolean>>({})
+  const [moduleModelSuggestions, setModuleModelSuggestions] = useState<Record<string, { id: string; label: string; model: string }[]>>({})
+  const [moduleModelDropdownRect, setModuleModelDropdownRect] = useState<Record<string, { top: number; left: number; width: number }>>({})
+  const moduleModelSearchTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const moduleModelInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
+
+  function handleModuleModelInputChange(type: string, value: string, modality: string) {
+    setModuleModelInputs((prev) => ({ ...prev, [type]: value }))
+    // Update dropdown anchor position
+    const inputEl = moduleModelInputRefs.current[type]
+    if (inputEl) {
+      const rect = inputEl.getBoundingClientRect()
+      setModuleModelDropdownRect((prev) => ({ ...prev, [type]: { top: rect.bottom + 4, left: rect.left, width: rect.width } }))
+    }
+    clearTimeout(moduleModelSearchTimers.current[type])
+    if (!value.trim() || value.length < 2) {
+      setModuleModelSuggestions((prev) => ({ ...prev, [type]: [] }))
+      return
+    }
+    moduleModelSearchTimers.current[type] = setTimeout(async () => {
+      try {
+        const api = (window as any).api
+        const res = await api.engine.searchOpenRouterModels(value.trim())
+        if (!res?.ok) return
+        const keyword = modality === 'image' ? ['image', 'flux', 'banana', 'imagen', 'seedream', 'recraft'] : modality === 'video' ? ['video', 'veo', 'kling', 'runway', 'luma'] : []
+        const results = (res.models ?? [])
+          .filter((m: any) => keyword.length === 0 || keyword.some((kw) => `${m.id} ${m.label} ${m.model} ${m.modality ?? ''}`.toLowerCase().includes(kw)))
+          .slice(0, 8)
+          .map((m: any) => ({ id: m.id, label: m.label ?? m.id, model: m.model ?? m.id }))
+        setModuleModelSuggestions((prev) => ({ ...prev, [type]: results }))
+      } catch {}
+    }, 300)
+  }
 
   const [openrouterKey, setOpenrouterKey] = useState('')
   const [openrouterHasKey, setOpenrouterHasKey] = useState(false)
@@ -1294,7 +1355,51 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                   </button>
                 ))}
               </div>
-              {MODULE_TYPES.map((type) => activeModuleTab !== type ? null : (
+              {MODULE_TYPES.map((type) => activeModuleTab !== type ? null : type === 'images' ? (
+                <div key={type} className="p-4 space-y-5">
+                  <p className="text-white/35 text-xs">
+                    De pijplijn detecteert automatisch in welke staat de gebruiker zich bevindt en stuurt de bijbehorende systeemprompt mee. Gebruik <code className="text-white/50 bg-white/[0.06] px-1 rounded">{'{{prompt}}'}</code> als plaatshouder voor de gebruikersinput.
+                  </p>
+                  {IMAGE_PIPELINE_SLOTS.map((slot) => (
+                    <div key={slot.id} className="space-y-2">
+                      <div>
+                        <p className="text-white/70 text-xs font-semibold">{slot.label}</p>
+                        <p className="text-white/30 text-xs">{slot.trigger}</p>
+                      </div>
+                      <textarea
+                        value={pipelineDrafts[slot.id] ?? ''}
+                        onChange={(e) => setPipelineDrafts((prev) => ({ ...prev, [slot.id]: e.target.value }))}
+                        rows={6}
+                        className="w-full bg-[#0f0f0f] border border-white/[0.08] focus:border-[#facc15]/40 rounded-xl px-3 py-2.5 text-white/70 text-xs leading-relaxed outline-none transition-colors resize-y font-mono placeholder:text-white/20"
+                        placeholder={`Systeemprompt voor "${slot.label}"…`}
+                      />
+                      <div className="flex items-center gap-2 justify-end">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            resetImagePipelinePrompt(slot.id)
+                            setPipelineDrafts((prev) => ({ ...prev, [slot.id]: getDefaultImagePipelinePrompt(slot.id) }))
+                          }}
+                          className="text-xs text-white/35 hover:text-white/60 transition-colors px-3 py-1.5 rounded-lg border border-white/[0.06] hover:border-white/[0.12]"
+                        >
+                          Herstel standaard
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            saveImagePipelinePrompt(slot.id, pipelineDrafts[slot.id] ?? '')
+                            setPipelineSaved((prev) => ({ ...prev, [slot.id]: true }))
+                            setTimeout(() => setPipelineSaved((prev) => ({ ...prev, [slot.id]: false })), 2000)
+                          }}
+                          className="bg-[#facc15] hover:bg-[#fde047] text-black text-xs font-semibold rounded-lg px-4 py-1.5 transition-colors"
+                        >
+                          {pipelineSaved[slot.id] ? '✓ Opgeslagen' : 'Opslaan'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
                 <div key={type} className="p-4 space-y-3">
                   <textarea
                     value={modulePromptDrafts[type] ?? ''}
@@ -1328,6 +1433,148 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                   </div>
                 </div>
               ))}
+            </div>
+          </section>}
+
+          {/* Atelier module models */}
+          {activeTab === 'modules_models' && <section>
+            <div className="mb-4">
+              <h2 className="text-white/70 text-xs font-semibold uppercase tracking-widest">Modeltoegang per module</h2>
+              <p className="text-white/35 text-xs mt-1">Bepaal welke modellen zichtbaar zijn in de promptbar van elke module. Zo komt er geen tekstmodel in Afbeeldingen en geen beeldmodel in de tekstmodules.</p>
+            </div>
+            <div className="bg-[#141414] border border-white/[0.07] rounded-2xl overflow-hidden">
+              <div className="flex border-b border-white/[0.06]">
+                {MODULE_TYPES.map((type) => (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => setActiveModuleTab(type)}
+                    className={['flex-1 px-3 py-2.5 text-xs font-medium transition-colors', activeModuleTab === type ? 'text-white bg-white/[0.05]' : 'text-white/40 hover:text-white/70'].join(' ')}
+                  >
+                    {MODULE_LABELS[type as keyof typeof MODULE_LABELS]}
+                  </button>
+                ))}
+              </div>
+              {MODULE_TYPES.map((type) => {
+                if (activeModuleTab !== type) return null
+                const modality = type === 'images' ? 'image' : type === 'video' ? 'video' : 'text'
+                const draft = moduleModelDrafts[type] ?? []
+                const input = moduleModelInputs[type] ?? ''
+                return (
+                  <div key={type} className="p-4 space-y-4">
+                    <div className="rounded-xl border border-white/[0.07] bg-[#0f0f0f] divide-y divide-white/[0.05] overflow-hidden">
+                      {draft.length === 0 ? (
+                        <p className="px-4 py-4 text-xs text-white/30">Geen modellen ingesteld.</p>
+                      ) : draft.map((model) => (
+                        <div key={model.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-white/80">{model.label}</p>
+                            <p className="mt-0.5 truncate font-mono text-[11px] text-white/30">{model.model}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setModuleModelDrafts((prev) => ({ ...prev, [type]: draft.filter((item) => item.id !== model.id) }))}
+                            className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-white/30 transition-colors hover:bg-white/[0.06] hover:text-red-300"
+                            title="Model verwijderen"
+                          >
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="relative flex gap-2">
+                      <div className="relative min-w-0 flex-1">
+                        <input
+                          ref={(el) => { moduleModelInputRefs.current[type] = el }}
+                          value={input}
+                          onChange={(e) => handleModuleModelInputChange(type, e.target.value, modality)}
+                          onBlur={() => setTimeout(() => setModuleModelSuggestions((prev) => ({ ...prev, [type]: [] })), 150)}
+                          placeholder={modality === 'text' ? 'Zoek model...' : modality === 'image' ? 'Zoek afbeeldingsmodel...' : 'Zoek videomodel...'}
+                          spellCheck={false}
+                          className="w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 font-mono text-xs text-white/70 outline-none transition-colors placeholder:text-white/20 focus:border-[#facc15]/40"
+                        />
+                        {(moduleModelSuggestions[type] ?? []).length > 0 && moduleModelDropdownRect[type] && (
+                          <div
+                            className="fixed z-[9999] overflow-hidden rounded-xl border border-white/[0.10] bg-[#1a1a1a] shadow-2xl"
+                            style={{ top: moduleModelDropdownRect[type].top, left: moduleModelDropdownRect[type].left, width: moduleModelDropdownRect[type].width }}
+                          >
+                            {(moduleModelSuggestions[type] ?? []).map((suggestion) => (
+                              <button
+                                key={suggestion.id}
+                                type="button"
+                                onMouseDown={(e) => {
+                                  e.preventDefault()
+                                  const id = suggestion.model || suggestion.id
+                                  if (draft.some((m) => m.id === id || m.model === id)) return
+                                  const next: ModuleModelConfig = {
+                                    id,
+                                    label: suggestion.label,
+                                    model: id,
+                                    provider: modality === 'image' ? 'fal' : 'openrouter',
+                                    modality,
+                                  }
+                                  setModuleModelDrafts((prev) => ({ ...prev, [type]: [...draft, next] }))
+                                  setModuleModelInputs((prev) => ({ ...prev, [type]: '' }))
+                                  setModuleModelSuggestions((prev) => ({ ...prev, [type]: [] }))
+                                }}
+                                className="flex w-full flex-col px-3 py-2.5 text-left transition-colors hover:bg-white/[0.06] border-b border-white/[0.05] last:border-0"
+                              >
+                                <span className="text-xs font-medium text-white/80">{suggestion.label}</span>
+                                <span className="mt-0.5 font-mono text-[10px] text-white/30">{suggestion.model || suggestion.id}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const id = input.trim()
+                          if (!id || draft.some((model) => model.id === id || model.model === id)) return
+                          const next: ModuleModelConfig = {
+                            id,
+                            label: id.split('/').pop() || id,
+                            model: id,
+                            provider: modality === 'image' ? 'fal' : 'openrouter',
+                            modality,
+                          }
+                          setModuleModelDrafts((prev) => ({ ...prev, [type]: [...draft, next] }))
+                          setModuleModelInputs((prev) => ({ ...prev, [type]: '' }))
+                          setModuleModelSuggestions((prev) => ({ ...prev, [type]: [] }))
+                        }}
+                        className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-xs font-semibold text-white/55 transition-colors hover:bg-white/[0.08] hover:text-white/80"
+                      >
+                        Toevoegen
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetModuleModels(type)
+                          setModuleModelDrafts((prev) => ({ ...prev, [type]: getDefaultModuleModels(type) }))
+                        }}
+                        className="text-xs text-white/35 hover:text-white/60 transition-colors px-3 py-1.5 rounded-lg border border-white/[0.06] hover:border-white/[0.12]"
+                      >
+                        Herstel standaard
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          saveModuleModels(type, draft)
+                          setModuleModelsSaved((prev) => ({ ...prev, [type]: true }))
+                          setTimeout(() => setModuleModelsSaved((prev) => ({ ...prev, [type]: false })), 2000)
+                        }}
+                        className="bg-[#facc15] hover:bg-[#fde047] text-black text-xs font-semibold rounded-lg px-4 py-1.5 transition-colors"
+                      >
+                        {moduleModelsSaved[type] ? '✓ Opgeslagen' : 'Opslaan'}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </section>}
 

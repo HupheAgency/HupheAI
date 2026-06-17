@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, shell } from 'electron'
 import { exec, spawn } from 'child_process'
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
+import mammoth from 'mammoth'
 import { tmpdir } from 'os'
 import { basename, dirname, extname, resolve, sep, join } from 'path'
 import { pathToFileURL } from 'url'
@@ -2312,18 +2313,25 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
   const originalPrompt = prompt
   const hasMaskInput = Boolean(maskImageSrc)
 
-  // Converteer file:// referentie naar base64 data URL zodat OpenRouter hem kan lezen
+  // Converteer file:// / huphe:// referentie naar base64 data URL zodat OpenRouter hem kan lezen
   let referenceImage: string | null = null
   if (referenceImageSrc) {
     if (referenceImageSrc.startsWith('data:') || referenceImageSrc.startsWith('http')) {
       referenceImage = referenceImageSrc
-    } else if (referenceImageSrc.startsWith('file://')) {
-      try {
-        const filePath = referenceImageSrc.slice('file://'.length)
-        const buf = readFileSync(filePath)
-        const ext = filePath.endsWith('.png') ? 'png' : 'jpeg'
-        referenceImage = `data:image/${ext};base64,${buf.toString('base64')}`
-      } catch { referenceImage = null }
+    } else {
+      let localPath: string | null = null
+      if (referenceImageSrc.startsWith('file://')) {
+        localPath = referenceImageSrc.slice('file://'.length)
+      } else if (referenceImageSrc.startsWith('huphe://file/')) {
+        localPath = decodeURIComponent(referenceImageSrc.slice('huphe://file/'.length))
+      }
+      if (localPath) {
+        try {
+          const buf = readFileSync(localPath)
+          const ext = localPath.endsWith('.png') ? 'png' : localPath.endsWith('.webp') ? 'webp' : 'jpeg'
+          referenceImage = `data:image/${ext};base64,${buf.toString('base64')}`
+        } catch { referenceImage = null }
+      }
     }
   }
   const isEdit = referenceImage !== null
@@ -2353,6 +2361,8 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
         if (translated) {
           console.log('[image:generate-ai] prompt vertaald naar EN:', translated.slice(0, 120))
           prompt = translated
+          // Sync translated text into pipeline systemPrompt (renderer embedded original Dutch)
+          if (systemPrompt) systemPrompt = systemPrompt.replace(originalPrompt, translated)
         }
       }
     } catch (e) {
@@ -2371,30 +2381,35 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
     // 2. Als dit een 404 geeft met de melding dat 'text' niet ondersteund wordt (bijv. Flux/Riverflow), 
     //    dan proberen we het opnieuw met modalities: ['image'].
 
-    async function performOpenRouterRequest(targetModalities: string[]) {
+    async function performOpenRouterRequest(targetModalities: string[], includeReference = true) {
       const isLLM = targetModalities.includes('text')
 
       let finalPrompt: string
-      if (hasMaskInput && isLLM) {
-        finalPrompt = `Je bent een AI-beeldeditor. Je ontvangt een originele afbeelding en een masker. In het masker zijn de WITTE gebieden de regio's die je moet aanpassen; de ZWARTE gebieden blijven ongewijzigd. Pas de afbeelding aan volgens de instructie, maar alleen binnen de witte (gemaskerde) regio's. Behoud de rest van de afbeelding exact. Genereer de aangepaste afbeelding en geef GEEN tekstuele reactie.\n\nInstructie: ${prompt}`
-      } else if (isEdit && isLLM) {
-        finalPrompt = `Pas de bijgevoegde afbeelding aan op basis van de volgende instructie. Gebruik de bijgevoegde afbeelding als directe referentie en behoud compositie, uitsnede, stijl, belichting, achtergrond en alle niet-genoemde details zo exact mogelijk. Wijzig alleen wat expliciet in de instructie staat. Genereer de aangepaste afbeelding en geef geen tekstuele reactie.\n\nInstructie: ${prompt}`
+      if (isLLM && systemPrompt) {
+        // Renderer has already embedded the user prompt via {{prompt}} substitution.
+        finalPrompt = systemPrompt
       } else if (isLLM) {
-        finalPrompt = `Genereer een afbeelding op basis van de volgende beschrijving. Geef GEEN tekstuele reactie, genereer uitsluitend de afbeelding.\n\nBeschrijving: ${prompt}`
-      } else if (systemPrompt) {
-        finalPrompt = systemPrompt.includes('{{text}}') ? systemPrompt.replace('{{text}}', prompt) : `${systemPrompt}\n\nSubject: ${prompt}`
+        // Fallback when no pipeline prompt is configured (e.g., direct API calls).
+        if (hasMaskInput) {
+          finalPrompt = `Je bent een AI-beeldeditor. De bijgevoegde afbeelding toont het origineel met een ORANJE gemarkeerd gebied. Pas uitsluitend het ORANJE gemarkeerde gebied aan. Behoud de rest precies zoals het is. Genereer de aangepaste afbeelding en geef GEEN tekstuele reactie.\n\nInstructie: ${prompt}`
+        } else if (isEdit) {
+          finalPrompt = `Pas de bijgevoegde afbeelding aan op basis van de instructie. Behoud compositie, stijl, belichting en alle niet-genoemde details exact. Genereer de aangepaste afbeelding en geef geen tekstuele reactie.\n\nInstructie: ${prompt}`
+        } else {
+          finalPrompt = `Genereer een afbeelding op basis van de volgende beschrijving. Geef GEEN tekstuele reactie, genereer uitsluitend de afbeelding.\n\nBeschrijving: ${prompt}`
+        }
       } else {
         finalPrompt = prompt
       }
 
       const messages: any[] = []
-      if (isLLM && systemPrompt && !isEdit && !hasMaskInput) messages.push({ role: 'system', content: systemPrompt })
 
       const contentParts: any[] = []
-      if (referenceImage) contentParts.push({ type: 'image_url', image_url: { url: referenceImage } })
-      if (maskImageSrc) {
-        contentParts.push({ type: 'text', text: 'Masker (wit = aanpassen, zwart = behouden):' })
-        contentParts.push({ type: 'image_url', image_url: { url: maskImageSrc } })
+      if (includeReference) {
+        if (hasMaskInput && maskImageSrc) {
+          contentParts.push({ type: 'image_url', image_url: { url: maskImageSrc } })
+        } else if (referenceImage) {
+          contentParts.push({ type: 'image_url', image_url: { url: referenceImage } })
+        }
       }
       contentParts.push({ type: 'text', text: finalPrompt })
       const content: any = contentParts.length === 1 ? contentParts[0].text : contentParts
@@ -2409,15 +2424,61 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
       return callOpenRouter(payload, effectiveJwt)
     }
 
-    let res = await performOpenRouterRequest(['image', 'text'])
-    let raw = await res.text()
-
-    // Check of we een 404 krijgen specifiek voor de modaliteiten
-    if (res.status === 404 && raw.includes('output modalities: image, text')) {
-      console.log('[image:generate-ai] 404 op image+text, fallback naar image-only voor model:', model)
-      res = await performOpenRouterRequest(['image'])
-      raw = await res.text()
+    function extractImageFromResponse(json: any): { b64?: string; url?: string } | null {
+      const message = json?.choices?.[0]?.message
+      const images: any[] = message?.images ?? []
+      if (images.length > 0) {
+        const img = images[0]
+        if (typeof img === 'string') return img.startsWith('http') ? { url: img } : { b64: img }
+        if (img.b64_json) return { b64: img.b64_json }
+        if (img.image_url?.url) return img.image_url.url.startsWith('http') ? { url: img.image_url.url } : { b64: img.image_url.url }
+        if (img.url) return img.url.startsWith('http') ? { url: img.url } : { b64: img.url }
+      }
+      if (Array.isArray(message?.content)) {
+        for (const part of message.content) {
+          if (part?.type === 'image_url') {
+            const imgUrl: string = part.image_url?.url ?? part.url ?? ''
+            if (imgUrl.startsWith('data:')) return { b64: imgUrl }
+            if (imgUrl.startsWith('http')) return { url: imgUrl }
+          }
+        }
+      }
+      if (typeof message?.content === 'string') {
+        const m = message.content.match(/https?:\/\/[^\s)\]'"]+/i)
+        if (m) return { url: m[0] }
+      }
+      return null
     }
+
+    async function tryRequest(modalities: string[], includeReference: boolean): Promise<{ res: Response; raw: string; json: any } | null> {
+      const r = await performOpenRouterRequest(modalities, includeReference)
+      const rw = await r.text()
+      if (!r.ok) return { res: r, raw: rw, json: null }
+      try { return { res: r, raw: rw, json: JSON.parse(rw) } } catch { return { res: r, raw: rw, json: null } }
+    }
+
+    // Probeer: LLM met referentie → LLM zonder referentie (diffusion fallback) → image-only zonder referentie
+    const hasReference = Boolean(referenceImage || (hasMaskInput && maskImageSrc))
+    let attempt = await tryRequest(['image', 'text'], true)
+
+    // 404 voor text-modality → fall back naar image-only
+    if (attempt && attempt.res.status === 404 && attempt.raw.includes('output modalities: image, text')) {
+      console.log('[image:generate-ai] 404 op image+text, fallback naar image-only voor model:', model)
+      attempt = await tryRequest(['image'], true)
+    }
+
+    // Geen afbeelding terug maar wél referentie meegestuurd → model ondersteunt geen image input, retry zonder
+    if (attempt && attempt.res.ok && attempt.json && hasReference && !extractImageFromResponse(attempt.json)) {
+      console.log('[image:generate-ai] geen afbeelding met referentie, retry zonder referentie voor model:', model)
+      attempt = await tryRequest(['image', 'text'], false)
+      if (attempt && attempt.res.status === 404 && attempt.raw.includes('output modalities: image, text')) {
+        attempt = await tryRequest(['image'], false)
+      }
+    }
+
+    const res = attempt!.res
+    const raw = attempt!.raw
+    const json = attempt!.json
 
     console.log('[image:generate-ai] HTTP status:', res.status, res.statusText)
     console.log('[image:generate-ai] response body (eerste 400):', raw.slice(0, 400))
@@ -2436,100 +2497,48 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
       return { ok: false, error: errorMsg }
     }
 
-    let json: any
-    try { json = JSON.parse(raw) } catch {
+    if (!json) {
       return { ok: false, error: `Onverwacht antwoord (${res.status}): ${raw.slice(0, 200)}` }
     }
 
-    if (!res.ok) {
-      const msg = json?.error?.message ?? raw.slice(0, 200)
-      console.error('[image:generate-ai] ✗ OpenRouter fout:', msg)
-      return { ok: false, error: `OpenRouter fout ${res.status}: ${msg}` }
+    const found = extractImageFromResponse(json)
+    const pngMeta = { prompt: originalPrompt, model, modelLabel: modelLabel ?? model, createdAt: new Date().toISOString() }
+
+    if (found?.b64) {
+      let b64 = found.b64.replace(/^data:image\/\w+;base64,/, '')
+      const ext = b64.startsWith('iVBORw0KGgo') ? 'png' : found.b64.includes('image/png') ? 'png' : found.b64.includes('image/webp') ? 'webp' : 'jpg'
+      const dir = join(app.getPath('userData'), 'generated-images')
+      mkdirSync(dir, { recursive: true })
+      const filePath = join(dir, `huphe_generated_${Date.now()}.${ext}`)
+      writeFileSync(filePath, Buffer.from(b64, 'base64'))
+      writePngPromptMetadata(filePath, pngMeta)
+      console.log('[image:generate-ai] ✓ base64 afbeelding opgeslagen:', filePath)
+      return { ok: true, filePath: toHupheFileUrl(filePath) }
     }
 
-    // OpenRouter geeft beelden terug als base64 in message.images[]
-    const message = json?.choices?.[0]?.message
-    const images: any[] = message?.images ?? []
-
-    if (images.length > 0) {
-      const img = images[0]
-      let b64 = ''
-      let url = ''
-
-      if (typeof img === 'string') {
-        if (img.startsWith('http')) url = img
-        else b64 = img
-      } else if (typeof img === 'object') {
-        if (img.b64_json) b64 = img.b64_json
-        else if (img.image_url?.url) {
-          if (img.image_url.url.startsWith('http')) url = img.image_url.url
-          else b64 = img.image_url.url
-        }
-        else if (img.url) {
-          if (img.url.startsWith('http')) url = img.url
-          else b64 = img.url
-        }
-      }
-
-      const pngMeta = { prompt: originalPrompt, model, modelLabel: modelLabel ?? model, createdAt: new Date().toISOString() }
-      if (b64) {
-        b64 = b64.replace(/^data:image\/\w+;base64,/, '')
-        const ext = b64.startsWith('iVBORw0KGgo') ? 'png' : 'jpg'
-        const dir = join(app.getPath('userData'), 'generated-images')
-        mkdirSync(dir, { recursive: true })
-        const filePath = join(dir, `huphe_generated_${Date.now()}.${ext}`)
-        writeFileSync(filePath, Buffer.from(b64, 'base64'))
-        writePngPromptMetadata(filePath, pngMeta)
-        console.log('[image:generate-ai] ✓ base64 afbeelding opgeslagen:', filePath)
-        return { ok: true, filePath: toHupheFileUrl(filePath) }
-      } else if (url) {
-        // Download meteen zodat de URL niet verloopt (bijv. Gemini-tijdelijke URLs)
-        try {
-          const imgRes = await fetch(url, { signal: AbortSignal.timeout(30000) })
-          if (imgRes.ok) {
-            const buf = Buffer.from(await imgRes.arrayBuffer())
-            const ct = imgRes.headers.get('content-type') ?? ''
-            const ext = ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : 'jpg'
-            const dir = join(app.getPath('userData'), 'generated-images')
-            mkdirSync(dir, { recursive: true })
-            const filePath = join(dir, `huphe_generated_${Date.now()}.${ext}`)
-            writeFileSync(filePath, buf)
-            writePngPromptMetadata(filePath, pngMeta)
-            console.log('[image:generate-ai] ✓ URL gedownload en opgeslagen:', filePath)
-            return { ok: true, filePath: toHupheFileUrl(filePath) }
-          }
-        } catch (downloadErr: any) {
-          console.warn('[image:generate-ai] download mislukt, URL als fallback:', downloadErr.message)
-        }
-        console.log('[image:generate-ai] ✓ afbeelding URL ontvangen (niet gedownload):', url)
-        return { ok: true, imageUrl: url }
-      }
-    }
-
-    // Fallback: soms geeft OpenRouter een URL terug in de content
-    const content: string = typeof message?.content === 'string' ? message.content : ''
-    const urlMatch = content.match(/https?:\/\/[^\s)\]'"]+/i)
-    if (urlMatch) {
-      const contentUrl = urlMatch[0]
+    if (found?.url) {
       try {
-        const imgRes2 = await fetch(contentUrl, { signal: AbortSignal.timeout(30000) })
-        if (imgRes2.ok) {
-          const buf2 = Buffer.from(await imgRes2.arrayBuffer())
-          const ct2 = imgRes2.headers.get('content-type') ?? ''
-          const ext2 = ct2.includes('png') ? 'png' : ct2.includes('webp') ? 'webp' : 'jpg'
-          const dir2 = join(app.getPath('userData'), 'generated-images')
-          mkdirSync(dir2, { recursive: true })
-          const filePath2 = join(dir2, `huphe_generated_${Date.now()}.${ext2}`)
-          writeFileSync(filePath2, buf2)
-          writePngPromptMetadata(filePath2, pngMeta)
-          console.log('[image:generate-ai] ✓ content-URL gedownload:', filePath2)
-          return { ok: true, filePath: toHupheFileUrl(filePath2) }
+        const imgRes = await fetch(found.url, { signal: AbortSignal.timeout(30000) })
+        if (imgRes.ok) {
+          const buf = Buffer.from(await imgRes.arrayBuffer())
+          const ct = imgRes.headers.get('content-type') ?? ''
+          const ext = ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : 'jpg'
+          const dir = join(app.getPath('userData'), 'generated-images')
+          mkdirSync(dir, { recursive: true })
+          const filePath = join(dir, `huphe_generated_${Date.now()}.${ext}`)
+          writeFileSync(filePath, buf)
+          writePngPromptMetadata(filePath, pngMeta)
+          console.log('[image:generate-ai] ✓ URL gedownload en opgeslagen:', filePath)
+          return { ok: true, filePath: toHupheFileUrl(filePath) }
         }
-      } catch {}
-      console.log('[image:generate-ai] ✓ URL gevonden in content:', contentUrl)
-      return { ok: true, imageUrl: contentUrl }
+      } catch (downloadErr: any) {
+        console.warn('[image:generate-ai] download mislukt, URL als fallback:', downloadErr.message)
+      }
+      console.log('[image:generate-ai] ✓ afbeelding URL ontvangen (niet gedownload):', found.url)
+      return { ok: true, imageUrl: found.url }
     }
 
+    const message = json?.choices?.[0]?.message
     console.error('[image:generate-ai] ✗ geen afbeelding in response. Volledig bericht:', JSON.stringify(message))
     return { ok: false, error: 'Geen afbeelding ontvangen van OpenRouter. Controleer of het model beeldgeneratie ondersteunt.' }
 
@@ -2539,27 +2548,55 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
   }
 })
 
-ipcMain.handle('video:generate-ai', async (_event, payload: { prompt: string; model: string; systemPrompt?: string; accessToken?: string }) => {
+ipcMain.handle('video:generate-ai', async (_event, payload: { prompt: string; model: string; systemPrompt?: string; accessToken?: string; referenceImageSrc?: string }) => {
   payload = parseIpcPayload('video:generate-ai', z.object({
     prompt: z.string().trim().min(1).max(12000),
     model: z.string().trim().min(1).max(200),
     systemPrompt: z.string().max(6000).optional(),
     accessToken: AccessTokenSchema,
+    referenceImageSrc: z.string().max(20 * 1024 * 1024).optional(),
   }), payload)
-  const { prompt, model, systemPrompt, accessToken } = payload
+  const { prompt, model, systemPrompt, accessToken, referenceImageSrc } = payload
   const effectiveJwtVideo = accessToken ?? cachedJwt
   if (!effectiveJwtVideo) return { ok: false, error: 'Niet ingelogd.' }
   const { callOpenRouter } = await import('./lib/proxy')
 
+  let referenceImage: string | null = null
+  if (referenceImageSrc) {
+    if (referenceImageSrc.startsWith('data:') || referenceImageSrc.startsWith('http')) {
+      referenceImage = referenceImageSrc
+    } else {
+      let localPath: string | null = null
+      if (referenceImageSrc.startsWith('file://')) {
+        localPath = referenceImageSrc.slice('file://'.length)
+      } else if (referenceImageSrc.startsWith('huphe://file/')) {
+        localPath = decodeURIComponent(referenceImageSrc.slice('huphe://file/'.length))
+      }
+      if (localPath) {
+        try {
+          const buf = readFileSync(localPath)
+          const ext = localPath.endsWith('.png') ? 'png' : localPath.endsWith('.webp') ? 'webp' : 'jpeg'
+          referenceImage = `data:image/${ext};base64,${buf.toString('base64')}`
+        } catch {
+          referenceImage = null
+        }
+      }
+    }
+  }
+
   async function performOpenRouterRequest(targetModalities: string[]) {
     const finalPrompt = systemPrompt
-      ? `${systemPrompt}\n\nMaak een video op basis van deze beschrijving. Geef geen tekstuele reactie; genereer uitsluitend de video.\n\nBeschrijving: ${prompt}`
-      : `Maak een video op basis van deze beschrijving. Geef geen tekstuele reactie; genereer uitsluitend de video.\n\nBeschrijving: ${prompt}`
+      ? `${systemPrompt}\n\nMaak een video op basis van ${referenceImage ? 'het bijgevoegde startbeeld en ' : ''}deze beschrijving. Geef geen tekstuele reactie; genereer uitsluitend de video.\n\nBeschrijving: ${prompt}`
+      : `Maak een video op basis van ${referenceImage ? 'het bijgevoegde startbeeld en ' : ''}deze beschrijving. Geef geen tekstuele reactie; genereer uitsluitend de video.\n\nBeschrijving: ${prompt}`
+
+    const contentParts: any[] = []
+    if (referenceImage) contentParts.push({ type: 'image_url', image_url: { url: referenceImage } })
+    contentParts.push({ type: 'text', text: finalPrompt })
 
     return callOpenRouter({
       model,
       modalities: targetModalities,
-      messages: [{ role: 'user', content: finalPrompt }],
+      messages: [{ role: 'user', content: contentParts.length === 1 ? finalPrompt : contentParts }],
       stream: false,
     }, effectiveJwtVideo)
   }
@@ -3127,6 +3164,55 @@ ipcMain.handle('project:delete', async (_event, filePath: string) => {
     const safePath = assertInsideRoot(filePath, ensureProjectsDir())
     if (existsSync(safePath)) unlinkSync(safePath)
     return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('document:import-file', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: 'Importeer document',
+    filters: [
+      { name: 'Documenten', extensions: ['docx', 'pages'] },
+    ],
+    properties: ['openFile'],
+  })
+  if (canceled || filePaths.length === 0) return { ok: false, canceled: true }
+  const filePath = filePaths[0]
+  const ext = filePath.split('.').pop()?.toLowerCase()
+  const title = basename(filePath).replace(/\.(docx|pages)$/i, '')
+  try {
+    if (ext === 'docx') {
+      const buffer = readFileSync(filePath)
+      const result = await mammoth.convertToHtml({ buffer })
+      return { ok: true, html: result.value, title }
+    } else if (ext === 'pages') {
+      const html = await new Promise<string>((resolve, reject) => {
+        exec(`textutil -convert html -stdout "${filePath.replace(/"/g, '\\"')}"`, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+          if (err) reject(err)
+          else resolve(stdout)
+        })
+      })
+      return { ok: true, html, title }
+    }
+    return { ok: false, error: 'Onbekend bestandsformaat' }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('document:import-google-docs', async (_event, url: string) => {
+  const match = url.match(/\/document\/d\/([a-zA-Z0-9_-]+)/)
+  if (!match) return { ok: false, error: 'Geen geldig Google Docs-link' }
+  const docId = match[1]
+  try {
+    const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=html`
+    const res = await net.fetch(exportUrl)
+    if (!res.ok) return { ok: false, error: `Fout bij ophalen document (${res.status})` }
+    const html = await res.text()
+    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i)
+    const title = titleMatch ? titleMatch[1].replace(/ - Google (Docs|Drive)/i, '').trim() : 'Google Doc'
+    return { ok: true, html, title }
   } catch (err: any) {
     return { ok: false, error: err.message }
   }
