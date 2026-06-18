@@ -8,20 +8,24 @@ export default function AtelierCreationPlaceholder({
   renderBanner,
   renderPrint,
   renderMedia,
+  renderScene3D,
 }: {
   type: AtelierCreationType
   seed?: CrossFormatSeed | null
   renderBanner: () => ReactNode
   renderPrint: () => ReactNode
   renderMedia: () => ReactNode
+  renderScene3D?: () => ReactNode
 }) {
   const content = type === 'banners'
     ? renderBanner()
     : type === 'print'
       ? renderPrint()
-      : type === 'images' || type === 'video'
-        ? renderMedia()
-        : null
+      : type === 'scene3d' && renderScene3D
+        ? renderScene3D()
+        : type === 'images' || type === 'video'
+          ? renderMedia()
+          : null
 
   if (content) {
     return (

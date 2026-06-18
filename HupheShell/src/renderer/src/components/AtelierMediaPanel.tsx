@@ -16,6 +16,7 @@ import { LeftToolTooltip } from './LeftPanelShell'
 import type { MediaAsset } from '../lib/media-asset-store'
 import { supabase } from '../lib/supabase'
 import { Toggle } from './Toggle'
+import Scene3DEditorInline from './Scene3DEditorInline'
 
 export function AtelierMediaCreationPanel({
   type,
@@ -101,6 +102,7 @@ export function AtelierMediaCreationPanel({
     filteredModels,
     generating,
     resultItems,
+    setResultItems,
     activeResultIndex,
     setActiveResultIndex,
     lightboxIndex,
@@ -544,8 +546,8 @@ export function AtelierMediaCreationPanel({
           }}
         />
       )}
-      {/* Left vertical tool toolbar — only when an image is loaded */}
-      <div className={['flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0f0f0f] py-3', activeItem ? 'flex w-14' : 'hidden'].join(' ')}>
+      {/* Left vertical tool toolbar */}
+      <div className={['flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0f0f0f] py-3', mediaType ? 'flex w-14' : 'hidden'].join(' ')}>
         {tools.map((tool) => (
           <LeftToolTooltip key={tool.id} label={tool.label}>
             <button
@@ -922,6 +924,13 @@ export function AtelierMediaCreationPanel({
         onRedoMask={redoMask}
         maskHistoryLen={maskHistoryLen}
         maskRedoLen={maskRedoLen}
+        onScene3DResult={(imageUrl: string) => {
+          const id = `scene3d_${Date.now()}`
+          const asset: AtelierMediaAsset = { id, src: imageUrl, prompt: '', modelId: '' }
+          const next = [...resultItems, asset]
+          setResultItems(next)
+          setActiveResultIndex(next.length - 1)
+        }}
       />
       {fullscreenAsset && createPortal(
         <div
@@ -1041,6 +1050,7 @@ export function AtelierMediaCreationPanel({
 type AtelierEditIcon =
   | 'select' | 'mask' | 'subject' | 'remove' | 'background' | 'expand' | 'upscale' | 'light' | 'variation'
   | 'frame' | 'motion' | 'stabilize' | 'extend' | 'cut' | 'captions' | 'audio' | 'loop'
+  | 'scene3d'
 
 interface AtelierEditTool {
   id: string
@@ -1051,6 +1061,7 @@ interface AtelierEditTool {
 
 const IMAGE_EDIT_TOOLS: AtelierEditTool[] = [
   { id: 'select', label: 'Selecteren en slepen', description: 'Normale muisfunctie voor beeld slepen en zoomen.', icon: 'select' },
+  { id: 'scene3d', label: '3D Scene', description: 'Bouw een 3D compositie en genereer er een foto van.', icon: 'scene3d' },
   { id: 'mask', label: 'Masker tekenen', description: 'Penseel, gum en zachte randen.', icon: 'mask' },
   { id: 'subject', label: 'Onderwerp selecteren', description: 'Persoon, object of product isoleren.', icon: 'subject' },
   { id: 'remove', label: 'Object verwijderen', description: 'Storende delen wegpoetsen.', icon: 'remove' },
@@ -1063,6 +1074,7 @@ const IMAGE_EDIT_TOOLS: AtelierEditTool[] = [
 
 const VIDEO_EDIT_TOOLS: AtelierEditTool[] = [
   { id: 'select', label: 'Selecteren en slepen', description: 'Normale muisfunctie voor video slepen en zoomen.', icon: 'select' },
+  { id: 'scene3d', label: '3D Scene', description: 'Bouw een 3D compositie en genereer er een video van.', icon: 'scene3d' },
   { id: 'frame', label: 'Start/eindframe', description: 'Frames kiezen voor richting en stijl.', icon: 'frame' },
   { id: 'motion', label: 'Camerabeweging', description: 'Push, pan, zoom of handheld.', icon: 'motion' },
   { id: 'subject', label: 'Onderwerp volgen', description: 'Tracking op persoon of object.', icon: 'subject' },
@@ -1090,6 +1102,7 @@ function AtelierMediaEditSidebar({
   onRedoMask,
   maskHistoryLen,
   maskRedoLen,
+  onScene3DResult,
 }: {
   mediaType: AtelierMediaProjectType
   projectsPanel?: AtelierProjectsPanelConfig
@@ -1104,24 +1117,29 @@ function AtelierMediaEditSidebar({
   onRedoMask?: () => void
   maskHistoryLen?: number
   maskRedoLen?: number
+  onScene3DResult?: (imageUrl: string) => void
 }) {
   const tools = mediaType === 'images' ? IMAGE_EDIT_TOOLS : VIDEO_EDIT_TOOLS
   const activeTool = tools.find((tool) => tool.id === activeToolId && tool.id !== 'select')
 
   return (
     <AtelierRightPanel projectsPanel={projectsPanel} convertContent={<AdToHtmlToolPanel currentImageSrc={currentImageSrc} />}>
-      <AtelierToolDetailPanel
-        tool={activeTool}
-        mediaType={mediaType}
-        brushSize={brushSize}
-        onBrushSizeChange={onBrushSizeChange}
-        hasMask={hasMask}
-        onClearMask={onClearMask}
-        onUndoMask={onUndoMask}
-        onRedoMask={onRedoMask}
-        maskHistoryLen={maskHistoryLen}
-        maskRedoLen={maskRedoLen}
-      />
+      {activeToolId === 'scene3d' ? (
+        <Scene3DEditorInline onResult={onScene3DResult} currentImageSrc={currentImageSrc} />
+      ) : (
+        <AtelierToolDetailPanel
+          tool={activeTool}
+          mediaType={mediaType}
+          brushSize={brushSize}
+          onBrushSizeChange={onBrushSizeChange}
+          hasMask={hasMask}
+          onClearMask={onClearMask}
+          onUndoMask={onUndoMask}
+          onRedoMask={onRedoMask}
+          maskHistoryLen={maskHistoryLen}
+          maskRedoLen={maskRedoLen}
+        />
+      )}
     </AtelierRightPanel>
   )
 }
@@ -1555,6 +1573,11 @@ function AtelierEditToolIcon({ icon }: { icon: AtelierEditIcon }) {
   if (icon === 'remove' || icon === 'cut') return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 4l16 16" /><path d="M20 4L4 20" />
+    </svg>
+  )
+  if (icon === 'scene3d') return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3l9 5v8l-9 5-9-5V8z" /><path d="M12 13l9-5" /><path d="M12 13l-9-5" /><path d="M12 13v9" />
     </svg>
   )
   if (icon === 'light') return (

@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { supabase } from '../lib/supabase'
 
-export type AtelierCreationType = 'presentation' | 'banners' | 'print' | 'images' | 'video'
+export type AtelierCreationType = 'presentation' | 'banners' | 'print' | 'images' | 'video' | 'scene3d'
 export type AtelierCreationSelection = AtelierCreationType | null
 
 export const ATELIER_CREATION_OPTIONS: Array<{
@@ -75,6 +75,20 @@ export const ATELIER_CREATION_OPTIONS: Array<{
       </svg>
     ),
   },
+  {
+    id: 'scene3d',
+    label: '3D Scene',
+    shortLabel: '3D',
+    description: '3D compositie omzetten naar fotorealistische beelden',
+    icon: (
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3l9 5v8l-9 5-9-5V8z" />
+        <path d="M12 13l9-5" />
+        <path d="M12 13l-9-5" />
+        <path d="M12 13v9" />
+      </svg>
+    ),
+  },
 ]
 
 const SLUG_TO_TYPE: Record<string, AtelierCreationType> = {
@@ -83,9 +97,10 @@ const SLUG_TO_TYPE: Record<string, AtelierCreationType> = {
   atelier_print: 'print',
   atelier_images: 'images',
   atelier_video: 'video',
+  atelier_scene3d: 'scene3d',
 }
 
-const ALL_TYPES = new Set<AtelierCreationType>(['presentation', 'banners', 'print', 'images', 'video'])
+const ALL_TYPES = new Set<AtelierCreationType>(['presentation', 'banners', 'print', 'images', 'video', 'scene3d'])
 
 let _cache: Set<AtelierCreationType> | null = null
 let _pending: Promise<Set<AtelierCreationType>> | null = null

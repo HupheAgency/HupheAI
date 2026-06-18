@@ -2548,6 +2548,66 @@ ipcMain.handle('image:generate-ai', async (_event, payload: { prompt: string; mo
   }
 })
 
+// ── Scene 3D → AI generatie ─────────────────────────────────────────
+ipcMain.handle('scene3d:generate', async (_event, payload: { screenshotDataUrl: string; prompt: string; referenceImageSrc?: string; accessToken?: string }) => {
+  payload = parseIpcPayload('scene3d:generate', z.object({
+    screenshotDataUrl: z.string().min(1).max(20 * 1024 * 1024),
+    prompt: z.string().trim().min(1).max(6000),
+    referenceImageSrc: z.string().max(20 * 1024 * 1024).optional(),
+    accessToken: AccessTokenSchema,
+  }), payload)
+  const { screenshotDataUrl, prompt, referenceImageSrc, accessToken } = payload
+  const effectiveJwt = accessToken ?? cachedJwt
+  if (!effectiveJwt) return { ok: false, error: 'Niet ingelogd.' }
+
+  try {
+    const { callFalProxy, callOpenRouter } = await import('./lib/proxy')
+
+    let englishPrompt = prompt
+    const likelyNonEnglish = /[^\x00-\x7F]/.test(prompt) || /\b(de|het|een|van|voor|met|naar|zijn|wordt|deze|door|aan)\b/.test(prompt)
+    if (likelyNonEnglish) {
+      try {
+        const transRes = await callOpenRouter({
+          model: 'meta-llama/llama-3.1-8b-instruct',
+          messages: [
+            { role: 'system', content: 'Translate the following text to English. Output only the translated text, nothing else.' },
+            { role: 'user', content: prompt },
+          ],
+          max_tokens: 300,
+        }, effectiveJwt)
+        if (transRes.ok) {
+          const transJson = await transRes.json() as any
+          const translated = transJson?.choices?.[0]?.message?.content?.trim()
+          if (translated) englishPrompt = translated
+        }
+      } catch { /* use original */ }
+    }
+
+    const compositionNote = 'Maintain the exact composition, camera angle, subject position and facing direction from the reference image.'
+    const fullPrompt = `${compositionNote} ${englishPrompt}`
+
+    const dataUrlMatch = screenshotDataUrl.match(/^data:(image\/\w+);base64,(.+)$/)
+    if (!dataUrlMatch) return { ok: false, error: 'Ongeldig screenshot formaat.' }
+    const [, mimeType, base64Data] = dataUrlMatch
+
+    const result = await callFalProxy('fal-ai/flux/dev/image-to-image', {
+      image_base64: base64Data,
+      image_mime_type: mimeType,
+      prompt: fullPrompt,
+      strength: 0.65,
+      num_images: 1,
+      image_size: 'landscape_16_9',
+    }, effectiveJwt) as any
+
+    const imageUrl = result?.images?.[0]?.url
+    if (!imageUrl) return { ok: false, error: 'Geen resultaat van AI.' }
+    return { ok: true, imageUrl }
+  } catch (err: any) {
+    console.error('[scene3d:generate] fout:', err.message)
+    return { ok: false, error: err.message }
+  }
+})
+
 ipcMain.handle('video:generate-ai', async (_event, payload: { prompt: string; model: string; systemPrompt?: string; accessToken?: string; referenceImageSrc?: string }) => {
   payload = parseIpcPayload('video:generate-ai', z.object({
     prompt: z.string().trim().min(1).max(12000),

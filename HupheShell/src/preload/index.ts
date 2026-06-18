@@ -161,6 +161,7 @@ contextBridge.exposeInMainWorld('api', {
   generateAtelierImage: (prompt: string, model: string, systemPrompt?: string, referenceImageSrc?: string, accessToken?: string, modelLabel?: string, maskImageSrc?: string) => ipcRenderer.invoke('image:generate-ai', { prompt, model, modelLabel, systemPrompt, referenceImageSrc, maskImageSrc, accessToken }),
   deleteLocalFile: (filePath: string) => ipcRenderer.invoke('image:delete-file', filePath),
   generateAtelierVideo: (prompt: string, model: string, systemPrompt?: string, accessToken?: string, referenceImageSrc?: string) => ipcRenderer.invoke('video:generate-ai', { prompt, model, systemPrompt, accessToken, referenceImageSrc }),
+  generateScene3D: (screenshotDataUrl: string, prompt: string, referenceImageSrc?: string, accessToken?: string) => ipcRenderer.invoke('scene3d:generate', { screenshotDataUrl, prompt, referenceImageSrc, accessToken }),
   importPresentation: (fileName: string, buffer: ArrayBuffer) =>
     ipcRenderer.invoke('presentation:import', { fileName, buffer }),
   importKeyAsProject: (filePath: string) =>

@@ -386,6 +386,7 @@ export function useAtelierMediaCreator({
     filteredModels,
     generating,
     resultItems,
+    setResultItems,
     activeResultIndex,
     setActiveResultIndex,
     lightboxIndex,

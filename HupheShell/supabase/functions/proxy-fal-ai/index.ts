@@ -51,7 +51,7 @@ Deno.serve(async (req: Request) => {
       const formData = new FormData()
       formData.append('file', new Blob([bytes], { type: mimeType }), 'upload.png')
 
-      const uploadRes = await fetch('https://fal.run/fal-ai/storage/upload', {
+      const uploadRes = await fetch('https://fal.ai/api/storage/upload', {
         method: 'POST',
         headers: { 'Authorization': `Key ${FAL_API_KEY}` },
         body: formData,

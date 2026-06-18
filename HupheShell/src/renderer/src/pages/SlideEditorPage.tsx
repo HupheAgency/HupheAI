@@ -51,6 +51,7 @@ import { AtelierCreationSidebar, PlusTinyIcon, AtelierModeChip, AtelierModelIcon
 import { IcoPanelToggle } from '../components/Icons'
 import { AtelierModelPickerButton } from '../components/AtelierModelPickerButton'
 import { AtelierMediaCreationPanel } from '../components/AtelierMediaPanel'
+import Scene3DEditor from '../components/Scene3DEditor'
 import PrintFlow from '../components/PrintFlow'
 import BannerFlow from '../components/BannerFlow'
 import { persistTemplate, resolveTemplateData } from '../lib/template-storage'
@@ -5331,6 +5332,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
             onShellLevel={setShellLevel}
           />
         )}
+        renderScene3D={() => <Scene3DEditor />}
       />
     )
 

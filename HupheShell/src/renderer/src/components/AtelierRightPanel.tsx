@@ -9,7 +9,7 @@ import type { AtelierProjectFreshnessTarget, ProjectAssetRef } from '../lib/atel
 import type { AtelierCreationType } from './AtelierCreationModeButtons'
 import { checkAssetFreshness } from '../lib/asset-library'
 
-export type AtelierSidebarPanelType = 'presentation' | 'banners' | 'print' | 'images' | 'video'
+export type AtelierSidebarPanelType = 'presentation' | 'banners' | 'print' | 'images' | 'video' | 'scene3d'
 
 export interface SidebarProject {
   id: string
@@ -221,6 +221,7 @@ const ATELIER_PROJECT_COPY: Record<AtelierSidebarPanelType, { title: string; new
   print: { title: 'Editor', newLabel: 'Nieuwe media', emptyLabel: 'Nog geen mediaprojecten.' },
   images: { title: 'Afbeeldingen', newLabel: 'Nieuwe afbeelding', emptyLabel: 'Nog geen afbeeldingen.' },
   video: { title: "Video's", newLabel: 'Nieuwe video', emptyLabel: "Nog geen video's." },
+  scene3d: { title: '3D Scenes', newLabel: 'Nieuwe scene', emptyLabel: 'Nog geen 3D scenes.' },
 }
 
 function getAtelierEditTabLabel(type: AtelierSidebarPanelType, activeProjectId: string | null): string {
@@ -514,6 +515,11 @@ function AtelierProjectTypeIcon({ type }: { type: AtelierSidebarPanelType }) {
     </svg>
   )
   if (type === 'video') return <IcoVideo />
+  if (type === 'scene3d') return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3l9 5v8l-9 5-9-5V8z" /><path d="M12 13l9-5" /><path d="M12 13l-9-5" /><path d="M12 13v9" />
+    </svg>
+  )
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
