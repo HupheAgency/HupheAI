@@ -9,6 +9,7 @@ import {
   type TransformMode,
   createScene3DObject,
   createScene3DLight,
+  createScene3DCamera,
   defaultScene3DState,
 } from '../lib/scene3d-types'
 
@@ -17,7 +18,21 @@ const STORAGE_KEY = 'huphe:scene3d-state:v1'
 function loadPersistedScene(): Scene3DState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return JSON.parse(raw)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      // Migrate old single-camera format to multi-camera
+      if (parsed.camera && !parsed.cameras) {
+        const { camera, ...rest } = parsed
+        return {
+          ...rest,
+          cameras: [{ id: 'cam_migrated', name: 'Camera_1', ...camera }],
+          activeCameraId: null,
+        }
+      }
+      if (!parsed.cameras) parsed.cameras = []
+      parsed.activeCameraId = null
+      return parsed
+    }
   } catch { /* ignore */ }
   return defaultScene3DState()
 }
@@ -97,13 +112,47 @@ export function useScene3D() {
     })
   }, [persist])
 
-  const updateCamera = useCallback((patch: Partial<Scene3DCamera>) => {
+  const addCamera = useCallback((position: [number, number, number], target: [number, number, number], fov: number) => {
+    let newId: string | null = null
     setScene((prev) => {
-      const next = { ...prev, camera: { ...prev.camera, ...patch } }
+      if (newId) return prev
+      const cam = createScene3DCamera(undefined, position, target, fov)
+      newId = cam.id
+      const next = { ...prev, cameras: [...prev.cameras, cam] }
+      persist(next)
+      return next
+    })
+    return newId
+  }, [persist])
+
+  const updateCamera = useCallback((id: string, patch: Partial<Scene3DCamera>) => {
+    setScene((prev) => {
+      const next = {
+        ...prev,
+        cameras: prev.cameras.map((c) =>
+          c.id === id ? { ...c, ...patch } : c,
+        ),
+      }
       persist(next)
       return next
     })
   }, [persist])
+
+  const deleteCamera = useCallback((id: string) => {
+    setScene((prev) => {
+      const next = {
+        ...prev,
+        cameras: prev.cameras.filter((c) => c.id !== id),
+        activeCameraId: prev.activeCameraId === id ? null : prev.activeCameraId,
+      }
+      persist(next)
+      return next
+    })
+  }, [persist])
+
+  const setActiveCameraId = useCallback((id: string | null) => {
+    setScene((prev) => ({ ...prev, activeCameraId: id }))
+  }, [])
 
   const setEnvironment = useCallback((env: string | null) => {
     setScene((prev) => {
@@ -145,7 +194,10 @@ export function useScene3D() {
     addLight,
     updateLight,
     deleteLight,
+    addCamera,
     updateCamera,
+    deleteCamera,
+    setActiveCameraId,
     setEnvironment,
     onObjectTransformed,
     resetScene,

@@ -1,8 +1,15 @@
-import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useScene3D } from '../hooks/useScene3D'
 import Scene3DViewport, { type Scene3DViewportHandle } from './Scene3DViewport'
-import type { Scene3DObjectType, Scene3DLightType, TransformMode, Scene3DObject, Scene3DLight, Scene3DCamera } from '../lib/scene3d-types'
+import type { Scene3DObjectType, Scene3DLightType, TransformMode, ViewMode, Scene3DObject, Scene3DLight, Scene3DCamera } from '../lib/scene3d-types'
+
+const VIEW_MODES: { mode: ViewMode; label: string; icon: string }[] = [
+  { mode: 'wireframe', label: 'Wireframe', icon: 'M3 3h18v18H3zM3 3l18 18M21 3L3 21' },
+  { mode: 'solid', label: 'Solid', icon: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
+  { mode: 'material', label: 'Materiaal', icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 4a6 6 0 1 1 0 12 6 6 0 0 0 0-12z' },
+  { mode: 'rendered', label: 'Render', icon: 'M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83' },
+]
 
 const OBJECT_OPTIONS: { type: Scene3DObjectType; label: string }[] = [
   { type: 'cube', label: 'Kubus' },
@@ -184,15 +191,36 @@ function LightItem({ light, onUpdate, onDelete }: {
   )
 }
 
-function CameraSection({ camera, onUpdate }: {
-  camera: Scene3DCamera; onUpdate: (patch: Partial<Scene3DCamera>) => void
+function CameraItem({ cam, active, onActivate, onUpdate, onDelete }: {
+  cam: Scene3DCamera; active: boolean
+  onActivate: () => void; onUpdate: (patch: Partial<Scene3DCamera>) => void; onDelete: () => void
 }) {
+  const [expanded, setExpanded] = useState(false)
   return (
-    <div className="flex flex-col gap-2 px-3 pb-2">
-      <Vec3Row label="Positie" value={camera.position} onChange={(position) => onUpdate({ position })} />
-      <Vec3Row label="Kijkpunt" value={camera.target} onChange={(target) => onUpdate({ target })} />
-      <NumberInput label="FOV" value={camera.fov} step={1} min={10} max={120}
-        onChange={(v) => onUpdate({ fov: v })} />
+    <div className={`rounded-lg border transition-colors ${active ? 'border-[#facc15]/30 bg-[#facc15]/[0.04]' : 'border-white/[0.06] bg-white/[0.02]'}`}>
+      <div className="flex items-center gap-2 px-2.5 py-1.5">
+        <button type="button" onClick={() => { setExpanded(!expanded) }} className="flex flex-1 items-center gap-2 text-left">
+          <span className="flex h-5 w-5 items-center justify-center rounded bg-purple-400/[0.1] text-[9px] text-purple-400/70">📷</span>
+          <span className="flex-1 text-[11px] text-white/75">{cam.name}</span>
+        </button>
+        <button type="button" onClick={onActivate} title={active ? 'Vrij bewegen' : 'Bekijk via camera'}
+          className={`rounded px-1.5 py-0.5 text-[9px] ${active ? 'bg-[#facc15]/20 text-[#facc15]' : 'text-white/30 hover:bg-white/[0.06] hover:text-white/60'}`}>
+          {active ? 'Actief' : 'Bekijk'}
+        </button>
+        <button type="button" onClick={onDelete} className="text-white/20 hover:text-red-400/70">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      {expanded && (
+        <div className="flex flex-col gap-2 border-t border-white/[0.06] px-2.5 py-2">
+          <Vec3Row label="Positie" value={cam.position} onChange={(position) => onUpdate({ position })} />
+          <Vec3Row label="Kijkpunt" value={cam.target} onChange={(target) => onUpdate({ target })} />
+          <NumberInput label="FOV" value={cam.fov} step={1} min={10} max={120}
+            onChange={(v) => onUpdate({ fov: v })} />
+        </div>
+      )}
     </div>
   )
 }
@@ -203,6 +231,7 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
 }) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const fullscreenViewportRef = useRef<Scene3DViewportHandle>(null)
+  const orbitStateRef = useRef<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
   const [viewportOpen, setViewportOpen] = useState(true)
   const [subjectsOpen, setSubjectsOpen] = useState(true)
   const [cameraOpen, setCameraOpen] = useState(false)
@@ -210,6 +239,7 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
   const [envOpen, setEnvOpen] = useState(false)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
+  const [viewMode, setViewMode] = useState<ViewMode>('solid')
   const [generatePrompt, setGeneratePrompt] = useState('')
   const [generating, setGenerating] = useState(false)
   const [generatedImage, setGeneratedImage] = useState<string | null>(null)
@@ -220,8 +250,23 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
     setSelectedObjectId, setTransformMode,
     addObject, updateObject, deleteObject, deleteSelected,
     addLight, updateLight, deleteLight,
-    updateCamera, setEnvironment, onObjectTransformed, resetScene,
+    addCamera, updateCamera, deleteCamera, setActiveCameraId,
+    setEnvironment, onObjectTransformed, resetScene,
   } = useScene3D()
+
+  const handleSaveCurrentView = useCallback(() => {
+    const state = orbitStateRef.current
+    if (!state) return
+    addCamera(state.position, state.target, scene.cameras[0]?.fov ?? 50)
+  }, [addCamera, scene.cameras])
+
+  const handleActivateCamera = useCallback((id: string) => {
+    setActiveCameraId(scene.activeCameraId === id ? null : id)
+  }, [scene.activeCameraId, setActiveCameraId])
+
+  const handleDeactivateCamera = useCallback(() => {
+    if (scene.activeCameraId) setActiveCameraId(null)
+  }, [scene.activeCameraId, setActiveCameraId])
 
   useEffect(() => {
     if (!fullscreen) return
@@ -262,6 +307,16 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
             transformMode === t.mode ? 'bg-white/10 text-white' : 'text-white/30 hover:text-white/60'].join(' ')}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d={t.icon} />
+          </svg>
+        </button>
+      ))}
+      <div className="mx-1.5 h-4 w-px bg-white/10" />
+      {VIEW_MODES.map((v) => (
+        <button key={v.mode} type="button" onClick={() => setViewMode(v.mode)} title={v.label}
+          className={['flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+            viewMode === v.mode ? 'bg-white/10 text-white' : 'text-white/30 hover:text-white/60'].join(' ')}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d={v.icon} />
           </svg>
         </button>
       ))}
@@ -319,10 +374,33 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
         )}
       </div>
 
-      {/* Camera */}
+      {/* Camera's */}
       <div className="border-b border-white/[0.06]">
-        <SectionHeader title="Camera" open={cameraOpen} onToggle={() => setCameraOpen(!cameraOpen)} />
-        {cameraOpen && <CameraSection camera={scene.camera} onUpdate={updateCamera} />}
+        <SectionHeader title="Camera's" open={cameraOpen} onToggle={() => setCameraOpen(!cameraOpen)}
+          count={scene.cameras.length} onAdd={handleSaveCurrentView} />
+        {cameraOpen && (
+          <div className="flex flex-col gap-1 px-3 pb-2">
+            {scene.activeCameraId && (
+              <button type="button" onClick={() => setActiveCameraId(null)}
+                className="mb-1 rounded-md border border-white/[0.08] px-2 py-1 text-[10px] text-white/50 hover:bg-white/[0.06] hover:text-white/80">
+                Vrij bewegen
+              </button>
+            )}
+            <button type="button" onClick={handleSaveCurrentView}
+              className="mb-1 rounded-md border border-purple-400/20 px-2 py-1 text-[10px] text-purple-400/60 hover:bg-purple-400/[0.06] hover:text-purple-300/80">
+              + Huidige positie opslaan als camera
+            </button>
+            {scene.cameras.length === 0 && (
+              <p className="py-2 text-center text-[10px] text-white/20">Nog geen camera's</p>
+            )}
+            {scene.cameras.map((cam) => (
+              <CameraItem key={cam.id} cam={cam} active={cam.id === scene.activeCameraId}
+                onActivate={() => handleActivateCamera(cam.id)}
+                onUpdate={(patch) => updateCamera(cam.id, patch)}
+                onDelete={() => deleteCamera(cam.id)} />
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Lichten */}
@@ -412,9 +490,13 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
             scene={scene}
             selectedObjectId={selectedObjectId}
             transformMode={transformMode}
+            viewMode={viewMode}
             onSelectObject={setSelectedObjectId}
             onDeselectAll={() => setSelectedObjectId(null)}
             onObjectTransformed={onObjectTransformed}
+            onActivateCamera={handleActivateCamera}
+            onDeactivateCamera={handleDeactivateCamera}
+            orbitStateRef={orbitStateRef}
           />
         </div>
         <div className="flex-shrink-0 border-t border-white/[0.1] bg-[#1a1a1a]">
@@ -439,12 +521,15 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
           <>
             <div className="h-[260px] w-full">
               <Scene3DViewport
+                ref={viewportRef}
                 scene={scene}
                 selectedObjectId={selectedObjectId}
                 transformMode={transformMode}
                 onSelectObject={setSelectedObjectId}
                 onDeselectAll={() => setSelectedObjectId(null)}
                 onObjectTransformed={onObjectTransformed}
+                onActivateCamera={handleActivateCamera}
+                orbitStateRef={orbitStateRef}
               />
             </div>
             {transformBar}

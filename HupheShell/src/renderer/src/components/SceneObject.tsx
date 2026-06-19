@@ -1,9 +1,22 @@
 import { useRef } from 'react'
 import type { Mesh, Group } from 'three'
-import type { Scene3DObject } from '../lib/scene3d-types'
+import type { Scene3DObject, ViewMode } from '../lib/scene3d-types'
 
-function PersonMannequin({ color, metalness, roughness }: { color: string; metalness: number; roughness: number }) {
-  const mat = <meshStandardMaterial color={color} metalness={metalness} roughness={roughness} />
+function ObjectMaterial({ color, metalness, roughness, viewMode }: { color: string; metalness: number; roughness: number; viewMode: ViewMode }) {
+  switch (viewMode) {
+    case 'wireframe':
+      return <meshBasicMaterial color={color} wireframe />
+    case 'solid':
+      return <meshLambertMaterial color={color} />
+    case 'material':
+      return <meshPhysicalMaterial color={color} metalness={metalness} roughness={roughness} envMapIntensity={1.0} />
+    case 'rendered':
+      return <meshStandardMaterial color={color} metalness={metalness} roughness={roughness} />
+  }
+}
+
+function PersonMannequin({ color, metalness, roughness, viewMode }: { color: string; metalness: number; roughness: number; viewMode: ViewMode }) {
+  const mat = <ObjectMaterial color={color} metalness={metalness} roughness={roughness} viewMode={viewMode} />
   return (
     <group>
       {/* Head */}
@@ -59,10 +72,12 @@ export default function SceneObject({
   obj,
   selected,
   onClick,
+  viewMode = 'rendered',
 }: {
   obj: Scene3DObject
   selected: boolean
   onClick: () => void
+  viewMode?: ViewMode
 }) {
   const meshRef = useRef<Mesh>(null)
   const groupRef = useRef<Group>(null)
@@ -80,6 +95,7 @@ export default function SceneObject({
           color={obj.material.color}
           metalness={obj.material.metalness}
           roughness={obj.material.roughness}
+          viewMode={viewMode}
         />
       </group>
     )
@@ -101,13 +117,16 @@ export default function SceneObject({
       position={obj.position}
       rotation={obj.rotation}
       scale={obj.scale}
+      castShadow
+      receiveShadow
       onClick={(e) => { e.stopPropagation(); onClick() }}
     >
       {geometry}
-      <meshStandardMaterial
+      <ObjectMaterial
         color={obj.material.color}
         metalness={obj.material.metalness}
         roughness={obj.material.roughness}
+        viewMode={viewMode}
       />
     </mesh>
   )

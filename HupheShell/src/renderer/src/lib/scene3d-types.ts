@@ -29,6 +29,8 @@ export interface Scene3DLight {
 }
 
 export interface Scene3DCamera {
+  id: string
+  name: string
   position: [number, number, number]
   target: [number, number, number]
   fov: number
@@ -37,12 +39,14 @@ export interface Scene3DCamera {
 export interface Scene3DState {
   objects: Scene3DObject[]
   lights: Scene3DLight[]
-  camera: Scene3DCamera
+  cameras: Scene3DCamera[]
+  activeCameraId: string | null
   environment: string | null
   resolution: [number, number]
 }
 
 export type TransformMode = 'translate' | 'rotate' | 'scale'
+export type ViewMode = 'wireframe' | 'solid' | 'material' | 'rendered'
 
 let _counter = 0
 
@@ -85,14 +89,27 @@ export function createScene3DLight(type: Scene3DLightType): Scene3DLight {
   } as Scene3DLight
 }
 
+export function createScene3DCamera(name?: string, position?: [number, number, number], target?: [number, number, number], fov?: number): Scene3DCamera {
+  _counter++
+  return {
+    id: `cam_${Date.now()}_${_counter}`,
+    name: name ?? `Camera_${_counter}`,
+    position: position ?? [4, 3, 4],
+    target: target ?? [0, 0.5, 0],
+    fov: fov ?? 50,
+  }
+}
+
 export function defaultScene3DState(): Scene3DState {
+  const cam = createScene3DCamera('Camera_1', [4, 3, 4], [0, 0.5, 0], 50)
   return {
     objects: [createScene3DObject('cube', 'Cube_1')],
     lights: [
       { id: 'light_ambient', type: 'ambient', name: 'Ambient', color: '#ffffff', intensity: 0.4, position: [0, 5, 0] },
       { id: 'light_directional', type: 'directional', name: 'Key Light', color: '#ffffff', intensity: 1.0, position: [5, 8, 3] },
     ],
-    camera: { position: [4, 3, 4], target: [0, 0.5, 0], fov: 50 },
+    cameras: [cam],
+    activeCameraId: null,
     environment: null,
     resolution: [1024, 1024],
   }
