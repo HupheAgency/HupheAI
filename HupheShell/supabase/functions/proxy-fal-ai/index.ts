@@ -41,27 +41,10 @@ Deno.serve(async (req: Request) => {
 
     if (!model_id) return json({ error: 'model_id is verplicht' }, 400)
 
-    // Als er een base64-afbeelding meegestuurd is, upload die eerst naar Fal storage
+    // Als er een base64-afbeelding meegestuurd is, stuur als data URL
     if (image_base64) {
       const mimeType = image_mime_type ?? 'image/png'
-      const binaryStr = atob(image_base64)
-      const bytes = new Uint8Array(binaryStr.length)
-      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
-
-      const formData = new FormData()
-      formData.append('file', new Blob([bytes], { type: mimeType }), 'upload.png')
-
-      const uploadRes = await fetch('https://fal.ai/api/storage/upload', {
-        method: 'POST',
-        headers: { 'Authorization': `Key ${FAL_API_KEY}` },
-        body: formData,
-      })
-      if (!uploadRes.ok) {
-        const err = await uploadRes.text()
-        return json({ error: `Fal storage upload mislukt: ${err.slice(0, 200)}` }, 502)
-      }
-      const uploadData = await uploadRes.json() as { url: string }
-      falParams.image_url = uploadData.url
+      falParams.image_url = `data:${mimeType};base64,${image_base64}`
     }
 
     // Haal model op uit de database (allowlist + prijs)
@@ -101,6 +84,7 @@ Deno.serve(async (req: Request) => {
     // Fal.ai API-call — FAL_API_KEY alleen server-side
     let falResult: any
     try {
+      console.log('[proxy-fal-ai] Calling fal.ai:', model_id, 'params:', JSON.stringify(Object.keys(falParams)))
       const falRes = await fetch(`https://fal.run/${model_id}`, {
         method: 'POST',
         headers: {
@@ -112,6 +96,7 @@ Deno.serve(async (req: Request) => {
 
       if (!falRes.ok) {
         const errText = await falRes.text()
+        console.error('[proxy-fal-ai] Fal.ai error:', falRes.status, errText.slice(0, 500))
         throw new Error(`Fal.ai ${falRes.status}: ${errText.slice(0, 200)}`)
       }
 
@@ -120,7 +105,7 @@ Deno.serve(async (req: Request) => {
       // AI-call mislukt — geef volledige reservering terug
       await serviceClient.rpc('release_reservation_for_user', { p_reservation_id: reservationId })
       console.error('[proxy-fal-ai] Fal.ai call mislukt:', falErr.message)
-      return json({ error: 'AI-generatie mislukt. Credits niet afgeschreven.', code: 'upstream_error' }, 502)
+      return json({ error: `AI-generatie mislukt: ${falErr.message}`, code: 'upstream_error' }, 502)
     }
 
     // Settle: bij image-generaties zijn de kosten vast, geen variabel verbruik

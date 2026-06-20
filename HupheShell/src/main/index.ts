@@ -2583,20 +2583,20 @@ ipcMain.handle('scene3d:generate', async (_event, payload: { screenshotDataUrl: 
       } catch { /* use original */ }
     }
 
-    const compositionNote = 'Maintain the exact composition, camera angle, subject position and facing direction from the reference image.'
+    const compositionNote = 'Transform this 3D scene into a photorealistic image. Maintain the exact composition, camera angle, subject position, facing direction, lighting and shadows from the reference image. Replace simple 3D materials with realistic surfaces.'
     const fullPrompt = `${compositionNote} ${englishPrompt}`
 
     const dataUrlMatch = screenshotDataUrl.match(/^data:(image\/\w+);base64,(.+)$/)
     if (!dataUrlMatch) return { ok: false, error: 'Ongeldig screenshot formaat.' }
     const [, mimeType, base64Data] = dataUrlMatch
 
-    const result = await callFalProxy('fal-ai/flux/dev/image-to-image', {
+    const result = await callFalProxy('fal-ai/qwen-image-edit', {
       image_base64: base64Data,
       image_mime_type: mimeType,
       prompt: fullPrompt,
-      strength: 0.65,
+      num_inference_steps: 28,
+      guidance_scale: 3.5,
       num_images: 1,
-      image_size: 'landscape_16_9',
     }, effectiveJwt) as any
 
     const imageUrl = result?.images?.[0]?.url

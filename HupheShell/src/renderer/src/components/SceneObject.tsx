@@ -15,52 +15,44 @@ function ObjectMaterial({ color, metalness, roughness, viewMode }: { color: stri
   }
 }
 
-function PersonMannequin({ color, metalness, roughness, viewMode }: { color: string; metalness: number; roughness: number; viewMode: ViewMode }) {
+function PersonMannequin({ color, metalness, roughness, viewMode, pivot }: { color: string; metalness: number; roughness: number; viewMode: ViewMode; pivot: [number, number, number] }) {
   const mat = <ObjectMaterial color={color} metalness={metalness} roughness={roughness} viewMode={viewMode} />
+  const [px, py, pz] = pivot
   return (
-    <group>
-      {/* Head */}
-      <mesh position={[0, 0.72, 0]}>
+    <group position={[px, py, pz]}>
+      <mesh position={[0, 0.72, 0]} castShadow receiveShadow>
         <sphereGeometry args={[0.12, 16, 16]} />
         {mat}
       </mesh>
-      {/* Neck */}
-      <mesh position={[0, 0.58, 0]}>
+      <mesh position={[0, 0.58, 0]} castShadow receiveShadow>
         <cylinderGeometry args={[0.04, 0.05, 0.08, 8]} />
         {mat}
       </mesh>
-      {/* Torso */}
-      <mesh position={[0, 0.32, 0]}>
+      <mesh position={[0, 0.32, 0]} castShadow receiveShadow>
         <capsuleGeometry args={[0.14, 0.3, 4, 12]} />
         {mat}
       </mesh>
-      {/* Hips */}
-      <mesh position={[0, 0.08, 0]}>
+      <mesh position={[0, 0.08, 0]} castShadow receiveShadow>
         <capsuleGeometry args={[0.12, 0.06, 4, 12]} />
         {mat}
       </mesh>
-      {/* Left arm */}
-      <mesh position={[-0.22, 0.35, 0]} rotation={[0, 0, 0.15]}>
+      <mesh position={[-0.22, 0.35, 0]} rotation={[0, 0, 0.15]} castShadow receiveShadow>
         <capsuleGeometry args={[0.04, 0.28, 4, 8]} />
         {mat}
       </mesh>
-      {/* Right arm */}
-      <mesh position={[0.22, 0.35, 0]} rotation={[0, 0, -0.15]}>
+      <mesh position={[0.22, 0.35, 0]} rotation={[0, 0, -0.15]} castShadow receiveShadow>
         <capsuleGeometry args={[0.04, 0.28, 4, 8]} />
         {mat}
       </mesh>
-      {/* Left leg */}
-      <mesh position={[-0.08, -0.22, 0]}>
+      <mesh position={[-0.08, -0.22, 0]} castShadow receiveShadow>
         <capsuleGeometry args={[0.055, 0.32, 4, 8]} />
         {mat}
       </mesh>
-      {/* Right leg */}
-      <mesh position={[0.08, -0.22, 0]}>
+      <mesh position={[0.08, -0.22, 0]} castShadow receiveShadow>
         <capsuleGeometry args={[0.055, 0.32, 4, 8]} />
         {mat}
       </mesh>
-      {/* Face direction indicator - small nose */}
-      <mesh position={[0, 0.72, 0.12]}>
+      <mesh position={[0, 0.72, 0.12]} castShadow>
         <coneGeometry args={[0.03, 0.06, 6]} />
         {mat}
       </mesh>
@@ -81,6 +73,7 @@ export default function SceneObject({
 }) {
   const meshRef = useRef<Mesh>(null)
   const groupRef = useRef<Group>(null)
+  const pivot = obj.pivot ?? [0, 0, 0] as [number, number, number]
 
   if (obj.type === 'person') {
     return (
@@ -96,6 +89,7 @@ export default function SceneObject({
           metalness={obj.material.metalness}
           roughness={obj.material.roughness}
           viewMode={viewMode}
+          pivot={pivot}
         />
       </group>
     )
@@ -112,22 +106,27 @@ export default function SceneObject({
   })()
 
   return (
-    <mesh
-      ref={meshRef}
+    <group
+      ref={groupRef}
       position={obj.position}
       rotation={obj.rotation}
       scale={obj.scale}
-      castShadow
-      receiveShadow
       onClick={(e) => { e.stopPropagation(); onClick() }}
     >
-      {geometry}
-      <ObjectMaterial
-        color={obj.material.color}
-        metalness={obj.material.metalness}
-        roughness={obj.material.roughness}
-        viewMode={viewMode}
-      />
-    </mesh>
+      <mesh
+        ref={meshRef}
+        position={pivot}
+        castShadow
+        receiveShadow
+      >
+        {geometry}
+        <ObjectMaterial
+          color={obj.material.color}
+          metalness={obj.material.metalness}
+          roughness={obj.material.roughness}
+          viewMode={viewMode}
+        />
+      </mesh>
+    </group>
   )
 }

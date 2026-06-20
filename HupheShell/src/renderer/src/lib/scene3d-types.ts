@@ -13,6 +13,7 @@ export interface Scene3DObject {
   position: [number, number, number]
   rotation: [number, number, number]
   scale: [number, number, number]
+  pivot: [number, number, number]
   material: Scene3DMaterial
   gltfUrl?: string
 }
@@ -26,6 +27,7 @@ export interface Scene3DLight {
   color: string
   intensity: number
   position: [number, number, number]
+  target: [number, number, number]
 }
 
 export interface Scene3DCamera {
@@ -42,7 +44,21 @@ export interface Scene3DState {
   cameras: Scene3DCamera[]
   activeCameraId: string | null
   environment: string | null
+  background: Scene3DBackground
   resolution: [number, number]
+}
+
+export function defaultBackground(): Scene3DBackground {
+  return { type: 'color', color: '#1a1a1a', gradientTop: '#2a2a2a', gradientBottom: '#0a0a0a' }
+}
+
+export type BackgroundType = 'color' | 'gradient' | 'hdri'
+
+export interface Scene3DBackground {
+  type: BackgroundType
+  color: string
+  gradientTop: string
+  gradientBottom: string
 }
 
 export type TransformMode = 'translate' | 'rotate' | 'scale'
@@ -65,9 +81,10 @@ export function createScene3DObject(type: Scene3DObjectType, name?: string): Sce
     id: `obj_${Date.now()}_${_counter}`,
     type,
     name: name ?? `${OBJECT_LABELS[type]}_${_counter}`,
-    position: [0, type === 'plane' ? 0 : type === 'person' ? 0.9 : 0.5, 0],
+    position: [0, type === 'plane' ? 0 : type === 'person' ? 0 : 0.5, 0],
     rotation: [type === 'plane' ? -Math.PI / 2 : 0, 0, 0],
     scale: [1, 1, 1],
+    pivot: [0, type === 'person' ? 0.44 : 0, 0],
     material: { color: '#888888', metalness: 0.1, roughness: 0.7 },
   }
 }
@@ -75,10 +92,10 @@ export function createScene3DObject(type: Scene3DObjectType, name?: string): Sce
 export function createScene3DLight(type: Scene3DLightType): Scene3DLight {
   _counter++
   const defaults: Record<Scene3DLightType, Partial<Scene3DLight>> = {
-    ambient: { intensity: 0.4, position: [0, 5, 0] },
-    directional: { intensity: 1.0, position: [5, 8, 3] },
-    point: { intensity: 1.0, position: [2, 3, 2] },
-    spot: { intensity: 1.0, position: [0, 5, 0] },
+    ambient: { intensity: 0.4, position: [0, 5, 0], target: [0, 0, 0] },
+    directional: { intensity: 1.0, position: [5, 8, 3], target: [0, 0, 0] },
+    point: { intensity: 1.0, position: [2, 3, 2], target: [0, 0, 0] },
+    spot: { intensity: 1.0, position: [0, 5, 0], target: [0, 0, 0] },
   }
   return {
     id: `light_${Date.now()}_${_counter}`,
@@ -105,12 +122,13 @@ export function defaultScene3DState(): Scene3DState {
   return {
     objects: [createScene3DObject('cube', 'Cube_1')],
     lights: [
-      { id: 'light_ambient', type: 'ambient', name: 'Ambient', color: '#ffffff', intensity: 0.4, position: [0, 5, 0] },
-      { id: 'light_directional', type: 'directional', name: 'Key Light', color: '#ffffff', intensity: 1.0, position: [5, 8, 3] },
+      { id: 'light_ambient', type: 'ambient', name: 'Ambient', color: '#ffffff', intensity: 0.4, position: [0, 5, 0], target: [0, 0, 0] },
+      { id: 'light_directional', type: 'directional', name: 'Key Light', color: '#ffffff', intensity: 1.0, position: [5, 8, 3], target: [0, 0, 0] },
     ],
     cameras: [cam],
     activeCameraId: null,
     environment: null,
+    background: defaultBackground(),
     resolution: [1024, 1024],
   }
 }

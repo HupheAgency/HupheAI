@@ -117,3 +117,12 @@ textarea {
 .settings-main-scroll--active::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.26);
 }
+
+.number-scrub::-webkit-inner-spin-button,
+.number-scrub::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.number-scrub {
+  -moz-appearance: textfield;
+}

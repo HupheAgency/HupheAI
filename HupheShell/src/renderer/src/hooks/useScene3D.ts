@@ -4,6 +4,7 @@ import {
   type Scene3DObject,
   type Scene3DLight,
   type Scene3DCamera,
+  type Scene3DBackground,
   type Scene3DObjectType,
   type Scene3DLightType,
   type TransformMode,
@@ -11,6 +12,7 @@ import {
   createScene3DLight,
   createScene3DCamera,
   defaultScene3DState,
+  defaultBackground,
 } from '../lib/scene3d-types'
 
 const STORAGE_KEY = 'huphe:scene3d-state:v1'
@@ -30,6 +32,7 @@ function loadPersistedScene(): Scene3DState {
         }
       }
       if (!parsed.cameras) parsed.cameras = []
+      if (!parsed.background) parsed.background = defaultBackground()
       parsed.activeCameraId = null
       return parsed
     }
@@ -162,6 +165,14 @@ export function useScene3D() {
     })
   }, [persist])
 
+  const updateBackground = useCallback((patch: Partial<Scene3DBackground>) => {
+    setScene((prev) => {
+      const next = { ...prev, background: { ...prev.background, ...patch } }
+      persist(next)
+      return next
+    })
+  }, [persist])
+
   const onObjectTransformed = useCallback((
     id: string,
     position: [number, number, number],
@@ -199,6 +210,7 @@ export function useScene3D() {
     deleteCamera,
     setActiveCameraId,
     setEnvironment,
+    updateBackground,
     onObjectTransformed,
     resetScene,
   }

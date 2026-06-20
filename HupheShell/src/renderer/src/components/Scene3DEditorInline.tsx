@@ -75,13 +75,65 @@ function SectionHeader({ title, open, onToggle, count, onAdd }: {
 function NumberInput({ label, value, onChange, step = 0.1, min, max }: {
   label: string; value: number; onChange: (v: number) => void; step?: number; min?: number; max?: number
 }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const dragState = useRef<{ startY: number; startValue: number } | null>(null)
+
+  const clamp = useCallback((v: number) => {
+    if (min != null && v < min) return min
+    if (max != null && v > max) return max
+    return Math.round(v * 100) / 100
+  }, [min, max])
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (document.activeElement === inputRef.current) return
+    e.preventDefault()
+    dragState.current = { startY: e.clientY, startValue: value }
+    const target = e.currentTarget as HTMLElement
+    target.setPointerCapture(e.pointerId)
+    target.style.cursor = 'ns-resize'
+  }, [value])
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!dragState.current) return
+    const delta = (dragState.current.startY - e.clientY) * step
+    onChange(clamp(dragState.current.startValue + delta))
+  }, [step, onChange, clamp])
+
+  const handlePointerUp = useCallback((e: React.PointerEvent) => {
+    if (!dragState.current) return
+    dragState.current = null
+    const target = e.currentTarget as HTMLElement
+    target.releasePointerCapture(e.pointerId)
+    target.style.cursor = ''
+  }, [])
+
   return (
     <label className="flex items-center gap-1.5">
       <span className="w-4 text-[10px] text-white/30 uppercase">{label}</span>
-      <input type="number" value={Math.round(value * 100) / 100}
-        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
-        step={step} min={min} max={max}
-        className="h-6 w-full rounded border border-white/[0.08] bg-white/[0.04] px-1.5 text-[11px] text-white/85 outline-none focus:border-white/20" />
+      <div className="relative flex h-6 w-full items-center"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+      >
+        <input ref={inputRef} type="number" value={Math.round(value * 100) / 100}
+          onChange={(e) => onChange(clamp(parseFloat(e.target.value) || 0))}
+          step={step} min={min} max={max}
+          className="number-scrub h-full w-full cursor-ns-resize rounded border border-white/[0.08] bg-white/[0.04] px-1.5 pr-5 text-[11px] text-white/85 outline-none focus:cursor-text focus:border-white/20" />
+        <div className="pointer-events-none absolute right-0.5 flex flex-col">
+          <button type="button" tabIndex={-1}
+            className="pointer-events-auto flex h-3 w-4 items-center justify-center text-white/20 hover:text-white/50"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.preventDefault(); onChange(clamp(value + step)) }}>
+            <svg width="7" height="4" viewBox="0 0 7 4" fill="currentColor"><path d="M3.5 0L7 4H0z" /></svg>
+          </button>
+          <button type="button" tabIndex={-1}
+            className="pointer-events-auto flex h-3 w-4 items-center justify-center text-white/20 hover:text-white/50"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.preventDefault(); onChange(clamp(value - step)) }}>
+            <svg width="7" height="4" viewBox="0 0 7 4" fill="currentColor"><path d="M3.5 4L0 0h7z" /></svg>
+          </button>
+        </div>
+      </div>
     </label>
   )
 }
@@ -130,6 +182,7 @@ function ObjectItem({ obj, selected, onSelect, onUpdate, onDelete }: {
           <Vec3Row label="Positie" value={obj.position} onChange={(position) => onUpdate({ position })} />
           <Vec3Row label="Rotatie" value={obj.rotation} onChange={(rotation) => onUpdate({ rotation })} />
           <Vec3Row label="Schaal" value={obj.scale} onChange={(scale) => onUpdate({ scale })} />
+          <Vec3Row label="Middelpunt" value={obj.pivot ?? [0, 0, 0]} onChange={(pivot) => onUpdate({ pivot })} />
           <div>
             <p className="mb-1 text-[10px] text-white/40">Materiaal</p>
             <div className="flex flex-col gap-1">
@@ -151,19 +204,19 @@ function ObjectItem({ obj, selected, onSelect, onUpdate, onDelete }: {
   )
 }
 
-function LightItem({ light, onUpdate, onDelete }: {
-  light: Scene3DLight; onUpdate: (patch: Partial<Scene3DLight>) => void; onDelete: () => void
+function LightItem({ light, selected, onSelect, onUpdate, onDelete }: {
+  light: Scene3DLight; selected: boolean; onSelect: () => void; onUpdate: (patch: Partial<Scene3DLight>) => void; onDelete: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const typeLabels: Record<string, string> = { ambient: 'Ambient', directional: 'Zon', point: 'Punt', spot: 'Spot' }
   return (
-    <div className="rounded-lg border border-white/[0.06] bg-white/[0.02]">
+    <div className={['rounded-lg border bg-white/[0.02] transition-colors', selected ? 'border-yellow-400/40' : 'border-white/[0.06]'].join(' ')}>
       <div className="flex items-center gap-2 px-2.5 py-1.5">
-        <button type="button" onClick={() => setExpanded(!expanded)} className="flex flex-1 items-center gap-2 text-left">
-          <span className="flex h-5 w-5 items-center justify-center rounded bg-yellow-400/[0.08] text-[9px] text-yellow-400/60">
+        <button type="button" onClick={() => { onSelect(); setExpanded(!expanded) }} className="flex flex-1 items-center gap-2 text-left">
+          <span className={['flex h-5 w-5 items-center justify-center rounded text-[9px]', selected ? 'bg-yellow-400/20 text-yellow-400' : 'bg-yellow-400/[0.08] text-yellow-400/60'].join(' ')}>
             {light.type === 'ambient' ? '◐' : light.type === 'directional' ? '☀' : light.type === 'spot' ? '◉' : '●'}
           </span>
-          <span className="flex-1 text-[11px] text-white/75">{light.name}</span>
+          <span className={['flex-1 text-[11px]', selected ? 'text-white' : 'text-white/75'].join(' ')}>{light.name}</span>
           <span className="text-[9px] text-white/25">{typeLabels[light.type]}</span>
         </button>
         <button type="button" onClick={onDelete} className="text-white/20 hover:text-red-400/70">
@@ -183,7 +236,12 @@ function LightItem({ light, onUpdate, onDelete }: {
           <NumberInput label="Int" value={light.intensity} step={0.1} min={0} max={10}
             onChange={(v) => onUpdate({ intensity: v })} />
           {light.type !== 'ambient' && (
-            <Vec3Row label="Positie" value={light.position} onChange={(position) => onUpdate({ position })} />
+            <>
+              <Vec3Row label="Positie" value={light.position} onChange={(position) => onUpdate({ position })} />
+              {(light.type === 'directional' || light.type === 'spot') && (
+                <Vec3Row label="Richt op" value={light.target ?? [0, 0, 0]} onChange={(target) => onUpdate({ target })} />
+              )}
+            </>
           )}
         </div>
       )}
@@ -240,6 +298,7 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('solid')
+  const [selectedLightId, setSelectedLightId] = useState<string | null>(null)
   const [generatePrompt, setGeneratePrompt] = useState('')
   const [generating, setGenerating] = useState(false)
   const [generatedImage, setGeneratedImage] = useState<string | null>(null)
@@ -251,7 +310,7 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
     addObject, updateObject, deleteObject, deleteSelected,
     addLight, updateLight, deleteLight,
     addCamera, updateCamera, deleteCamera, setActiveCameraId,
-    setEnvironment, onObjectTransformed, resetScene,
+    setEnvironment, updateBackground, onObjectTransformed, resetScene,
   } = useScene3D()
 
   const handleSaveCurrentView = useCallback(() => {
@@ -280,8 +339,14 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
     setGenerating(true)
     setGenerateError(null)
     try {
+      // Tijdelijk naar rendered mode voor een clean screenshot
+      const prevViewMode = viewMode
+      setViewMode('rendered')
+      // Wacht een frame zodat Three.js opnieuw rendert
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
       const ref = fullscreen ? fullscreenViewportRef : viewportRef
       const screenshot = ref.current?.captureScreenshot()
+      setViewMode(prevViewMode)
       if (!screenshot) { setGenerateError('Kan geen screenshot maken.'); return }
       const api = (window as any).api
       if (!api?.generateScene3D) { setGenerateError('API niet beschikbaar.'); return }
@@ -419,8 +484,10 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
             </div>
             {scene.lights.map((light) => (
               <LightItem key={light.id} light={light}
+                selected={light.id === selectedLightId}
+                onSelect={() => setSelectedLightId(selectedLightId === light.id ? null : light.id)}
                 onUpdate={(patch) => updateLight(light.id, patch)}
-                onDelete={() => deleteLight(light.id)} />
+                onDelete={() => { if (selectedLightId === light.id) setSelectedLightId(null); deleteLight(light.id) }} />
             ))}
           </div>
         )}
@@ -430,11 +497,62 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
       <div className="border-b border-white/[0.06]">
         <SectionHeader title="Omgeving" open={envOpen} onToggle={() => setEnvOpen(!envOpen)} />
         {envOpen && (
-          <div className="px-3 pb-2">
-            <select value={scene.environment ?? ''} onChange={(e) => setEnvironment(e.target.value || null)}
-              className="h-7 w-full rounded border border-white/[0.08] bg-white/[0.04] px-1.5 text-[11px] text-white/85 outline-none">
-              {HDRI_PRESETS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-            </select>
+          <div className="px-3 pb-3 space-y-2.5">
+            <div>
+              <p className="mb-1 text-[10px] text-white/40">Belichting (HDRI)</p>
+              <select value={scene.environment ?? ''} onChange={(e) => setEnvironment(e.target.value || null)}
+                className="h-7 w-full rounded border border-white/[0.08] bg-white/[0.04] px-1.5 text-[11px] text-white/85 outline-none">
+                {HDRI_PRESETS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <p className="mb-1 text-[10px] text-white/40">Achtergrond</p>
+              <div className="flex gap-1 mb-2">
+                {([
+                  { type: 'color' as const, label: 'Kleur' },
+                  { type: 'gradient' as const, label: 'Gradient' },
+                  { type: 'hdri' as const, label: 'HDRI' },
+                ]).map((opt) => (
+                  <button key={opt.type} type="button"
+                    onClick={() => updateBackground({ type: opt.type })}
+                    className={['flex-1 rounded px-2 py-1 text-[10px] transition-colors',
+                      scene.background.type === opt.type ? 'bg-white/10 text-white' : 'bg-white/[0.04] text-white/40 hover:text-white/60'].join(' ')}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              {scene.background.type === 'color' && (
+                <label className="flex items-center gap-2">
+                  <span className="text-[10px] text-white/30">Kleur</span>
+                  <input type="color" value={scene.background.color}
+                    onChange={(e) => updateBackground({ color: e.target.value })}
+                    className="h-6 w-8 cursor-pointer rounded border border-white/[0.08] bg-transparent" />
+                </label>
+              )}
+
+              {scene.background.type === 'gradient' && (
+                <div className="flex gap-3">
+                  <label className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-white/30">Boven</span>
+                    <input type="color" value={scene.background.gradientTop}
+                      onChange={(e) => updateBackground({ gradientTop: e.target.value })}
+                      className="h-6 w-8 cursor-pointer rounded border border-white/[0.08] bg-transparent" />
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-white/30">Onder</span>
+                    <input type="color" value={scene.background.gradientBottom}
+                      onChange={(e) => updateBackground({ gradientBottom: e.target.value })}
+                      className="h-6 w-8 cursor-pointer rounded border border-white/[0.08] bg-transparent" />
+                  </label>
+                </div>
+              )}
+
+              {scene.background.type === 'hdri' && !scene.environment && (
+                <p className="text-[10px] text-white/30 italic">Selecteer eerst een HDRI hierboven</p>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -489,10 +607,11 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
             ref={fullscreenViewportRef}
             scene={scene}
             selectedObjectId={selectedObjectId}
+            selectedLightId={selectedLightId}
             transformMode={transformMode}
             viewMode={viewMode}
             onSelectObject={setSelectedObjectId}
-            onDeselectAll={() => setSelectedObjectId(null)}
+            onDeselectAll={() => { setSelectedObjectId(null); setSelectedLightId(null) }}
             onObjectTransformed={onObjectTransformed}
             onActivateCamera={handleActivateCamera}
             onDeactivateCamera={handleDeactivateCamera}
@@ -524,11 +643,14 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
                 ref={viewportRef}
                 scene={scene}
                 selectedObjectId={selectedObjectId}
+                selectedLightId={selectedLightId}
                 transformMode={transformMode}
+                viewMode={viewMode}
                 onSelectObject={setSelectedObjectId}
-                onDeselectAll={() => setSelectedObjectId(null)}
+                onDeselectAll={() => { setSelectedObjectId(null); setSelectedLightId(null) }}
                 onObjectTransformed={onObjectTransformed}
                 onActivateCamera={handleActivateCamera}
+                onDeactivateCamera={handleDeactivateCamera}
                 orbitStateRef={orbitStateRef}
               />
             </div>
