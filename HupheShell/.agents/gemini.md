@@ -1,4 +1,4 @@
-# Gemini Agent - 3D/2D Product Studio Onderzoek En Specificaties
+# Gemini Agent - Product Studio Provider Fase 1/2
 
 Projectroot:
 `/Users/tom.zwarts/HupheAI/HupheShell`
@@ -11,59 +11,53 @@ Coordinatiebord:
 
 ## Rol
 
-Gemini pakt onderzoek, technische keuzes, providervergelijkingen, datacontracten en handoff-specificaties op.
+Gemini pakt providermetingen, prompttemplates, routekeuzes, benchmarkrapportage en kwaliteitscriteria op.
 
 Primair werkgebied:
 
-- `docs/build/`
-- technische beslisdocumenten
-- providervergelijkingen
-- pure TypeScript interfaces of voorbeeldhelpers als handoff
+- `docs/build/product-studio-provider-spikes.md`
+- `docs/build/reconstruction-provider-comparison.md`
+- `docs/build/final-render-router-spec.md`
+- `docs/build/product-studio-acceptance-checklist.md`
+- aanvullende benchmarkrapporten in `docs/build/`
 
 Niet doen:
 
 - Geen renderer-UI refactors.
-- Geen Supabase deploys of migrations uitvoeren.
-- Geen providerkeuze als definitief markeren zonder meetbare spike-resultaten.
+- Geen Supabase deploys of migrations.
+- Geen definitieve providerkeuze zonder meetdata.
 
-## Samenwerkingsprotocol
+## Fase 1 - Actieve Taken
 
-- Lees voor start het masterdocument, `.agents/sprint_3D-2D-studio.md`, `.agents/chatgpt.md` en `.agents/claude.md`.
-- Werk alleen aan taken uit dit document of het sprintbord.
-- Zet actieve taken op `[~]`, afgeronde taken op `[x]` en noteer kort wat is opgeleverd.
-- Maak handoffs concreet genoeg dat ChatGPT/Codex en Claude ze zonder opnieuw uitzoeken kunnen uitvoeren.
+- [x] Echte reference-view spike uitvoeren met eerste testobject: frontfoto naar left/right/rear/top.
+- [x] Contact sheet route vergelijken met losse view generations.
+- [x] Per reference route vastleggen: input asset, output assets, latency, kosten, failure notes en human accept score.
+- [x] Prompttemplate aanbevelen voor reference views met behoud van productidentiteit.
+- [x] TRELLIS.2 single-view spike uitvoeren met eerste testobject.
+- [x] Primitive proxy route vergelijken als fallback wanneer TRELLIS.2 faalt.
+- [x] Per reconstruction route vastleggen: GLB laadbaarheid, silhouet, latency, kosten en failure notes.
+- [x] Qwen/Final image route beoordelen met beauty preview + source reference + preservation policy.
+- [x] Advies geven voor Fase 1 defaults: reference route, reconstruction route, final render route.
+- [x] Acceptatiechecklist invullen met echte testresultaten.
 
-## Taken
+## Fase 2 - Vervolgwerk
 
-### Fase 0 - Onderzoek En Spikes
-
-- [ ] `product-studio-provider-spikes.md` maken: Gemini-turnaround, contact sheet split, TRELLIS.2 single-view, multiview-route, GLB-load, renderpasses en final image provider.
-- [ ] `reference-view-generation-contract.md` maken met input, output, provenance, statuses en failure cases.
-- [ ] `contact-sheet-splitting-plan.md` maken met detectie, cropregels, confidence en fallback naar losse generations.
-- [ ] `reconstruction-provider-comparison.md` maken: TRELLIS.2 single-view versus multiview-route versus primitive proxy.
-- [ ] `threejs-studio-renderpacket-spec.md` maken: beauty, mask, depth, normals, camera, lighting en scene metadata.
-- [ ] `final-render-router-spec.md` maken: providerinput, preservation policies, protected regions en outputmetadata.
-- [ ] `product-studio-acceptance-checklist.md` maken voor het geslaagde prototype uit hoofdstuk 21.
-
-### Datamodel En Contracten
-
-- [ ] Interfaces uitschrijven voor ProductProject, ProductSourceAsset, ReferenceView, CanonicalReferenceSet, ReconstructionVersion, StudioSceneVersion, RenderPacketVersion en FinalRenderVersion.
-- [ ] Statusmodel uitwerken voor observed, inferred, user-approved, user-edited, rejected en failed.
-- [ ] Immutable versioningregels vastleggen.
-- [ ] Rollback- en failure-routes specificeren.
-
-### Eerste Testcategorie
-
-- [ ] Testobjectcriteria vertalen naar praktische testdata: matte rechthoekige verpakking, neutrale achtergrond, geen kleine tekst, geen transparantie.
-- [ ] Meetcriteria definiëren: consistentie, silhouet, logo/text behoud, kosten, latency en menselijk acceptatiepercentage.
+- [ ] Multiview reconstruction benchmark uitvoeren wanneer provider beschikbaar is.
+- [ ] Multi-pass final render testen met beauty, depth, normals en canonical references.
+- [x] Object-mask/protected-region strategy testen voor logo/tekstbehoud.
+- [x] Scoringmodel voorstellen voor reference consistency, silhouette match en identity preservation.
+- [x] Fidelity Mode criteria uitwerken: wanneer meerdere echte foto's verplicht zijn.
+- [x] Providerkosten en latency vergelijken per productcategorie.
+- [x] Modelrouter-aanbeveling maken pas na voldoende meetdata.
 
 ## Wacht Op
 
-- [ ] WAIT op Claude: bestaande backend- en storage-audit.
-- [ ] WAIT op ChatGPT/Codex: UI-behoeftes die extra contractvelden vereisen.
+- [ ] Claude: werkende provider routes met logging/kosten/latency.
+- [ ] ChatGPT/Codex: UI-smoke flow waarmee testassets door de pipeline kunnen.
 
-## Handoff Verwachting
+## Validatie
 
-- [ ] Elk document bevat een duidelijke aanbeveling, risico's, acceptatiecriteria en beslismoment.
-- [ ] Providerkeuzes blijven adapter-gebaseerd en modelonafhankelijk.
-- [ ] Open experimenten krijgen meetbare uitkomsten, geen losse brainstormnotities.
+- [ ] Elk benchmarkdocument bevat assets, latency, kosten, beperkingen en advies.
+- [ ] Providerkeuzes blijven adapter-gebaseerd.
+- [ ] Definitieve aanbevelingen noemen expliciet wanneer meetdata ontbreekt.
+

@@ -1,0 +1,1528 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview } from './Scene3DEditor'
+import { AtelierPromptBar } from './AtelierPromptBar'
+import type {
+  CanonicalReferenceSet,
+  FinalRenderVersion,
+  PreservationPolicy,
+  ProductProject as BackendProductProject,
+  ProviderRun,
+  ReconstructionVersion,
+  ReferenceView as BackendReferenceView,
+  RenderPacket,
+  SourceAsset,
+  StudioSceneVersion,
+} from '../lib/product-studio-types'
+import type { Scene3DState } from '../lib/scene3d-types'
+
+type ReferenceStatus = 'observed' | 'inferred' | 'user-approved' | 'user-edited'
+type ReferenceView = {
+  id: string
+  backendId?: string
+  angle?: string
+  label: string
+  status: ReferenceStatus
+  src?: string
+}
+
+type ProductStudioProject = {
+  id: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  sourceImage?: {
+    name: string
+    src: string
+    mimeType: string
+  }
+  backendProject?: BackendProductProject
+  sourceAsset?: SourceAsset
+  objectMaskAsset?: SourceAsset
+  objectMaskUrl?: string
+  canonicalSet?: CanonicalReferenceSet
+  reconstruction?: ReconstructionVersion
+  studioScene?: StudioSceneVersion
+  renderPacketRecord?: RenderPacket
+  references: ReferenceView[]
+  activeStep: 'input' | 'references' | 'mesh' | 'studio' | 'final'
+  preservationPolicy: PreservationPolicy
+  renderPacket?: Scene3DRenderPacketPreview
+  finalRenderRecord?: FinalRenderVersion
+  finalRender?: {
+    prompt: string
+    src: string
+    createdAt: string
+  }
+}
+
+type ProviderStats = {
+  runs: ProviderRun[]
+  summary: {
+    totalRuns: number
+    completed: number
+    failed: number
+    processing: number
+    totalLatencyMs: number
+    totalCost: number
+    byType: Record<string, { count: number; avgLatencyMs: number; totalCost: number; failRate: number }>
+  }
+}
+
+const STORAGE_KEY = 'huphe:product-studio-project:v1'
+
+const STATUS_LABELS: Record<ReferenceStatus, string> = {
+  observed: 'Echt',
+  inferred: 'AI voorstel',
+  'user-approved': 'Goedgekeurd',
+  'user-edited': 'Aangepast',
+}
+
+const VIEW_LABELS: Record<string, string> = {
+  hero: 'Hero',
+  front: 'Front / bronfoto',
+  left: 'Links',
+  right: 'Rechts',
+  rear: 'Achterkant',
+  top: 'Bovenkant',
+  custom: 'Custom',
+}
+
+type ProductStudioApi = {
+  createProject: (args: { name: string; outputAspectRatio?: string; productName?: string; productCategory?: string; knownDimensionMm?: number; brandName?: string; notes?: string }) => Promise<any>
+  updateProject: (id: string, updates: Record<string, unknown>) => Promise<any>
+  uploadSource: (args: { projectId: string; fileBuffer: ArrayBuffer; fileName: string; mimeType: string }) => Promise<any>
+  normalizeInput: (args: { projectId: string; sourceAssetId: string }) => Promise<any>
+  registerSourceAsReference: (args: { projectId: string; sourceAssetId: string; angle?: 'hero' | 'front' }) => Promise<any>
+  getLatestState: (projectId: string) => Promise<any>
+  generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) => Promise<any>
+  listReferenceViews: (projectId: string) => Promise<any>
+  updateViewStatus: (viewId: string, status: string, provenance?: string) => Promise<any>
+  createCanonicalSet: (args: { projectId: string; viewIds: string[]; coverage: string }) => Promise<any>
+  listReconstructions: (projectId: string) => Promise<any>
+  startReconstruction: (args: { projectId: string; canonicalReferenceSetId: string; primaryImageUrl: string; route?: 'single-view' | 'multi-view' | 'primitive-proxy'; seed?: number }) => Promise<any>
+  updateReconstructionStatus: (id: string, status: string) => Promise<any>
+  saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) => Promise<any>
+  uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask'; dataUrl: string }) => Promise<any>
+  createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string }) => Promise<any>
+  listFinalRenders: (projectId: string) => Promise<any>
+  updateFinalRenderStatus: (id: string, status: string) => Promise<any>
+  generateFinalRender: (args: { projectId: string; renderPacketId: string; prompt: string; preservationPolicy?: 'strict' | 'balanced' | 'creative'; resolution?: '0.5K' | '1K' | '2K' | '4K' }) => Promise<any>
+  retryProviderRun: (runId: string) => Promise<any>
+  rollbackCanonicalSet: (args: { projectId: string; targetVersion: number }) => Promise<any>
+  rollbackReconstruction: (args: { projectId: string; targetReconstructionId: string }) => Promise<any>
+  rollbackFinalRender: (args: { projectId: string; targetFinalRenderId: string }) => Promise<any>
+  cleanupStorage: (projectId: string) => Promise<any>
+  getProviderStats: (projectId: string) => Promise<any>
+  downloadPng: (args: { imageUrl: string; suggestedName?: string }) => Promise<any>
+}
+
+function getProductStudioApi(): ProductStudioApi | null {
+  return ((window as any).api?.productStudio ?? null) as ProductStudioApi | null
+}
+
+function assertOk<T>(result: any, key: string): T {
+  if (!result?.ok) throw new Error(result?.error || 'Product Studio actie mislukt.')
+  return result[key] as T
+}
+
+function backendViewToReference(view: BackendReferenceView): ReferenceView {
+  return {
+    id: view.id,
+    backendId: view.id,
+    angle: view.angle,
+    label: VIEW_LABELS[view.angle] ?? view.angle,
+    status: view.provenance === 'observed' || view.provenance === 'user-approved' || view.provenance === 'user-edited'
+      ? view.provenance
+      : 'inferred',
+    src: view.asset_url,
+  }
+}
+
+function deriveActiveStep(project: {
+  sourceAsset?: SourceAsset
+  canonicalSet?: CanonicalReferenceSet | null
+  reconstruction?: ReconstructionVersion | null
+  renderPacketRecord?: RenderPacket | null
+  finalRenderRecord?: FinalRenderVersion | null
+}): ProductStudioProject['activeStep'] {
+  if (project.finalRenderRecord?.output_url || project.renderPacketRecord) return 'final'
+  if (project.reconstruction?.status === 'approved') return 'studio'
+  if (project.reconstruction || project.canonicalSet) return 'mesh'
+  if (project.sourceAsset) return 'references'
+  return 'input'
+}
+
+function createProject(): ProductStudioProject {
+  const now = new Date().toISOString()
+  return {
+    id: `product_${Date.now()}`,
+    name: `Product Studio ${new Date().toLocaleDateString('nl-NL')}`,
+    createdAt: now,
+    updatedAt: now,
+    references: [],
+    activeStep: 'input',
+    preservationPolicy: 'balanced',
+  }
+}
+
+function projectFromLatestState(prev: ProductStudioProject, snapshot: any): ProductStudioProject {
+  const backendProject = snapshot.project as BackendProductProject | undefined
+  if (!backendProject) return prev
+  const sourceAssets = (snapshot.sourceAssets ?? []) as SourceAsset[]
+  const references = (snapshot.referenceViews ?? []) as BackendReferenceView[]
+  const sourceAsset = sourceAssets.find((asset) => asset.type === 'original-image')
+    ?? sourceAssets.find((asset) => asset.type === 'normalized-image')
+    ?? sourceAssets[0]
+  const objectMaskAsset = sourceAssets.find((asset) => asset.type === 'object-mask') ?? sourceAssets.find((asset) => asset.type === 'manual-mask')
+  const finalRenderRecord = (snapshot.latestFinalRender ?? undefined) as FinalRenderVersion | undefined
+  const renderPacketRecord = (snapshot.latestRenderPacket ?? undefined) as RenderPacket | undefined
+  const reconstruction = (snapshot.latestReconstruction ?? undefined) as ReconstructionVersion | undefined
+  const canonicalSet = (snapshot.latestCanonicalSet ?? undefined) as CanonicalReferenceSet | undefined
+  const studioScene = (snapshot.latestScene ?? undefined) as StudioSceneVersion | undefined
+  const sourceImage = sourceAsset
+    ? {
+      name: backendProject.product_name || 'Bronfoto',
+      src: sourceAsset.url,
+      mimeType: sourceAsset.mime_type,
+    }
+    : prev.sourceImage
+  return {
+    ...prev,
+    id: backendProject.id,
+    name: backendProject.name,
+    createdAt: backendProject.created_at,
+    updatedAt: backendProject.updated_at,
+    backendProject,
+    sourceAsset,
+    objectMaskAsset,
+    objectMaskUrl: objectMaskAsset?.url ?? prev.objectMaskUrl,
+    sourceImage,
+    references: references.map(backendViewToReference),
+    canonicalSet,
+    reconstruction,
+    studioScene,
+    renderPacketRecord,
+    finalRenderRecord,
+    finalRender: finalRenderRecord?.output_url ? {
+      prompt: finalRenderRecord.prompt ?? '',
+      src: finalRenderRecord.output_url,
+      createdAt: finalRenderRecord.created_at,
+    } : prev.finalRender,
+    activeStep: deriveActiveStep({ sourceAsset, canonicalSet, reconstruction, renderPacketRecord, finalRenderRecord }),
+  }
+}
+
+function getStoredProjectId(project: ProductStudioProject): string | null {
+  return project.backendProject?.id ?? (project.id.startsWith('product_') ? null : project.id)
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
+
+function loadProject(): ProductStudioProject {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) return { ...createProject(), ...JSON.parse(raw) }
+  } catch { /* ignore */ }
+  return createProject()
+}
+
+function buildSceneSavePayload(scene: Scene3DState) {
+  const activeCamera = scene.cameras.find((camera) => camera.id === scene.activeCameraId) ?? scene.cameras[0]
+  const productObject = scene.objects.find((object) => object.type === 'gltf') ?? scene.objects[0]
+  return {
+    camera: activeCamera ? {
+      id: activeCamera.id,
+      name: activeCamera.name,
+      position: activeCamera.position,
+      target: activeCamera.target,
+      fov: activeCamera.fov,
+    } : {},
+    lights: scene.lights.map((light) => ({
+      id: light.id,
+      type: light.type,
+      name: light.name,
+      color: light.color,
+      intensity: light.intensity,
+      position: light.position,
+      target: light.target,
+    })),
+    productTransform: productObject ? {
+      objectId: productObject.id,
+      name: productObject.name,
+      type: productObject.type,
+      gltfUrl: productObject.gltfUrl,
+      position: productObject.position,
+      rotation: productObject.rotation,
+      scale: productObject.scale,
+      pivot: productObject.pivot,
+      material: productObject.material,
+    } : {},
+    environment: {
+      environment: scene.environment,
+      background: scene.background,
+    },
+    output: {
+      resolution: scene.resolution,
+      aspectRatio: scene.resolution[0] === scene.resolution[1] ? '1:1' : `${scene.resolution[0]}:${scene.resolution[1]}`,
+    },
+  }
+}
+
+function StepPill({ active, done, label }: { active: boolean; done?: boolean; label: string }) {
+  return (
+    <div className={[
+      'flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-colors',
+      active ? 'border-[#facc15]/35 bg-[#facc15]/10 text-[#facc15]' : done ? 'border-white/[0.08] bg-white/[0.04] text-white/70' : 'border-white/[0.05] text-white/35',
+    ].join(' ')}>
+      <span className={['h-1.5 w-1.5 rounded-full', active ? 'bg-[#facc15]' : done ? 'bg-white/55' : 'bg-white/18'].join(' ')} />
+      {label}
+    </div>
+  )
+}
+
+function ReferenceCard({ view, onApprove, onReject }: { view: ReferenceView; onApprove: () => void; onReject: () => void }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-white/[0.07] bg-[#151515]">
+      <div className="aspect-[4/3] bg-black/35">
+        {view.src ? (
+          <img src={view.src} alt={view.label} className="h-full w-full object-contain" />
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs text-white/28">Wacht op provider</div>
+        )}
+      </div>
+      <div className="flex items-center justify-between gap-3 px-3 py-2">
+        <div className="min-w-0">
+          <p className="truncate text-xs font-semibold text-white/80">{view.label}</p>
+          <p className="mt-0.5 text-[11px] text-white/36">{STATUS_LABELS[view.status]}</p>
+        </div>
+        {view.status === 'inferred' && (
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onReject}
+              className="rounded-full border border-white/[0.08] px-2.5 py-1 text-[11px] font-medium text-white/45 hover:bg-white/[0.05] hover:text-white/70"
+            >
+              Afwijs
+            </button>
+            <button
+              type="button"
+              onClick={onApprove}
+              className="rounded-full border border-[#facc15]/25 px-2.5 py-1 text-[11px] font-medium text-[#facc15] hover:bg-[#facc15]/10"
+            >
+              Accepteer
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
+  initialImageSrc?: string | null
+  renderLayout?: (sidebar: React.ReactNode, viewport: React.ReactNode) => React.ReactNode
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const contactSheetInputRef = useRef<HTMLInputElement>(null)
+  const objectMaskInputRef = useRef<HTMLInputElement>(null)
+  const studioRef = useRef<Scene3DEditorHandle>(null)
+  const hydratedProjectIdRef = useRef<string | null>(null)
+  const [project, setProject] = useState<ProductStudioProject>(loadProject)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [finalLoading, setFinalLoading] = useState(false)
+  const [finalError, setFinalError] = useState<string | null>(null)
+  const [providerStats, setProviderStats] = useState<ProviderStats | null>(null)
+  const [reconstructionVersions, setReconstructionVersions] = useState<ReconstructionVersion[]>([])
+  const [finalRenderVersions, setFinalRenderVersions] = useState<FinalRenderVersion[]>([])
+  const [compareSlider, setCompareSlider] = useState(50)
+
+  const sourceReady = Boolean(project.sourceImage?.src)
+  const approvedCount = project.references.filter((view) => view.status === 'observed' || view.status === 'user-approved' || view.status === 'user-edited').length
+  const meshReady = Boolean(project.reconstruction?.mesh_url || project.reconstruction?.route === 'primitive-proxy')
+  const renderPacketReady = Boolean(project.renderPacketRecord || project.renderPacket)
+  const objectMaskUrl = project.objectMaskUrl ?? project.objectMaskAsset?.url ?? project.renderPacketRecord?.object_mask_url
+  const activeRuns = providerStats?.runs.filter((run) => run.status === 'queued' || run.status === 'processing') ?? []
+  const failedRuns = providerStats?.runs.filter((run) => run.status === 'failed') ?? []
+  const approvedAngles = new Set(project.references
+    .filter((view) => view.status === 'observed' || view.status === 'user-approved' || view.status === 'user-edited')
+    .map((view) => view.angle ?? view.id))
+  const hasWeakReferenceCoverage = sourceReady && !project.canonicalSet && (
+    approvedCount < 3 || !approvedAngles.has('left') || !approvedAngles.has('right') || (!approvedAngles.has('rear') && !approvedAngles.has('top'))
+  )
+  const approvedBackendViewIds = project.references
+    .filter((view) => view.backendId && (view.status === 'user-approved' || view.status === 'user-edited' || view.status === 'observed'))
+    .map((view) => view.backendId as string)
+  const sceneStorageKey = useMemo(() => `huphe:product-studio:${project.id}:scene3d`, [project.id])
+
+  useEffect(() => {
+    if (!initialImageSrc || project.sourceImage?.src) return
+    setProject((prev) => ({
+      ...prev,
+      sourceImage: { name: 'Gekoppelde afbeelding', src: initialImageSrc, mimeType: 'image/*' },
+      references: [
+        { id: 'front', label: 'Front / bronfoto', status: 'observed', src: initialImageSrc },
+        { id: 'left', label: 'Links', status: 'inferred' },
+        { id: 'right', label: 'Rechts', status: 'inferred' },
+        { id: 'rear', label: 'Achterkant', status: 'inferred' },
+      ],
+      activeStep: 'references',
+      updatedAt: new Date().toISOString(),
+    }))
+  }, [initialImageSrc, project.sourceImage?.src])
+
+  useEffect(() => {
+    if (project.sourceImage?.src) return
+    let dataUrl: string | null = null
+    try { dataUrl = sessionStorage.getItem('huphe:create3d-image') } catch { /* ignore */ }
+    if (!dataUrl) return
+    try { sessionStorage.removeItem('huphe:create3d-image') } catch { /* ignore */ }
+    const byteString = atob(dataUrl.split(',')[1])
+    const mimeMatch = dataUrl.match(/^data:(image\/\w+);/)
+    const mimeType = mimeMatch?.[1] ?? 'image/png'
+    const ext = mimeType.split('/')[1] ?? 'png'
+    const ab = new ArrayBuffer(byteString.length)
+    const ia = new Uint8Array(ab)
+    for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i)
+    const file = new File([ab], `product.${ext}`, { type: mimeType })
+    void handleImageFile(file)
+  }, [])
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(project)) } catch { /* ignore */ }
+  }, [project])
+
+  useEffect(() => {
+    const projectId = getStoredProjectId(project)
+    if (!projectId || hydratedProjectIdRef.current === projectId) return
+    hydratedProjectIdRef.current = projectId
+    void hydrateLatestState(projectId, false)
+  }, [project.backendProject?.id, project.id])
+
+  useEffect(() => {
+    if (!project.reconstruction?.mesh_url) return
+    studioRef.current?.addModelFromUrl(project.reconstruction.mesh_url, 'Reconstructed product')
+  }, [project.reconstruction?.mesh_url])
+
+  useEffect(() => {
+    const projectId = getStoredProjectId(project)
+    if (!projectId) return
+    void refreshProviderStats(projectId)
+    void refreshVersionLists(projectId)
+  }, [project.backendProject?.id, project.id])
+
+  useEffect(() => {
+    if (activeRuns.length === 0) return
+    const projectId = getStoredProjectId(project)
+    if (!projectId) return
+    const timer = window.setInterval(() => {
+      void hydrateLatestState(projectId, false)
+      void refreshProviderStats(projectId)
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [activeRuns.length, project.backendProject?.id, project.id])
+
+  async function hydrateLatestState(projectId = getStoredProjectId(project), showBusy = true) {
+    if (!projectId) return
+    const api = getProductStudioApi()
+    if (!api) return
+    if (showBusy) setBusy('Project synchroniseren...')
+    try {
+      const result = await api.getLatestState(projectId)
+      if (!result?.ok) throw new Error(result?.error || 'Project synchroniseren mislukt.')
+      setProject((prev) => projectFromLatestState(prev, result))
+      void refreshProviderStats(projectId)
+      void refreshVersionLists(projectId)
+    } catch (err: any) {
+      setError(err?.message || 'Project synchroniseren mislukt.')
+      hydratedProjectIdRef.current = null
+    } finally {
+      if (showBusy) setBusy(null)
+    }
+  }
+
+  async function refreshProviderStats(projectId = getStoredProjectId(project)) {
+    if (!projectId) return
+    const api = getProductStudioApi()
+    if (!api) return
+    const result = await api.getProviderStats(projectId)
+    if (result?.ok) {
+      setProviderStats({ runs: result.runs ?? [], summary: result.summary })
+    }
+  }
+
+  async function refreshVersionLists(projectId = getStoredProjectId(project)) {
+    if (!projectId) return
+    const api = getProductStudioApi()
+    if (!api) return
+    const [reconResult, renderResult] = await Promise.all([
+      api.listReconstructions(projectId).catch(() => null),
+      api.listFinalRenders(projectId).catch(() => null),
+    ])
+    if (reconResult?.ok) setReconstructionVersions((reconResult.reconstructions ?? []) as ReconstructionVersion[])
+    if (renderResult?.ok) setFinalRenderVersions((renderResult.renders ?? []) as FinalRenderVersion[])
+  }
+
+  async function ensureBackendProject(): Promise<BackendProductProject> {
+    if (project.backendProject) return project.backendProject
+    const api = getProductStudioApi()
+    if (!api) throw new Error('Product Studio API is nog niet beschikbaar.')
+    const backendProject = assertOk<BackendProductProject>(
+      await api.createProject({ name: project.name, outputAspectRatio: '1:1' }),
+      'project',
+    )
+    setProject((prev) => ({
+      ...prev,
+      id: backendProject.id,
+      name: backendProject.name,
+      backendProject,
+      updatedAt: backendProject.updated_at,
+    }))
+    return backendProject
+  }
+
+  async function refreshReferenceViews(projectId = project.backendProject?.id) {
+    const api = getProductStudioApi()
+    if (!api || !projectId) return
+    const result = await api.listReferenceViews(projectId)
+    if (!result?.ok) throw new Error(result?.error || 'Reference views laden mislukt.')
+    const backendViews = (result.views ?? []) as BackendReferenceView[]
+    setProject((prev) => {
+      const hasObservedSourceView = backendViews.some((view) => view.provenance === 'observed' && (view.angle === 'front' || view.angle === 'hero'))
+      const sourceReference = prev.sourceImage?.src && !hasObservedSourceView
+        ? [{ id: 'front', label: 'Front / bronfoto', status: 'observed' as ReferenceStatus, src: prev.sourceImage.src }]
+        : []
+      return {
+        ...prev,
+        references: [...sourceReference, ...backendViews.map(backendViewToReference)],
+        activeStep: backendViews.length > 0 ? 'references' : prev.activeStep,
+        updatedAt: new Date().toISOString(),
+      }
+    })
+  }
+
+  async function handleImageFile(file: File | null) {
+    setError(null)
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setError('Kies een afbeelding als bronfoto.')
+      return
+    }
+    setBusy('Uploaden...')
+    try {
+      const src = await readFileAsDataUrl(file)
+      const backendProject = await ensureBackendProject()
+      const api = getProductStudioApi()
+      if (!api) throw new Error('Product Studio API is nog niet beschikbaar.')
+      const asset = assertOk<SourceAsset>(
+        await api.uploadSource({
+          projectId: backendProject.id,
+          fileBuffer: await file.arrayBuffer(),
+          fileName: file.name,
+          mimeType: file.type,
+        }),
+        'asset',
+      )
+      const observedViewResult = await api.registerSourceAsReference({
+        projectId: backendProject.id,
+        sourceAssetId: asset.id,
+        angle: 'front',
+      }).catch(() => null)
+      const observedReference = observedViewResult?.ok && observedViewResult.view
+        ? backendViewToReference(observedViewResult.view as BackendReferenceView)
+        : { id: 'front', label: 'Front / bronfoto', status: 'observed' as ReferenceStatus, src: asset.url || src }
+      setProject((prev) => ({
+        ...prev,
+        id: backendProject.id,
+        backendProject,
+        sourceAsset: asset,
+        sourceImage: { name: file.name, src: asset.url || src, mimeType: file.type },
+        references: [
+          observedReference,
+          { id: 'left', label: 'Links', status: 'inferred' },
+          { id: 'right', label: 'Rechts', status: 'inferred' },
+          { id: 'rear', label: 'Achterkant', status: 'inferred' },
+        ],
+        activeStep: 'references',
+        updatedAt: new Date().toISOString(),
+      }))
+      setBusy('Normaliseren...')
+      void api.normalizeInput({ projectId: backendProject.id, sourceAssetId: asset.id }).catch(() => {})
+      setBusy('Views genereren...')
+      await api.generateReferenceViews({
+        projectId: backendProject.id,
+        sourceAssetId: asset.id,
+        targetViews: ['left', 'right', 'rear'],
+        productNotes: backendProject.notes,
+      }).then((result) => {
+        if (result?.ok) void hydrateLatestState(backendProject.id, false)
+      }).catch(() => {})
+    } catch (err: any) {
+      setError(err?.message || 'Upload mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function splitContactSheet(src: string): Promise<string[]> {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = reject
+      img.src = src
+    })
+    const cellWidth = Math.floor(image.naturalWidth / 2)
+    const cellHeight = Math.floor(image.naturalHeight / 2)
+    const crops: string[] = []
+    for (let row = 0; row < 2; row++) {
+      for (let col = 0; col < 2; col++) {
+        const canvas = document.createElement('canvas')
+        canvas.width = cellWidth
+        canvas.height = cellHeight
+        const context = canvas.getContext('2d')
+        if (!context) continue
+        context.drawImage(image, col * cellWidth, row * cellHeight, cellWidth, cellHeight, 0, 0, cellWidth, cellHeight)
+        crops.push(canvas.toDataURL('image/png'))
+      }
+    }
+    return crops
+  }
+
+  async function handleContactSheetFile(file: File | null) {
+    setError(null)
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setError('Kies een afbeelding met een 2x2 contact sheet.')
+      return
+    }
+    const sheetSrc = await readFileAsDataUrl(file)
+    const crops = await splitContactSheet(sheetSrc)
+    const source = project.sourceImage?.src
+    setProject((prev) => ({
+      ...prev,
+      references: [
+        { id: 'front', label: 'Front / bronfoto', status: source ? 'observed' : 'inferred', src: source ?? crops[0] },
+        { id: 'left', label: 'Links', status: 'inferred', src: crops[1] },
+        { id: 'right', label: 'Rechts', status: 'inferred', src: crops[2] },
+        { id: 'rear', label: 'Achterkant', status: 'inferred', src: crops[3] },
+      ],
+      activeStep: 'references',
+      updatedAt: new Date().toISOString(),
+    }))
+  }
+
+  async function handleObjectMaskFile(file: File | null) {
+    setFinalError(null)
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setFinalError('Kies een afbeelding als object-mask.')
+      return
+    }
+    const api = getProductStudioApi()
+    if (!api || !project.backendProject) {
+      setFinalError('Upload eerst een bronfoto via de backend.')
+      return
+    }
+    setBusy('Object-mask uploaden...')
+    try {
+      const dataUrl = await readFileAsDataUrl(file)
+      const result = await api.uploadRenderPass({
+        projectId: project.backendProject.id,
+        passType: 'object-mask',
+        dataUrl,
+      })
+      if (!result?.ok || !result.url) throw new Error(result?.error || 'Object-mask upload mislukt.')
+      setProject((prev) => ({
+        ...prev,
+        objectMaskUrl: result.url,
+        updatedAt: new Date().toISOString(),
+      }))
+    } catch (err: any) {
+      setFinalError(err?.message || 'Object-mask upload mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  function approveReference(id: string) {
+    const view = project.references.find((item) => item.id === id)
+    if (view?.backendId) {
+      const api = getProductStudioApi()
+      void api?.updateViewStatus(view.backendId, 'active', 'user-approved').catch((err: any) => {
+        setError(err?.message || 'View goedkeuren mislukt.')
+      })
+    }
+    setProject((prev) => ({
+      ...prev,
+      references: prev.references.map((view) => view.id === id ? { ...view, status: 'user-approved', src: view.src ?? prev.sourceImage?.src } : view),
+      updatedAt: new Date().toISOString(),
+    }))
+  }
+
+  function rejectReference(id: string) {
+    const view = project.references.find((item) => item.id === id)
+    if (view?.backendId) {
+      const api = getProductStudioApi()
+      void api?.updateViewStatus(view.backendId, 'rejected').catch((err: any) => {
+        setError(err?.message || 'View afwijzen mislukt.')
+      })
+    }
+    setProject((prev) => ({
+      ...prev,
+      references: prev.references.filter((view) => view.id !== id),
+      updatedAt: new Date().toISOString(),
+    }))
+  }
+
+  async function generateBackendReferenceViews() {
+    setError(null)
+    if (!project.backendProject || !project.sourceAsset) {
+      setError('Upload eerst een bronfoto via de backend.')
+      return
+    }
+    const api = getProductStudioApi()
+    if (!api) {
+      setError('Product Studio API is nog niet beschikbaar.')
+      return
+    }
+    setBusy('Views genereren...')
+    try {
+      const result = await api.generateReferenceViews({
+        projectId: project.backendProject.id,
+        sourceAssetId: project.sourceAsset.id,
+        targetViews: ['left', 'right', 'rear'],
+        productNotes: project.backendProject.notes,
+      })
+      if (!result?.ok) throw new Error(result?.error || 'Views genereren mislukt.')
+      await hydrateLatestState(project.backendProject.id, false)
+    } catch (err: any) {
+      setError(err?.message || 'Views genereren mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function ensureCanonicalAndReconstruction(route: 'single-view' | 'multi-view' | 'primitive-proxy' = 'primitive-proxy'): Promise<{ canonicalSet: CanonicalReferenceSet; reconstruction: ReconstructionVersion }> {
+    const api = getProductStudioApi()
+    if (!api) throw new Error('Product Studio API is nog niet beschikbaar.')
+    if (!project.backendProject) throw new Error('Maak eerst een project aan.')
+    if (!project.sourceImage?.src) throw new Error('Upload eerst een bronfoto.')
+
+    let canonicalSet = project.canonicalSet
+    if (!canonicalSet) {
+      if (approvedBackendViewIds.length === 0) {
+        throw new Error('Accepteer minimaal een gegenereerde reference view voordat je een canonical set maakt.')
+      }
+      canonicalSet = assertOk<CanonicalReferenceSet>(
+        await api.createCanonicalSet({
+          projectId: project.backendProject.id,
+          viewIds: approvedBackendViewIds,
+          coverage: approvedBackendViewIds.length >= 3 ? 'partial-multiview' : 'limited-single-view',
+        }),
+        'set',
+      )
+    }
+
+    let reconstruction = project.reconstruction
+    if (!reconstruction) {
+      reconstruction = assertOk<ReconstructionVersion>(
+        await api.startReconstruction({
+          projectId: project.backendProject.id,
+          canonicalReferenceSetId: canonicalSet.id,
+          primaryImageUrl: project.sourceImage.src,
+          route,
+        }),
+        'reconstruction',
+      )
+    }
+
+    setProject((prev) => ({
+      ...prev,
+      canonicalSet,
+      reconstruction,
+      activeStep: 'mesh',
+      updatedAt: new Date().toISOString(),
+    }))
+    if (reconstruction.mesh_url) {
+      studioRef.current?.addModelFromUrl(reconstruction.mesh_url, 'Reconstructed product')
+    }
+    return { canonicalSet, reconstruction }
+  }
+
+  async function startMeshReview(route: 'single-view' | 'multi-view' | 'primitive-proxy' = 'primitive-proxy') {
+    setError(null)
+    setBusy(route === 'primitive-proxy' ? 'Proxy mesh maken...' : 'Reconstructie starten...')
+    try {
+      const result = await ensureCanonicalAndReconstruction(route)
+      if (route !== result.reconstruction.route && !result.reconstruction.mesh_url) {
+        setProject((prev) => ({ ...prev, reconstruction: undefined }))
+        await ensureCanonicalAndReconstruction(route)
+      }
+      await hydrateLatestState(project.backendProject?.id, false)
+    } catch (err: any) {
+      setError(err?.message || 'Reconstructie starten mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function setMeshStatus(status: 'approved' | 'rejected') {
+    if (!project.reconstruction) return
+    const api = getProductStudioApi()
+    if (!api) {
+      setError('Product Studio API is nog niet beschikbaar.')
+      return
+    }
+    setBusy(status === 'approved' ? 'Mesh goedkeuren...' : 'Mesh afwijzen...')
+    try {
+      const result = await api.updateReconstructionStatus(project.reconstruction.id, status)
+      if (!result?.ok) throw new Error(result?.error || 'Mesh status wijzigen mislukt.')
+      setProject((prev) => ({
+        ...prev,
+        reconstruction: prev.reconstruction ? { ...prev.reconstruction, status } : prev.reconstruction,
+        activeStep: status === 'approved' ? 'studio' : 'mesh',
+        updatedAt: new Date().toISOString(),
+      }))
+      await hydrateLatestState(project.backendProject?.id, false)
+    } catch (err: any) {
+      setError(err?.message || 'Mesh status wijzigen mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  function resetProject() {
+    setProject(createProject())
+    setError(null)
+    setFinalError(null)
+  }
+
+  async function captureRenderPacket() {
+    const packet = studioRef.current?.captureRenderPacketPreview()
+    if (!packet?.beauty && !packet?.passes) {
+      setFinalError('Kan nog geen preview uit de studio maken.')
+      return
+    }
+    setFinalError(null)
+    setBusy('Renderpacket opslaan...')
+    try {
+      const api = getProductStudioApi()
+      if (!api) throw new Error('Product Studio API is nog niet beschikbaar.')
+      if (!project.backendProject) throw new Error('Maak eerst een project aan.')
+      const { canonicalSet, reconstruction } = await ensureCanonicalAndReconstruction()
+
+      const uploads = await Promise.all([
+        packet.beauty ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'beauty', dataUrl: packet.beauty }) : Promise.resolve(null),
+        packet.passes?.depth ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'depth', dataUrl: packet.passes.depth }) : Promise.resolve(null),
+        packet.passes?.normal ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'normal', dataUrl: packet.passes.normal }) : Promise.resolve(null),
+      ])
+      const [beautyUpload, depthUpload, normalUpload] = uploads
+      if (beautyUpload && !beautyUpload.ok) throw new Error(beautyUpload.error || 'Beauty upload mislukt.')
+      if (depthUpload && !depthUpload.ok) throw new Error(depthUpload.error || 'Depth upload mislukt.')
+      if (normalUpload && !normalUpload.ok) throw new Error(normalUpload.error || 'Normal upload mislukt.')
+
+      const scene = studioRef.current?.getScene()
+      if (!scene) throw new Error('Kan de 3D scene niet lezen.')
+      const scenePayload = buildSceneSavePayload(scene)
+
+      const studioScene = assertOk<StudioSceneVersion>(
+        await api.saveScene({
+          projectId: project.backendProject.id,
+          reconstructionVersionId: reconstruction.id,
+          camera: scenePayload.camera,
+          lights: scenePayload.lights,
+          productTransform: scenePayload.productTransform,
+          environment: scenePayload.environment,
+          output: scenePayload.output,
+        }),
+        'scene',
+      )
+
+      const renderPacketRecord = assertOk<RenderPacket>(
+        await api.createRenderPacket({
+          projectId: project.backendProject.id,
+          canonicalReferenceSetId: canonicalSet.id,
+          reconstructionVersionId: reconstruction.id,
+          studioSceneVersionId: studioScene.id,
+          beautyUrl: beautyUpload?.url ?? packet.beauty ?? packet.passes?.textured,
+          objectMaskUrl,
+          depthUrl: depthUpload?.url,
+          normalUrl: normalUpload?.url,
+        }),
+        'packet',
+      )
+
+      setProject((prev) => ({
+        ...prev,
+        canonicalSet,
+        reconstruction,
+        studioScene,
+        renderPacketRecord,
+        renderPacket: packet,
+        activeStep: 'final',
+        updatedAt: new Date().toISOString(),
+      }))
+      await hydrateLatestState(project.backendProject.id, false)
+    } catch (err: any) {
+      setFinalError(err?.message || 'Renderpacket opslaan mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function handleFinalPrompt(prompt: string) {
+    const beauty = project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured
+    if (!beauty && !project.renderPacketRecord?.beauty_url) {
+      setFinalError('Maak eerst een preview uit de studio.')
+      return
+    }
+    setFinalLoading(true)
+    setFinalError(null)
+    try {
+      const productApi = getProductStudioApi()
+      if (productApi && project.backendProject && project.renderPacketRecord) {
+        const render = assertOk<FinalRenderVersion>(
+          await productApi.generateFinalRender({
+            projectId: project.backendProject.id,
+            renderPacketId: project.renderPacketRecord.id,
+            prompt,
+            preservationPolicy: project.preservationPolicy,
+            resolution: '2K',
+          }),
+          'render',
+        )
+        if (!render.output_url) throw new Error('Final render is opgeslagen zonder output URL.')
+        setProject((prev) => ({
+          ...prev,
+          finalRenderRecord: render,
+          finalRender: { prompt: render.prompt ?? prompt, src: render.output_url as string, createdAt: render.created_at },
+          activeStep: 'final',
+          updatedAt: new Date().toISOString(),
+        }))
+        await hydrateLatestState(project.backendProject.id, false)
+        return
+      }
+
+      const api = (window as any).api
+      if (!api?.generateScene3D || !beauty) throw new Error('Final render API is nog niet beschikbaar.')
+      const policyInstruction = {
+        strict: 'Behoud productidentiteit, logo, vorm en materiaal maximaal. Verander het product niet.',
+        balanced: 'Behoud het product herkenbaar en verbeter vooral licht, compositie en commerciële uitstraling.',
+        creative: 'Maak een vrijere commerciële interpretatie, maar houd de productidentiteit herkenbaar.',
+      }[project.preservationPolicy]
+      const result = await api.generateScene3D(beauty, `${policyInstruction}\n\n${prompt}`, project.sourceImage?.src)
+      if (!result?.ok || !result.imageUrl) {
+        throw new Error(result?.error || 'Final render mislukt.')
+      }
+      setProject((prev) => ({
+        ...prev,
+        finalRender: { prompt, src: result.imageUrl, createdAt: new Date().toISOString() },
+        activeStep: 'final',
+        updatedAt: new Date().toISOString(),
+      }))
+    } catch (err: any) {
+      setFinalError(err?.message || 'Final render mislukt.')
+    } finally {
+      setFinalLoading(false)
+    }
+  }
+
+  function downloadFinalRender() {
+    const src = project.finalRender?.src
+    if (!src) return
+    const api = getProductStudioApi()
+    if (api && src.startsWith('https://')) {
+      void api.downloadPng({
+        imageUrl: src,
+        suggestedName: `${project.name.replace(/[^a-z0-9_-]+/gi, '_')}_final.png`,
+      }).then((result) => {
+        if (!result?.ok) setFinalError(result?.error || 'Download mislukt.')
+      })
+      return
+    }
+    const link = document.createElement('a')
+    link.href = src
+    link.download = `${project.name.replace(/[^a-z0-9_-]+/gi, '-').toLowerCase()}-final.png`
+    link.click()
+  }
+
+  async function retryRun(runId: string) {
+    const api = getProductStudioApi()
+    if (!api) return
+    setBusy('Provider run opnieuw klaarzetten...')
+    try {
+      const result = await api.retryProviderRun(runId)
+      if (!result?.ok) throw new Error(result?.error || 'Retry mislukt.')
+      await refreshProviderStats()
+      await hydrateLatestState(getStoredProjectId(project), false)
+    } catch (err: any) {
+      setError(err?.message || 'Retry mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function rollbackCanonicalSet() {
+    const api = getProductStudioApi()
+    const projectId = getStoredProjectId(project)
+    const currentVersion = project.canonicalSet?.version
+    if (!api || !projectId || !currentVersion || currentVersion <= 1) return
+    setBusy('Canonical set terugzetten...')
+    try {
+      const result = await api.rollbackCanonicalSet({ projectId, targetVersion: currentVersion - 1 })
+      if (!result?.ok) throw new Error(result?.error || 'Rollback mislukt.')
+      await hydrateLatestState(projectId, false)
+    } catch (err: any) {
+      setError(err?.message || 'Canonical rollback mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function rollbackReconstruction(targetReconstructionId: string) {
+    const api = getProductStudioApi()
+    const projectId = getStoredProjectId(project)
+    if (!api || !projectId) return
+    setBusy('Reconstructie terugzetten...')
+    try {
+      const result = await api.rollbackReconstruction({ projectId, targetReconstructionId })
+      if (!result?.ok) throw new Error(result?.error || 'Rollback mislukt.')
+      await hydrateLatestState(projectId, false)
+    } catch (err: any) {
+      setError(err?.message || 'Reconstructie rollback mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function rollbackFinalRender(targetFinalRenderId: string) {
+    const api = getProductStudioApi()
+    const projectId = getStoredProjectId(project)
+    if (!api || !projectId) return
+    setBusy('Final render terugzetten...')
+    try {
+      const result = await api.rollbackFinalRender({ projectId, targetFinalRenderId })
+      if (!result?.ok) throw new Error(result?.error || 'Rollback mislukt.')
+      await hydrateLatestState(projectId, false)
+    } catch (err: any) {
+      setFinalError(err?.message || 'Final render rollback mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function cleanupStorage() {
+    const api = getProductStudioApi()
+    const projectId = getStoredProjectId(project)
+    if (!api || !projectId) return
+    setBusy('Opslag opschonen...')
+    try {
+      const result = await api.cleanupStorage(projectId)
+      if (!result?.ok) throw new Error(result?.error || 'Opschonen mislukt.')
+      await hydrateLatestState(projectId, false)
+    } catch (err: any) {
+      setError(err?.message || 'Opschonen mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const sidebarContent = (
+    <>
+      <div className="border-b border-white/[0.08] px-5 py-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-medium uppercase text-[#facc15]/80">Product Studio</p>
+            <h2 className="mt-1 text-lg font-semibold text-white">{project.name}</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            {getStoredProjectId(project) && (
+              <button type="button" onClick={() => void hydrateLatestState()} className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs text-white/55 hover:bg-white/[0.06] hover:text-white">
+                Sync
+              </button>
+            )}
+            <button type="button" onClick={resetProject} className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs text-white/55 hover:bg-white/[0.06] hover:text-white">
+              Nieuw
+            </button>
+          </div>
+        </div>
+        {busy && <p className="mt-3 rounded-full border border-[#facc15]/15 bg-[#facc15]/8 px-3 py-1.5 text-xs text-[#facc15]">{busy}</p>}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <StepPill label="Input" active={project.activeStep === 'input'} done={sourceReady} />
+          <StepPill label="Views" active={project.activeStep === 'references'} done={approvedCount >= 2 || Boolean(project.canonicalSet)} />
+          <StepPill label="Mesh" active={project.activeStep === 'mesh'} done={meshReady} />
+          <StepPill label="Studio" active={project.activeStep === 'studio'} done={renderPacketReady} />
+          <StepPill label="Final" active={project.activeStep === 'final'} done={Boolean(project.finalRender?.src || project.finalRenderRecord?.output_url)} />
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => {
+              void handleImageFile(event.target.files?.[0] ?? null)
+              event.currentTarget.value = ''
+            }}
+          />
+          <input
+            ref={contactSheetInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => {
+              void handleContactSheetFile(event.target.files?.[0] ?? null)
+              event.currentTarget.value = ''
+            }}
+          />
+          <input
+            ref={objectMaskInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => {
+              void handleObjectMaskFile(event.target.files?.[0] ?? null)
+              event.currentTarget.value = ''
+            }}
+          />
+
+          <section>
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white/85">Bronfoto</h3>
+              <button type="button" onClick={() => fileInputRef.current?.click()} className="text-xs text-[#facc15] hover:text-[#fde68a]">
+                {sourceReady ? 'Vervang' : 'Upload'}
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="mt-3 flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-lg border border-dashed border-white/[0.12] bg-black/30 text-sm text-white/35 transition-colors hover:border-[#facc15]/35 hover:text-white/65"
+            >
+              {project.sourceImage?.src ? (
+                <img src={project.sourceImage.src} alt="Bronfoto" className="h-full w-full object-contain" />
+              ) : (
+                <span>Kies een productfoto</span>
+              )}
+            </button>
+            {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
+          </section>
+
+          <section className="mt-6">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white/85">Canonical views</h3>
+              <div className="flex items-center gap-3">
+                <button type="button" onClick={generateBackendReferenceViews} disabled={!project.sourceAsset || Boolean(busy)} className="text-xs text-[#facc15] hover:text-[#fde68a] disabled:text-white/22">
+                  Genereer
+                </button>
+                <button type="button" onClick={() => contactSheetInputRef.current?.click()} className="text-xs text-[#facc15] hover:text-[#fde68a]">
+                  Contact sheet
+                </button>
+                <span className="text-xs text-white/32">{approvedCount}/4 bruikbaar</span>
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              {project.references.map((view) => (
+                <ReferenceCard key={view.id} view={view} onApprove={() => approveReference(view.id)} onReject={() => rejectReference(view.id)} />
+              ))}
+            </div>
+            {hasWeakReferenceCoverage && (
+              <div className="mt-3 rounded-lg border border-[#facc15]/18 bg-[#facc15]/8 p-3">
+                <p className="text-xs font-semibold text-[#facc15]">Safe Camera Zone</p>
+                <p className="mt-1 text-xs text-white/42">
+                  Er zijn nog weinig goedgekeurde hoeken. Blijf voorlopig dicht bij de front/side camera of genereer extra views voordat je een extreme camera kiest.
+                </p>
+              </div>
+            )}
+          </section>
+
+          <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Mesh review</p>
+                <p className="mt-1 text-xs text-white/36">
+                  {project.reconstruction
+                    ? `${project.reconstruction.route} - ${project.reconstruction.status}`
+                    : 'Maak eerst een canonical set en start de reconstructie.'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void startMeshReview('single-view')}
+                  disabled={!project.sourceImage?.src || Boolean(busy)}
+                  className="rounded-full border border-[#facc15]/25 px-3 py-1.5 text-xs font-medium text-[#facc15] hover:bg-[#facc15]/10 disabled:border-white/[0.05] disabled:text-white/24"
+                >
+                  TRELLIS
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void startMeshReview('primitive-proxy')}
+                  disabled={!project.sourceImage?.src || Boolean(busy)}
+                  className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+                >
+                  Proxy
+                </button>
+              </div>
+            </div>
+            {project.reconstruction && (
+              <div className="mt-3 space-y-2">
+                <div className="rounded-md border border-white/[0.06] bg-black/20 p-2 text-[11px] text-white/42">
+                  {project.reconstruction.mesh_url ? 'GLB geladen in studio.' : 'Proxy fallback: gebruik de bestaande primitive in de studio tot een GLB beschikbaar is.'}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void setMeshStatus('approved')}
+                    className="rounded-full border border-[#facc15]/25 px-3 py-1 text-xs text-[#facc15] hover:bg-[#facc15]/10"
+                  >
+                    Goedkeur
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void setMeshStatus('rejected')}
+                    className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/50 hover:bg-white/[0.06]"
+                  >
+                    Afwijs
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Render packet</p>
+                <p className="mt-1 text-xs text-white/36">Beauty, depth, normals en optioneel object-mask voor protected regions.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => objectMaskInputRef.current?.click()}
+                  disabled={!project.backendProject}
+                  className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+                >
+                  Mask
+                </button>
+                <button
+                  type="button"
+                  onClick={captureRenderPacket}
+                  className="rounded-full border border-[#facc15]/25 px-3 py-1.5 text-xs font-medium text-[#facc15] hover:bg-[#facc15]/10"
+                >
+                  Maak preview
+                </button>
+              </div>
+            </div>
+            {project.renderPacket && (
+              <div className="mt-3 grid grid-cols-4 gap-2">
+                {[
+                  ['Beauty', project.renderPacket.beauty ?? project.renderPacket.passes?.textured],
+                  ['Depth', project.renderPacket.passes?.depth],
+                  ['Normals', project.renderPacket.passes?.normal],
+                  ['Mask', objectMaskUrl],
+                ].map(([label, src]) => (
+                  <div key={label} className="overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
+                    <div className="aspect-square">{src && <img src={src} alt={label} className="h-full w-full object-cover" />}</div>
+                    <p className="px-2 py-1 text-[10px] text-white/38">{label}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+            {project.renderPacketRecord && (
+              <div className="mt-3 space-y-1 rounded-md border border-white/[0.06] bg-black/20 p-2 text-[10px] text-white/36">
+                <p className="truncate">Beauty: {project.renderPacketRecord.beauty_url}</p>
+                {project.renderPacketRecord.depth_url && <p className="truncate">Depth: {project.renderPacketRecord.depth_url}</p>}
+                {project.renderPacketRecord.normal_url && <p className="truncate">Normals: {project.renderPacketRecord.normal_url}</p>}
+                {project.renderPacketRecord.object_mask_url && <p className="truncate">Mask: {project.renderPacketRecord.object_mask_url}</p>}
+              </div>
+            )}
+            {objectMaskUrl && !project.renderPacketRecord?.object_mask_url && (
+              <p className="mt-2 rounded-md border border-[#facc15]/15 bg-[#facc15]/8 px-2 py-1 text-[10px] text-[#facc15]">
+                Object-mask staat klaar en wordt meegenomen bij het volgende renderpacket.
+              </p>
+            )}
+          </section>
+
+          <section className="mt-6">
+            <h3 className="text-sm font-semibold text-white/85">Final render</h3>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {([
+                ['strict', 'Strict'],
+                ['balanced', 'Balanced'],
+                ['creative', 'Creative'],
+              ] as Array<[PreservationPolicy, string]>).map(([policy, label]) => (
+                <button
+                  key={policy}
+                  type="button"
+                  onClick={() => setProject((prev) => ({ ...prev, preservationPolicy: policy }))}
+                  className={[
+                    'rounded-full border px-3 py-1.5 text-xs transition-colors',
+                    project.preservationPolicy === policy ? 'border-[#facc15]/35 bg-[#facc15]/10 text-[#facc15]' : 'border-white/[0.07] text-white/42 hover:bg-white/[0.05] hover:text-white/70',
+                  ].join(' ')}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="mt-3">
+              <AtelierPromptBar
+                placeholder="Beschrijf de commercial productfoto..."
+                busyPlaceholder="Final render wordt gemaakt..."
+                loading={finalLoading}
+                disabled={!project.renderPacket && !project.renderPacketRecord}
+                onSubmit={handleFinalPrompt}
+              />
+            </div>
+            {finalError && <p className="mt-2 text-xs text-red-300">{finalError}</p>}
+            {(project.sourceImage?.src || project.renderPacket?.beauty || project.finalRender?.src) && (
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {([
+                  ['Bron', project.sourceImage?.src],
+                  ['Canonical', project.references.find((view) => view.status === 'user-approved' || view.status === 'observed')?.src],
+                  ['Beauty', project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured ?? project.renderPacketRecord?.beauty_url],
+                  ['Final', project.finalRender?.src],
+                ] as Array<[string, string | null | undefined]>).map(([label, src]) => (
+                  <div key={label} className="overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
+                    <div className="aspect-[4/3]">
+                      {src ? <img src={src} alt={label} className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center text-[10px] text-white/24">Nog leeg</div>}
+                    </div>
+                    <p className="px-2 py-1 text-[10px] text-white/38">{label}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+            {project.finalRender?.src && (
+              <div className="mt-3 overflow-hidden rounded-lg border border-white/[0.07] bg-[#151515]">
+                <div className="aspect-[4/3] bg-black/35">
+                  <img src={project.finalRender.src} alt="Final render" className="h-full w-full object-contain" />
+                </div>
+                <div className="flex items-center justify-between gap-3 px-3 py-2">
+                  <p className="min-w-0 truncate text-xs text-white/48">{project.finalRender.prompt}</p>
+                  <button type="button" onClick={downloadFinalRender} className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/65 hover:bg-white/[0.06]">
+                    Download
+                  </button>
+                </div>
+              </div>
+            )}
+            {project.finalRender?.src && (project.renderPacket?.beauty || project.renderPacketRecord?.beauty_url) && (
+              <div className="mt-3 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-semibold text-white/70">Voor/na</p>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={compareSlider}
+                    onChange={(event) => setCompareSlider(Number(event.target.value))}
+                    className="w-28 accent-[#facc15]"
+                  />
+                </div>
+                <div className="relative mt-3 aspect-[4/3] overflow-hidden rounded-md bg-black/35">
+                  <img
+                    src={project.renderPacket?.beauty ?? project.renderPacketRecord?.beauty_url}
+                    alt="Voor"
+                    className="absolute inset-0 h-full w-full object-contain"
+                  />
+                  <div className="absolute inset-y-0 left-0 overflow-hidden" style={{ width: `${compareSlider}%` }}>
+                    <img src={project.finalRender.src} alt="Na" className="h-full w-full object-contain" style={{ width: `${10000 / Math.max(compareSlider, 1)}%` }} />
+                  </div>
+                  <div className="absolute inset-y-0 w-px bg-[#facc15]" style={{ left: `${compareSlider}%` }} />
+                  <div className="absolute bottom-2 left-2 rounded-full bg-black/70 px-2 py-1 text-[10px] text-white/60">Final</div>
+                  <div className="absolute bottom-2 right-2 rounded-full bg-black/70 px-2 py-1 text-[10px] text-white/60">Beauty</div>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Jobs & kosten</p>
+                <p className="mt-1 text-xs text-white/36">
+                  {providerStats
+                    ? `${providerStats.summary.totalRuns} runs · ${providerStats.summary.processing} actief · ${providerStats.summary.failed} failed`
+                    : 'Nog geen providerdata.'}
+                </p>
+              </div>
+              {getStoredProjectId(project) && (
+                <button
+                  type="button"
+                  onClick={() => void refreshProviderStats()}
+                  className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs text-white/55 hover:bg-white/[0.06]"
+                >
+                  Refresh
+                </button>
+              )}
+            </div>
+            {providerStats?.summary.totalRuns ? (
+              <div className="mt-3 space-y-2">
+                <div className="grid grid-cols-3 gap-2 text-[10px] text-white/38">
+                  <div className="rounded-md border border-white/[0.06] bg-black/20 p-2">Latency {Math.round(providerStats.summary.totalLatencyMs / Math.max(providerStats.summary.completed, 1))}ms</div>
+                  <div className="rounded-md border border-white/[0.06] bg-black/20 p-2">Kosten {providerStats.summary.totalCost ? providerStats.summary.totalCost.toFixed(3) : '-'}</div>
+                  <div className="rounded-md border border-white/[0.06] bg-black/20 p-2">Failed {providerStats.summary.failed}</div>
+                </div>
+                {providerStats.runs.slice(0, 4).map((run) => (
+                  <div key={run.id} className="flex items-center justify-between gap-2 rounded-md border border-white/[0.06] bg-black/20 px-2 py-1.5">
+                    <div className="min-w-0">
+                      <p className="truncate text-[11px] text-white/62">{run.provider_type} · {run.status}</p>
+                      <p className="truncate text-[10px] text-white/30">{run.model_name} · retry {run.retry_count}</p>
+                    </div>
+                    {run.status === 'failed' && (
+                      <button type="button" onClick={() => void retryRun(run.id)} className="rounded-full border border-[#facc15]/25 px-2.5 py-1 text-[10px] text-[#facc15] hover:bg-[#facc15]/10">
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Rollback</p>
+                <p className="mt-1 text-xs text-white/36">Zet canonical, mesh of final render terug naar een eerdere versie.</p>
+              </div>
+              {getStoredProjectId(project) && (
+                <button type="button" onClick={() => void cleanupStorage()} className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs text-white/50 hover:bg-white/[0.06]">
+                  Cleanup
+                </button>
+              )}
+            </div>
+            <div className="mt-3 space-y-2">
+              <button
+                type="button"
+                onClick={() => void rollbackCanonicalSet()}
+                disabled={!project.canonicalSet || project.canonicalSet.version <= 1}
+                className="w-full rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-left text-xs text-white/55 hover:bg-white/[0.05] disabled:text-white/22"
+              >
+                Canonical terug naar v{Math.max((project.canonicalSet?.version ?? 1) - 1, 1)}
+              </button>
+              {reconstructionVersions.slice(0, 3).map((version) => (
+                <button
+                  key={version.id}
+                  type="button"
+                  onClick={() => void rollbackReconstruction(version.id)}
+                  disabled={version.id === project.reconstruction?.id}
+                  className="w-full rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-left text-xs text-white/55 hover:bg-white/[0.05] disabled:text-white/22"
+                >
+                  Mesh {version.route} · {version.status} · {new Date(version.created_at).toLocaleDateString('nl-NL')}
+                </button>
+              ))}
+              {finalRenderVersions.slice(0, 3).map((version) => (
+                <button
+                  key={version.id}
+                  type="button"
+                  onClick={() => void rollbackFinalRender(version.id)}
+                  disabled={version.id === project.finalRenderRecord?.id}
+                  className="w-full rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-left text-xs text-white/55 hover:bg-white/[0.05] disabled:text-white/22"
+                >
+                  Final {version.status} · {version.resolution} · {new Date(version.created_at).toLocaleDateString('nl-NL')}
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
+
+        <div className="border-t border-white/[0.08] p-4">
+          <button
+            type="button"
+            disabled={!sourceReady}
+            onClick={() => {
+              setProject((prev) => ({ ...prev, activeStep: prev.reconstruction ? 'studio' : 'mesh' }))
+              if (!project.reconstruction) void startMeshReview('single-view')
+            }}
+            className={[
+              'h-10 w-full rounded-full text-sm font-semibold transition-colors',
+              sourceReady ? 'bg-white text-black hover:bg-[#facc15]' : 'bg-white/[0.05] text-white/25',
+            ].join(' ')}
+          >
+            Open studio
+          </button>
+        </div>
+    </>
+  )
+
+  const viewportContent = (
+    <Scene3DEditor ref={studioRef} key={sceneStorageKey} storageKey={sceneStorageKey} className="h-full w-full rounded-lg" />
+  )
+
+  if (!sourceReady && !busy) {
+    const emptyState = (
+      <div className="flex h-full min-h-0 w-full items-center justify-center bg-[#0a0a0a] text-white">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          className="hidden"
+          onChange={(event) => {
+            void handleImageFile(event.target.files?.[0] ?? null)
+            event.currentTarget.value = ''
+          }}
+        />
+        <div className="flex flex-col items-center gap-6">
+          <div className="flex h-20 w-20 items-center justify-center rounded-3xl border border-white/[0.08] bg-white/[0.04] text-[#facc15]">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3l9 5v8l-9 5-9-5V8z" />
+              <path d="M12 13l9-5" />
+              <path d="M12 13l-9-5" />
+              <path d="M12 13v9" />
+            </svg>
+          </div>
+          <div className="text-center">
+            <h2 className="text-xl font-semibold text-white">Product Studio</h2>
+            <p className="mt-2 max-w-sm text-sm leading-relaxed text-white/40">Upload een productfoto en de studio genereert automatisch reference views, een 3D model en fotorealistische renders.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="rounded-full bg-[#facc15] px-6 py-3 text-sm font-semibold text-black transition-colors hover:bg-[#fde68a]"
+          >
+            Create 3D
+          </button>
+          {error && <p className="text-xs text-red-300">{error}</p>}
+        </div>
+      </div>
+    )
+    if (renderLayout) return <>{renderLayout(null, emptyState)}</>
+    return emptyState
+  }
+
+  if (busy && !sourceReady) {
+    const loadingState = (
+      <div className="flex h-full min-h-0 w-full items-center justify-center bg-[#0a0a0a] text-white">
+        <div className="flex flex-col items-center gap-4">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#facc15]/20 border-t-[#facc15]" />
+          <p className="text-sm text-[#facc15]">{busy}</p>
+          {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
+        </div>
+      </div>
+    )
+    if (renderLayout) return <>{renderLayout(null, loadingState)}</>
+    return loadingState
+  }
+
+  if (renderLayout) {
+    return <>{renderLayout(sidebarContent, viewportContent)}</>
+  }
+
+  return (
+    <div className="flex h-full min-h-0 w-full bg-[#0a0a0a] text-white">
+      <aside className="flex w-[360px] flex-shrink-0 flex-col border-r border-white/[0.08] bg-[#111]">
+        {sidebarContent}
+      </aside>
+      <main className="min-w-0 flex-1 p-4">
+        {viewportContent}
+      </main>
+    </div>
+  )
+}

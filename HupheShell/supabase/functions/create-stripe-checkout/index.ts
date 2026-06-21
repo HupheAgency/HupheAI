@@ -10,9 +10,9 @@ const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') as string, {
 })
 
 const PACKAGES = [
-  { id: 'starter',  euros: 5,  millicredits: 500_000,  label: '5.000 credits' },
+  { id: 'starter', euros: 5, millicredits: 500_000, label: '5.000 credits' },
   { id: 'standard', euros: 10, millicredits: 1_100_000, label: '11.000 credits (+10% bonus)' },
-  { id: 'pro',      euros: 25, millicredits: 3_000_000, label: '30.000 credits (+20% bonus)' },
+  { id: 'pro', euros: 25, millicredits: 3_000_000, label: '30.000 credits (+20% bonus)' },
 ]
 
 serve(async (req: Request) => {

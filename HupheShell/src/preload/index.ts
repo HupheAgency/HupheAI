@@ -222,6 +222,64 @@ contextBridge.exposeInMainWorld('api', {
   hasKey: (name: string) => ipcRenderer.invoke('key:has', name),
 
   // -------------------------------------------------------------------------
+  //  Product Studio
+  // -------------------------------------------------------------------------
+  productStudio: {
+    createProject: (args: { name: string; outputAspectRatio?: string; productName?: string; productCategory?: string; knownDimensionMm?: number; brandName?: string; notes?: string }) =>
+      ipcRenderer.invoke('product-studio:create-project', args),
+    listProjects: () => ipcRenderer.invoke('product-studio:list-projects'),
+    getProject: (id: string) => ipcRenderer.invoke('product-studio:get-project', id),
+    updateProject: (id: string, updates: Record<string, unknown>) => ipcRenderer.invoke('product-studio:update-project', id, updates),
+    uploadSource: (args: { projectId: string; fileBuffer: ArrayBuffer; fileName: string; mimeType: string }) =>
+      ipcRenderer.invoke('product-studio:upload-source', args),
+    listReferenceViews: (projectId: string) => ipcRenderer.invoke('product-studio:list-reference-views', projectId),
+    updateViewStatus: (viewId: string, status: string, provenance?: string) => ipcRenderer.invoke('product-studio:update-view-status', viewId, status, provenance),
+    createCanonicalSet: (args: { projectId: string; viewIds: string[]; coverage: string }) =>
+      ipcRenderer.invoke('product-studio:create-canonical-set', args),
+    listReconstructions: (projectId: string) => ipcRenderer.invoke('product-studio:list-reconstructions', projectId),
+    updateReconstructionStatus: (id: string, status: string) => ipcRenderer.invoke('product-studio:update-reconstruction-status', id, status),
+    saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) =>
+      ipcRenderer.invoke('product-studio:save-scene', args),
+    createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string }) =>
+      ipcRenderer.invoke('product-studio:create-render-packet', args),
+    listFinalRenders: (projectId: string) => ipcRenderer.invoke('product-studio:list-final-renders', projectId),
+    updateFinalRenderStatus: (id: string, status: string) => ipcRenderer.invoke('product-studio:update-final-render-status', id, status),
+    getProviderRun: (runId: string) => ipcRenderer.invoke('product-studio:get-provider-run', runId),
+    normalizeInput: (args: { projectId: string; sourceAssetId: string }) =>
+      ipcRenderer.invoke('product-studio:normalize-input', args),
+    uploadGlb: (args: { projectId: string; reconstructionVersionId: string; glbBuffer: ArrayBuffer; fileName: string }) =>
+      ipcRenderer.invoke('product-studio:upload-glb', args),
+    downloadPng: (args: { imageUrl: string; suggestedName?: string }) =>
+      ipcRenderer.invoke('product-studio:download-png', args),
+    uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask'; dataUrl: string }) =>
+      ipcRenderer.invoke('product-studio:upload-render-pass', args),
+    generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) =>
+      ipcRenderer.invoke('product-studio:generate-reference-views', args),
+    startReconstruction: (args: { projectId: string; canonicalReferenceSetId: string; primaryImageUrl: string; route?: 'single-view' | 'multi-view' | 'primitive-proxy'; seed?: number }) =>
+      ipcRenderer.invoke('product-studio:start-reconstruction', args),
+    registerSourceAsReference: (args: { projectId: string; sourceAssetId: string; angle?: 'hero' | 'front' }) =>
+      ipcRenderer.invoke('product-studio:register-source-as-reference', args),
+    getLatestState: (projectId: string) =>
+      ipcRenderer.invoke('product-studio:get-latest-state', projectId),
+    refreshSignedUrl: (args: { bucket?: string; storagePath: string; expiresIn?: number }) =>
+      ipcRenderer.invoke('product-studio:refresh-signed-url', args),
+    generateFinalRender: (args: { projectId: string; renderPacketId: string; prompt: string; preservationPolicy?: 'strict' | 'balanced' | 'creative'; resolution?: '1k' | '2k' | '4k' }) =>
+      ipcRenderer.invoke('product-studio:generate-final-render', args),
+    retryProviderRun: (runId: string) =>
+      ipcRenderer.invoke('product-studio:retry-provider-run', runId),
+    rollbackCanonicalSet: (args: { projectId: string; targetVersion: number }) =>
+      ipcRenderer.invoke('product-studio:rollback-canonical-set', args),
+    rollbackReconstruction: (args: { projectId: string; targetReconstructionId: string }) =>
+      ipcRenderer.invoke('product-studio:rollback-reconstruction', args),
+    rollbackFinalRender: (args: { projectId: string; targetFinalRenderId: string }) =>
+      ipcRenderer.invoke('product-studio:rollback-final-render', args),
+    cleanupStorage: (projectId: string) =>
+      ipcRenderer.invoke('product-studio:cleanup-storage', projectId),
+    getProviderStats: (projectId: string) =>
+      ipcRenderer.invoke('product-studio:get-provider-stats', projectId),
+  },
+
+  // -------------------------------------------------------------------------
   //  Dialog — native OS dialogs
   // -------------------------------------------------------------------------
   dialog: {

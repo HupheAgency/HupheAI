@@ -23,6 +23,7 @@ export default function Scene3DToolbar({
   transformMode,
   onTransformModeChange,
   onAddObject,
+  onImportModel,
   onAddLight,
   onDelete,
   hasSelection,
@@ -30,6 +31,7 @@ export default function Scene3DToolbar({
   transformMode: TransformMode
   onTransformModeChange: (mode: TransformMode) => void
   onAddObject: (type: Scene3DObjectType) => void
+  onImportModel?: () => void
   onAddLight: (type: Scene3DLightType) => void
   onDelete: () => void
   hasSelection: boolean
@@ -68,6 +70,23 @@ export default function Scene3DToolbar({
           </svg>
         </button>
       ))}
+
+      {onImportModel && (
+        <button
+          type="button"
+          onClick={onImportModel}
+          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/55 transition-colors hover:bg-white/[0.08] hover:text-white"
+          title="GLB/GLTF importeren"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" />
+            <path d="M12 12l8-4.5" />
+            <path d="M12 12L4 7.5" />
+            <path d="M12 12v9" />
+            <path d="M8 4.5V2h8v2.5" />
+          </svg>
+        </button>
+      )}
 
       <div className="my-1 h-px bg-white/[0.08]" />
 

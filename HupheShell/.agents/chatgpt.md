@@ -1,4 +1,4 @@
-# ChatGPT / Codex Agent - 3D/2D Product Studio Sprint
+# ChatGPT / Codex Agent - Product Studio Fase 1/2
 
 Projectroot:
 `/Users/tom.zwarts/HupheAI/HupheShell`
@@ -11,69 +11,55 @@ Coordinatiebord:
 
 ## Rol
 
-ChatGPT/Codex pakt vooral frontend, renderer, UX, Three.js-integratie en lokale clientlogica op.
+ChatGPT/Codex pakt de renderer, UX, bestaande Scene3D-integratie en frontend-koppeling met Claude's Product Studio IPC/preload API op.
 
 Primair werkgebied:
 
-- `src/renderer/src`
-- Product Studio pagina's, componenten, hooks en UI-states
-- Three.js scene, controls, review UI en prompt/actieflows
-- gerichte renderer-tests als die aanwezig zijn
+- `src/renderer/src/components/ProductStudioShell.tsx`
+- `src/renderer/src/components/Scene3DEditor.tsx`
+- `src/renderer/src/components/Scene3DViewport.tsx`
+- `src/renderer/src/hooks/useScene3D.ts`
+- gerichte renderer smoke-tests als die aanwezig zijn
 
 Niet doen:
 
-- Geen Supabase migrations of RLS aanpassen.
-- Geen providerkeys of server-side AI-aanroepen in renderer plaatsen.
-- Geen model/providerkeuze hardcoderen buiten het afgesproken adaptercontract.
+- Geen Supabase migrations/RLS.
+- Geen providerkeys of server-side modelcalls in de renderer.
+- Geen provider/modelnamen hardcoderen buiten bestaande adapter/API-keuzes.
 
-## Samenwerkingsprotocol
+## Fase 1 - Actieve Taken
 
-- Lees voor start het masterdocument, `.agents/sprint_3D-2D-studio.md`, `.agents/claude.md` en `.agents/gemini.md`.
-- Werk alleen aan taken uit dit document of het sprintbord.
-- Zet actieve taken op `[~]`, afgeronde taken op `[x]` en noteer kort wat is aangepast.
-- Check de andere agentdocumenten tijdens lang werk.
-- Laat user-wijzigingen en werk van andere agents intact.
+- [x] ProductStudioShell volledig op backend-state laten draaien: project, source asset, reference views, canonical set, reconstruction, studio scene en renderpacket. (`getLatestState` hydratatie + handmatige Sync gekoppeld)
+- [x] LocalStorage alleen nog gebruiken als tijdelijke UI-cache; backend blijft bron van waarheid voor projectdata.
+- [~] Reference review afmaken: generated views tonen, accepteren, afwijzen, vervangen en canonical set aanmaken. (accepteren/afwijzen en canonical set flow gekoppeld; vervangen blijft vervolgwerk)
+- [~] Mesh review scherm bouwen: reconstruction starten/laden, GLB tonen, proxy fallback tonen, accepteren/afwijzen/regenereren. (TRELLIS default, proxy fallback en accept/reject klaar; regenereren blijft vervolgwerk)
+- [x] Reconstructie-resultaat automatisch als GLB-object in de bestaande Scene3D studio plaatsen.
+- [x] Studio scene persistence verbeteren: echte camera, lights, product transform, environment en output opslaan in `saveScene`, niet lege placeholders.
+- [x] Renderpacket review tonen met backend URLs voor beauty, depth en normals.
+- [x] Final render review afmaken met bronfoto, canonical view, beauty preview, final image, prompt, preservation policy en download.
+- [x] Foutenpad-UX zichtbaar maken voor upload failure, provider failure, retry en rollback.
+- [ ] Visuele smoke-test van Product Studio flow.
+- [ ] Visuele smoke-test van bestaande Media/Atelier 3D-editor om regressie te voorkomen.
 
-## Taken
+## Fase 2 - Vervolgwerk
 
-### Fase 0 - Technische Spikes
-
-- [ ] Minimale Product Studio shell maken of aanwijzen waar deze in de app komt.
-- [ ] Uploadflow UI voor een enkele productfoto ontwerpen.
-- [ ] Review UI ontwerpen voor observed, inferred, user-approved en user-edited referentieviews.
-- [ ] Contact sheet split-resultaten visueel kunnen controleren.
-- [ ] GLB/GLTF in een Three.js canvas laden met orbit, pan en zoom.
-- [ ] Primitive proxy fallback UI ontwerpen: box, cylinder, sphere en plane.
-- [ ] Renderpass-preview UI voorbereiden voor beauty, mask, depth en normals.
-
-### Fase 1 - Verticale Basisflow
-
-- [ ] Project aanmaken UI.
-- [ ] Een foto uploaden en bronstatus tonen.
-- [ ] Drie aanvullende views tonen en laten accepteren of vervangen.
-- [ ] Mesh review scherm bouwen met front, left, right, rear en turntable/preview.
-- [ ] Mesh accepteren, opnieuw genereren, vorige versie herstellen en primitive proxy kiezen.
-- [ ] Eenvoudige Three.js-studio bouwen met product transform, camera, licht en achtergrond.
-- [ ] Preview/final promptbar koppelen aan de studioflow.
-- [ ] Final Render Review UI bouwen met bronfoto, canonical view, beauty preview en finale render.
-- [ ] PNG downloadactie aansluiten zodra Claude de backendroute levert.
-
-### UX-Regels Uit Het Masterdocument
-
-- [ ] De originele foto altijd als bewijs zichtbaar of bereikbaar houden.
-- [ ] AI-gegenereerde views nooit stilzwijgend gelijkstellen aan echte views.
-- [ ] Elke acceptatiestap expliciet maken.
-- [ ] Failure UX maken waarmee de gebruiker kan herstellen zonder opnieuw te beginnen.
-- [ ] Eerste testcategorie ondersteunen: matte rechthoekige verpakking, neutrale achtergrond, eenvoudige kleuren.
+- [x] Object-mask renderpass UI tonen zodra de renderpass beschikbaar is.
+- [x] Object-mask uploaden via `productStudio.uploadRenderPass({ passType: 'object-mask' })`.
+- [x] `createRenderPacket` vullen met `objectMaskUrl`.
+- [x] Voor/na-overlay bouwen voor source/canonical/beauty/final.
+- [x] Rollback UI voor reference set, reconstruction en final render versions.
+- [x] Betere jobstatus UI: queued, processing, failed, retry, completed.
+- [x] Safe Camera Zone of onzekerheidswaarschuwing tonen bij zwakke reference coverage.
 
 ## Wacht Op
 
-- [ ] WAIT op Gemini: definitieve technische spike-aanbevelingen en provider-adaptercontracten.
-- [ ] WAIT op Claude: project-, asset-, job- en versioning-backendcontracten.
-- [ ] WAIT op Claude: veilige upload/download/storage routes.
+- [x] Claude: echte `generate-final-render` / `create-final-render` route die een `FinalRenderVersion` maakt vanuit een `RenderPacket`.
+- [x] Claude: observed/front reference view of canonical-set route die source asset correct kan meenemen.
+- [x] Gemini: echte provider-spike resultaten voor prompt- en routedefaults.
 
 ## Validatie
 
-- [ ] `npm run build`.
-- [ ] Visuele smoke-test van upload, review, studio en final review.
-- [ ] Controleren dat API-sleutels en providerlogica niet in renderer terechtkomen.
+- [x] `npx tsc --noEmit`
+- [x] `npm run build`
+- [ ] Handmatige Product Studio smoke-test met eerste testobject.
+- [ ] Handmatige foutenpad-test: provider failure, upload failure, retry en rollback.

@@ -17,6 +17,7 @@ import type { MediaAsset } from '../lib/media-asset-store'
 import { supabase } from '../lib/supabase'
 import { Toggle } from './Toggle'
 import Scene3DEditorInline from './Scene3DEditorInline'
+import ProductStudioShell from './ProductStudioShell'
 
 export function AtelierMediaCreationPanel({
   type,
@@ -46,6 +47,8 @@ export function AtelierMediaCreationPanel({
   const [inputFileSrc, setInputFileSrc] = useState<string | null>(null)
   const [inputFileName, setInputFileName] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const create3dInputRef = useRef<HTMLInputElement>(null)
+  const [productStudioOpen, setProductStudioOpen] = useState(false)
   const promptInputRef = useRef<HTMLInputElement>(null)
   const projectCreatedRef = useRef(false)
 
@@ -532,7 +535,7 @@ export function AtelierMediaCreationPanel({
   return (
     <div className="relative z-10 flex h-full w-full overflow-hidden">
       {/* Brush cursor — fixed overlay, exactly brushSize px, center = pointer */}
-      {isMaskMode && (
+      {isMaskMode && !productStudioOpen && (
         <div
           ref={maskCursorRef}
           className="pointer-events-none fixed z-[9999] rounded-full border-2 border-orange-400 bg-orange-500/25"
@@ -552,7 +555,7 @@ export function AtelierMediaCreationPanel({
           <LeftToolTooltip key={tool.id} label={tool.label}>
             <button
               type="button"
-              onClick={() => setActiveToolId(tool.id)}
+              onClick={() => { setActiveToolId(tool.id); if (tool.id !== 'scene3d') setProductStudioOpen(false) }}
               aria-label={tool.label}
               aria-pressed={tool.id === activeToolId}
               className={[
@@ -567,6 +570,22 @@ export function AtelierMediaCreationPanel({
           </LeftToolTooltip>
         ))}
       </div>
+      {productStudioOpen ? (
+        <ProductStudioShell
+          renderLayout={(sidebar, viewport) => (
+            <>
+              <section className="relative flex min-w-0 flex-1 flex-col">
+                <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0a0a0a]">
+                  {viewport}
+                </div>
+              </section>
+              <div className="flex w-[340px] flex-shrink-0 flex-col border-l border-white/[0.06] bg-[#111] text-white overflow-y-auto">
+                {sidebar}
+              </div>
+            </>
+          )}
+        />
+      ) : (
       <section className="relative flex min-w-0 flex-1 flex-col">
       <div ref={canvasRef} className="relative min-h-0 flex-1 overflow-hidden flex items-center justify-center select-none cursor-grab active:cursor-grabbing">
         {!activeItem && !generating && (
@@ -793,6 +812,42 @@ export function AtelierMediaCreationPanel({
               >
                 <PlusTinyIcon />
               </button>
+              {activeToolId === 'scene3d' && (
+                <>
+                  <input
+                    ref={create3dInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (!file) return
+                      const reader = new FileReader()
+                      reader.onload = (ev) => {
+                        try { sessionStorage.setItem('huphe:create3d-image', ev.target?.result as string) } catch { /* ignore */ }
+                        setProductStudioOpen(true)
+                      }
+                      reader.readAsDataURL(file)
+                      e.target.value = ''
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => create3dInputRef.current?.click()}
+                    className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.04] px-3 text-sm text-white/65 transition-colors hover:border-[#facc15]/25 hover:bg-[#facc15]/8 hover:text-[#facc15]"
+                    aria-label="Create 3D"
+                    title="Upload een productfoto en start de Product Studio"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 3l9 5v8l-9 5-9-5V8z" />
+                      <path d="M12 13l9-5" />
+                      <path d="M12 13l-9-5" />
+                      <path d="M12 13v9" />
+                    </svg>
+                    <span>3D</span>
+                  </button>
+                </>
+              )}
               {onClearCreationType ? (
                 <AtelierModeChip
                   icon={option.icon}
@@ -910,7 +965,8 @@ export function AtelierMediaCreationPanel({
         )}
       </div>
       </section>
-      <AtelierMediaEditSidebar
+      )}
+      {!productStudioOpen && <AtelierMediaEditSidebar
         mediaType={mediaType}
         projectsPanel={projectsPanel}
         currentImageSrc={activeItem?.src}
@@ -931,7 +987,7 @@ export function AtelierMediaCreationPanel({
           setResultItems(next)
           setActiveResultIndex(next.length - 1)
         }}
-      />
+      />}
       {fullscreenAsset && createPortal(
         <div
           ref={fullscreenRef}

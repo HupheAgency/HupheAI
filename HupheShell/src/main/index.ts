@@ -10,6 +10,7 @@ import AdmZip from 'adm-zip'
 import { registerHupheCodeIPC } from './huphe-code-ipc'
 import { registerPulseIPC } from './pulse-orchestrator'
 import { registerEngineIPC } from './engine-ipc'
+import { registerProductStudioIPC } from './product-studio-ipc'
 import { autoUpdater } from 'electron-updater'
 import { generateHtml5Banner, IAB_FORMATS, type BannerProject } from './lib/banner-generator'
 import { generateHtml5Print, PRINT_FORMATS, type PrintPayload } from './lib/print-generator'
@@ -3890,6 +3891,7 @@ function createWindow(): void {
     const supabaseUrl = (import.meta as any).env?.MAIN_VITE_SUPABASE_URL as string ?? ''
     const supabaseKey = (import.meta as any).env?.MAIN_VITE_SUPABASE_KEY as string ?? ''
     registerPulseIPC(loadKey, supabaseUrl, supabaseKey)
+    registerProductStudioIPC(() => cachedJwt)
   })
 
   const rendererDevUrl = process.env['ELECTRON_RENDERER_URL']

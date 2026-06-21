@@ -1,4 +1,4 @@
-# Claude Agent - 3D/2D Product Studio Backend En Integratie
+# Claude Agent - Product Studio Backend Fase 1/2
 
 Projectroot:
 `/Users/tom.zwarts/HupheAI/HupheShell`
@@ -15,66 +15,47 @@ Claude pakt backend, Supabase, storage, IPC/API-contracten, provideradapters, jo
 
 Primair werkgebied:
 
-- Supabase schema, migrations en RLS
-- main-process IPC/API routes
-- provideradaptercontracten
-- assetopslag, jobqueue, logs en versiebeheer
-- finale security- en integratiecheck
+- `src/main/product-studio-ipc.ts`
+- `src/preload/index.ts`
+- Supabase migrations/RLS/storage
+- provider/job/final-render integratie
 
 Niet doen:
 
-- Geen renderer-UI refactor uitvoeren die al bij ChatGPT/Codex ligt.
-- Geen provideronderzoek overnemen dat bij Gemini ligt, behalve integratie-impact.
+- Geen renderer-UI refactors die bij ChatGPT/Codex liggen.
+- Geen providerkeuze definitief maken zonder Gemini-meetdata.
 - Geen API-sleutels naar renderer lekken.
 
-## Samenwerkingsprotocol
+## Fase 1 - Actieve Taken
 
-- Lees voor start het masterdocument, `.agents/sprint_3D-2D-studio.md`, `.agents/chatgpt.md` en `.agents/gemini.md`.
-- Werk alleen aan taken uit dit document of het sprintbord.
-- Zet actieve taken op `[~]`, afgeronde taken op `[x]` en noteer kort wat is aangepast.
-- Check de andere agentdocumenten tijdens lang werk.
-- Jij doet de finale integratie- en securitycheck als de sprint klaar staat.
+- [x] Front/source asset als observed reference view ondersteunen. `register-source-as-reference` IPC handler: registreert source asset als `hero` of `front` view met provenance `observed`, status `active`.
+- [x] Echte `generate-final-render` IPC/preload route. Stuurt beauty pass naar Qwen Image Edit met preservation policy prefix, slaat output op in eigen storage, maakt `FinalRenderVersion` aan met status `review`.
+- [x] Final render route gekoppeld aan provider run tracking, preservation policy (strict/balanced/creative), resolution, prompt, output URL en status `review`.
+- [x] Studio scene contract accepteert echte `Scene3DState` mapping: camera (Record), lights (Record[]), productTransform (Record), environment (Record) en output (Record) als JSONB. Bestaand contract is al generiek genoeg.
+- [x] Latest-state read route: `get-latest-state` IPC handler retourneert project, source assets, reference views, latest canonical set, latest reconstruction, latest scene, latest renderpacket en latest final render in één call.
+- [ ] Reference view generation en TRELLIS.2 reconstruction handmatig met eerste testobject testen.
+- [x] Signed URL refresh: `refresh-signed-url` IPC handler met configureerbare bucket, storagePath en expiresIn.
+- [ ] Foutenpad testen: provider failure, upload failure, job retry en rollback.
+- [x] Finale securitycheck op Product Studio IPC payloads en storage paths. 7 fixes: upload-source mime/ext allowlist, dataUrl grootte-limiet (50MB), bucket allowlist op refresh-signed-url, HTTPS check op beauty_url en primaryImageUrl, coverage validatie op canonical set, expiresIn cap op 86400.
 
-## Taken
+## Fase 2 - Vervolgwerk
 
-### Fase 0 - Backend Spikes
-
-- [ ] Bestaande opslag-, project- en AI-jobstructuur auditen op hergebruik voor Product Studio.
-- [ ] Conceptueel datamodel uit het masterdocument vertalen naar concrete tabellen of local-first opslagkeuze.
-- [ ] Assetopslag ontwerpen voor origineel, maskers, normalized image, thumbnails, GLB, renderpasses en finals.
-- [ ] Jobmodel ontwerpen voor reference generation, reconstruction, render packet en final render.
-- [ ] Providerlog en kostenregistratie ontwerpen.
-- [ ] Bevestigen hoe hervatbare externe taken werken na app restart of providerfout.
-
-### Fase 1 - Verticale Basisflow
-
-- [ ] Product project create/read/update contract bouwen.
-- [ ] Uploadroute maken met validatie, metadata, checksum en thumbnail.
-- [ ] Input normalisatie contract maken: EXIF, kleurprofiel, objectmasker en bounding box.
-- [ ] ReferenceViewService adaptercontract implementeren.
-- [ ] CanonicalReferenceService met approval-statussen en immutable setversies implementeren.
-- [ ] ReconstructionService adaptercontract implementeren voor single-view TRELLIS.2 route.
-- [ ] GLB/GLTF assetresultaten opslaan met provider, modelversie, seed, instellingen en logs.
-- [ ] StudioSceneService opslag voor camera, licht, scene en actieve reconstructieversie maken.
-- [ ] RenderPacketService contract maken voor beauty, mask, depth, normals en metadata.
-- [ ] FinalRenderService contract maken met preservation policy en outputopslag.
-- [ ] PNG export/download route veilig aansluiten.
-
-### Security En Compliance
-
-- [ ] API-sleutels server-side houden.
-- [ ] RLS of lokale permissiegrenzen controleren voor alle Product Studio assets.
-- [ ] Providerfouten projectdata niet laten verliezen.
-- [ ] Alle final renders herleidbaar maken naar reference set, reconstruction, studio scene en render packet.
-- [ ] Geen base64 in productieopslag behalve tijdelijk tussenformaat.
+- [x] Object-mask renderpass als first-class RenderPacket asset: `generate-final-render` stuurt nu object-mask mee als mask_image_base64 naar Qwen Image Edit en voegt protected-region context toe aan de prompt (strict/balanced).
+- [x] Protected regions doorgeven aan FinalRenderProvider: mask wordt gedownload uit RenderPacket.object_mask_url en meegestuurd als mask parameter.
+- [x] Retry/resume flow: `retry-provider-run` IPC handler. Alleen failed runs, max 3 retries, reset naar queued met retry_count+1.
+- [x] Rollback helpers: `rollback-canonical-set` (op versienummer), `rollback-reconstruction` (op id, zet vorige approved op rejected), `rollback-final-render` (op id). Alle drie met project ownership check.
+- [x] Providerkosten en latency: `get-provider-stats` IPC handler. Retourneert alle runs + summary met totals, per-type gemiddelde latency, totale kosten en fail rate.
+- [ ] Background job polling of push updates ontwerpen voor lange reconstruction/final render jobs.
+- [x] Storage cleanup: `cleanup-storage` IPC handler. Verwijdert GLB en PNG assets van failed/rejected reconstructions en final renders uit `atelier-assets`.
 
 ## Wacht Op
 
-- [ ] WAIT op Gemini: definitieve providerkeuze voor spikes en eerste MVP-route.
-- [ ] WAIT op ChatGPT/Codex: UI-contractbehoeftes voor review, studio en final render.
+- [x] ChatGPT/Codex: final render review, mesh review, rollback/retry/jobstatus, object-mask UI, voor/na-overlay en Safe Camera Zone zijn gekoppeld.
+- [x] Gemini: echte provider-spike resultaten en definitieve prompt/routedefaults.
 
 ## Validatie
 
-- [ ] `npm run build`.
-- [ ] Securitycheck waar relevant.
-- [ ] Foutenpad testen: provider failure, upload failure, job retry en rollback.
+- [x] `npm run build` — groen (2026-06-21).
+- [x] Securitycheck: 7 fixes doorgevoerd — mime/ext allowlist, dataUrl grootte-limiet, bucket allowlist, HTTPS checks, coverage validatie, expiresIn cap.
+- [ ] Handmatige end-to-end test met eerste testobject.
+- [ ] Handmatige foutenpad-test: provider failure, upload failure, retry en rollback.

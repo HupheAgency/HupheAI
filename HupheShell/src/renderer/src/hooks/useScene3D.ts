@@ -17,9 +17,9 @@ import {
 
 const STORAGE_KEY = 'huphe:scene3d-state:v1'
 
-function loadPersistedScene(): Scene3DState {
+function loadPersistedScene(storageKey: string, initialScene?: Scene3DState): Scene3DState {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(storageKey)
     if (raw) {
       const parsed = JSON.parse(raw)
       // Migrate old single-camera format to multi-camera
@@ -37,24 +37,35 @@ function loadPersistedScene(): Scene3DState {
       return parsed
     }
   } catch { /* ignore */ }
-  return defaultScene3DState()
+  return initialScene ?? defaultScene3DState()
 }
 
-export function useScene3D() {
-  const [scene, setScene] = useState<Scene3DState>(loadPersistedScene)
+export function useScene3D(options: { storageKey?: string; initialScene?: Scene3DState } = {}) {
+  const storageKey = options.storageKey ?? STORAGE_KEY
+  const [scene, setScene] = useState<Scene3DState>(() => loadPersistedScene(storageKey, options.initialScene))
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
   const [transformMode, setTransformMode] = useState<TransformMode>('translate')
 
   const persist = useCallback((next: Scene3DState) => {
     setScene(next)
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)) } catch { /* ignore */ }
-  }, [])
+    try { localStorage.setItem(storageKey, JSON.stringify(next)) } catch { /* ignore */ }
+  }, [storageKey])
 
-  const addObject = useCallback((type: Scene3DObjectType) => {
+  const clearNonGltfObjects = useCallback(() => {
+    setScene((prev) => {
+      const filtered = prev.objects.filter((o) => o.type === 'gltf')
+      if (filtered.length === prev.objects.length) return prev
+      const next = { ...prev, objects: filtered }
+      persist(next)
+      return next
+    })
+  }, [persist])
+
+  const addObject = useCallback((type: Scene3DObjectType, patch?: Partial<Scene3DObject>) => {
     let newId: string | null = null
     setScene((prev) => {
       if (newId) return prev
-      const obj = createScene3DObject(type)
+      const obj = { ...createScene3DObject(type), ...patch }
       newId = obj.id
       const next = { ...prev, objects: [...prev.objects, obj] }
       persist(next)
@@ -199,6 +210,7 @@ export function useScene3D() {
     setSelectedObjectId,
     setTransformMode,
     addObject,
+    clearNonGltfObjects,
     updateObject,
     deleteObject,
     deleteSelected,

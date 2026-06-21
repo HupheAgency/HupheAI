@@ -1,4 +1,4 @@
-import { useRef, useCallback, useImperativeHandle, forwardRef, useEffect, useMemo } from 'react'
+import { Suspense, useRef, useCallback, useImperativeHandle, forwardRef, useEffect, useMemo } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls, TransformControls, GizmoHelper, GizmoViewport, Grid, Environment } from '@react-three/drei'
 import * as THREE from 'three'
@@ -499,15 +499,17 @@ function SceneContent({
       )}
 
       <group userData={{ __sceneObjects: true }} onClick={(e) => { if (e.object === e.eventObject) onDeselectAll() }}>
-        {scene.objects.map((obj) => (
-          <SceneObject
-            key={obj.id}
-            obj={obj}
-            selected={obj.id === selectedObjectId}
-            onClick={() => onSelectObject(obj.id)}
-            viewMode={viewMode}
-          />
-        ))}
+        <Suspense fallback={null}>
+          {scene.objects.map((obj) => (
+            <SceneObject
+              key={obj.id}
+              obj={obj}
+              selected={obj.id === selectedObjectId}
+              onClick={() => onSelectObject(obj.id)}
+              viewMode={viewMode}
+            />
+          ))}
+        </Suspense>
       </group>
 
       {selectedObjectId && (

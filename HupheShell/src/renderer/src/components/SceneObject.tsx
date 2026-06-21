@@ -1,4 +1,6 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
+import * as THREE from 'three'
+import { Clone, useGLTF } from '@react-three/drei'
 import type { Mesh, Group } from 'three'
 import type { Scene3DObject, ViewMode } from '../lib/scene3d-types'
 
@@ -60,6 +62,17 @@ function PersonMannequin({ color, metalness, roughness, viewMode, pivot }: { col
   )
 }
 
+function GltfModel({ url }: { url: string }) {
+  const gltf = useGLTF(url)
+  useEffect(() => {
+    if (!gltf.scene) return
+    const box = new THREE.Box3().setFromObject(gltf.scene)
+    const size = box.getSize(new THREE.Vector3())
+    console.log('[GltfModel] loaded', url.slice(-40), 'size:', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2))
+  }, [gltf.scene, url])
+  return <Clone object={gltf.scene} />
+}
+
 export default function SceneObject({
   obj,
   selected,
@@ -91,6 +104,22 @@ export default function SceneObject({
           viewMode={viewMode}
           pivot={pivot}
         />
+      </group>
+    )
+  }
+
+  if (obj.type === 'gltf' && obj.gltfUrl) {
+    return (
+      <group
+        ref={groupRef}
+        position={obj.position}
+        rotation={obj.rotation}
+        scale={obj.scale}
+        onClick={(e) => { e.stopPropagation(); onClick() }}
+      >
+        <group position={pivot}>
+          <GltfModel url={obj.gltfUrl} />
+        </group>
       </group>
     )
   }
