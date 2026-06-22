@@ -97,7 +97,7 @@ export const DEFAULT_MODULE_MODELS: Record<ModuleType, ModuleModelConfig[]> = {
     { id: 'openai/gpt-4o', label: 'GPT-4o', model: 'openai/gpt-4o', provider: 'openrouter', modality: 'text' },
   ],
   images: [
-    { id: 'nanobanana/nano-banana-pro', label: 'Nano Banana Pro', model: 'nanobanana/nano-banana-pro', provider: 'openrouter', modality: 'image' },
+    { id: 'google/gemini-3.1-flash-image-preview', label: 'Gemini 3.1 Flash Image', model: 'google/gemini-3.1-flash-image-preview', provider: 'openrouter', modality: 'image' },
     { id: 'black-forest-labs/flux-1.1-pro', label: 'FLUX 1.1 Pro', model: 'black-forest-labs/flux-1.1-pro', provider: 'openrouter', modality: 'image' },
     { id: 'google/gemini-2.0-flash-exp:free', label: 'Gemini 2.0 Flash (image)', model: 'google/gemini-2.0-flash-exp:free', provider: 'openrouter', modality: 'image' },
     { id: 'openai/gpt-4o-image', label: 'GPT-4o Image', model: 'openai/gpt-4o-image', provider: 'openrouter', modality: 'image' },

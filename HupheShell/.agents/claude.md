@@ -1,61 +1,59 @@
-# Claude Agent - Product Studio Backend Fase 1/2
+# Claude Agent - Basic Product + Polish Backend
 
 Projectroot:
 `/Users/tom.zwarts/HupheAI/HupheShell`
 
-Bron van waarheid:
-`docs/comfy/HupheAI-Universal-Product-Studio-Masterdocument-v1_0.md`
-
-Coordinatiebord:
-`.agents/sprint_3D-2D-studio.md`
+Actieve fix-sprint:
+`.agents/sprint-fix-3d-to-2d.md`
 
 ## Rol
 
-Claude pakt backend, Supabase, storage, IPC/API-contracten, provideradapters, jobs, versioning, security en finale integratiechecks op.
+Claude pakt backend, Supabase, storage, IPC/API-contracten, provideradapters, jobs, versioning, security en provider run metadata.
 
 Primair werkgebied:
 
 - `src/main/product-studio-ipc.ts`
 - `src/preload/index.ts`
-- Supabase migrations/RLS/storage
-- provider/job/final-render integratie
+- Supabase migrations/RLS/storage indien schema-aanpassing nodig is
+- Supabase Edge Functions/provider proxies indien nodig
 
 Niet doen:
 
 - Geen renderer-UI refactors die bij ChatGPT/Codex liggen.
-- Geen providerkeuze definitief maken zonder Gemini-meetdata.
 - Geen API-sleutels naar renderer lekken.
+- Geen nieuwe providerkeuze-spike tenzij de bestaande OpenRouter/Gemini route faalt.
 
-## Fase 1 - Actieve Taken
+## Nu Oppakken
 
-- [x] Front/source asset als observed reference view ondersteunen. `register-source-as-reference` IPC handler: registreert source asset als `hero` of `front` view met provenance `observed`, status `active`.
-- [x] Echte `generate-final-render` IPC/preload route. Stuurt beauty pass naar Qwen Image Edit met preservation policy prefix, slaat output op in eigen storage, maakt `FinalRenderVersion` aan met status `review`.
-- [x] Final render route gekoppeld aan provider run tracking, preservation policy (strict/balanced/creative), resolution, prompt, output URL en status `review`.
-- [x] Studio scene contract accepteert echte `Scene3DState` mapping: camera (Record), lights (Record[]), productTransform (Record), environment (Record) en output (Record) als JSONB. Bestaand contract is al generiek genoeg.
-- [x] Latest-state read route: `get-latest-state` IPC handler retourneert project, source assets, reference views, latest canonical set, latest reconstruction, latest scene, latest renderpacket en latest final render in één call.
-- [ ] Reference view generation en TRELLIS.2 reconstruction handmatig met eerste testobject testen.
-- [x] Signed URL refresh: `refresh-signed-url` IPC handler met configureerbare bucket, storagePath en expiresIn.
-- [ ] Foutenpad testen: provider failure, upload failure, job retry en rollback.
-- [x] Finale securitycheck op Product Studio IPC payloads en storage paths. 7 fixes: upload-source mime/ext allowlist, dataUrl grootte-limiet (50MB), bucket allowlist op refresh-signed-url, HTTPS check op beauty_url en primaryImageUrl, coverage validatie op canonical set, expiresIn cap op 86400.
+- [x] `product-studio:normalize-input` uitbreiden met Basic Product generatie. → Stap 4 in normalize-input genereert grijze variant via Gemini Flash Image.
+- [x] Basic Product opslaan als `source_assets.type = 'basic-product'`. → DB constraints uitgebreid, provenance='inferred'.
+- [x] Basic Product signed URL meenemen in `get-latest-state`. → Komt automatisch mee via sourceAssets array (type='basic-product').
+- [x] Reference generation en reconstruction input gescheiden. → Renderer stuurt Bron/ref-look voor views en Basic Product voor reconstruction/mesh.
+- [x] Linker/rechter reference-view prompts aangescherpt. → Links/rechts hebben nu expliciete rotatierichting en anti-mirror instructies.
+- [x] Backend canonical-view uniqueness guard. → Generate/approve supersedet andere draft/active views met dezelfde hoek.
+- [x] Backend guard op TRELLIS input. → Reconstructie zoekt zelf `source_assets.type = 'basic-product'` en weigert als die ontbreekt.
+- [x] Scene-pass prompt gebruikt perspective lock. → Achtergrond volgt 3D camera/ruimte; staan/zweven/hangen blijft afhankelijk van de user prompt.
+- [x] Originele source image blijven gebruiken als productidentiteit/material reference.
+- [x] `product-studio:generate-final-render` splitsen in scene pass + polish pass. → Scene pass maakt omgeving rond grijs product, polish pass vervangt productgebied met echte materialen via source/mask.
+- [x] Scene pass: Beauty/grijze vorm gebruiken voor omgeving, zonder productprint te verzinnen.
+- [x] Scene pass output opslaan als intermediate asset of metadata. → `scene_{runId}.png` in storage + `scene_url` in provider_runs.metadata.
+- [x] Polish pass: scene image + object mask + source/canonical refs gebruiken; alleen gemaskeerd productgebied aanpassen.
+- [x] Provider run metadata uitbreiden met `basic_product_url`, `scene_url`, `polish_inputs`. → `metadata` JSONB kolom toegevoegd aan `provider_runs`.
+- [x] Retry-route dezelfde scene + polish stappen laten gebruiken. → `retry-provider-run` final-render branch herschreven met scene + polish flow.
+- [x] Repo-migration controleren/toevoegen. → `20260622000000_basic_product_and_metadata.sql` toegevoegd.
+- [x] Begrijpelijke errors toevoegen: basic ontbreekt, mask ontbreekt, scene faalt, polish faalt.
+- [x] Build-validatie na retry/migration afronding. → `npm run build` groen.
 
-## Fase 2 - Vervolgwerk
+## Wacht Op ChatGPT/Codex
 
-- [x] Object-mask renderpass als first-class RenderPacket asset: `generate-final-render` stuurt nu object-mask mee als mask_image_base64 naar Qwen Image Edit en voegt protected-region context toe aan de prompt (strict/balanced).
-- [x] Protected regions doorgeven aan FinalRenderProvider: mask wordt gedownload uit RenderPacket.object_mask_url en meegestuurd als mask parameter.
-- [x] Retry/resume flow: `retry-provider-run` IPC handler. Alleen failed runs, max 3 retries, reset naar queued met retry_count+1.
-- [x] Rollback helpers: `rollback-canonical-set` (op versienummer), `rollback-reconstruction` (op id, zet vorige approved op rejected), `rollback-final-render` (op id). Alle drie met project ownership check.
-- [x] Providerkosten en latency: `get-provider-stats` IPC handler. Retourneert alle runs + summary met totals, per-type gemiddelde latency, totale kosten en fail rate.
-- [ ] Background job polling of push updates ontwerpen voor lange reconstruction/final render jobs.
-- [x] Storage cleanup: `cleanup-storage` IPC handler. Verwijdert GLB en PNG assets van failed/rejected reconstructions en final renders uit `atelier-assets`.
+- [x] UI toont Basic Product zodra `get-latest-state` dit teruggeeft.
+- [x] UI toont Scene intermediate zodra backend dit exposeert.
+- [x] UI-copy legt twee-laags flow uit aan gebruiker.
 
-## Wacht Op
+## Acceptatie Voor Claude
 
-- [x] ChatGPT/Codex: final render review, mesh review, rollback/retry/jobstatus, object-mask UI, voor/na-overlay en Safe Camera Zone zijn gekoppeld.
-- [x] Gemini: echte provider-spike resultaten en definitieve prompt/routedefaults.
-
-## Validatie
-
-- [x] `npm run build` — groen (2026-06-21).
-- [x] Securitycheck: 7 fixes doorgevoerd — mime/ext allowlist, dataUrl grootte-limiet, bucket allowlist, HTTPS checks, coverage validatie, expiresIn cap.
-- [ ] Handmatige end-to-end test met eerste testobject.
-- [ ] Handmatige foutenpad-test: provider failure, upload failure, retry en rollback.
+- [ ] Complex source product kan een grijze basic variant opleveren.
+- [ ] Basic Product wordt persistent opgeslagen en teruggegeven aan renderer.
+- [ ] Final render route maakt aantoonbaar eerst Scene en daarna Polish.
+- [ ] Buiten objectmask blijft Scene in Polish pass behouden.
+- [x] Retry gebruikt dezelfde providerroute en metadata.

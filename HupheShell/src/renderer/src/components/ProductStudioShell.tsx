@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
+import { notifyIfCreditsRequired } from '../lib/credits-required'
 import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview } from './Scene3DEditor'
 import { AtelierPromptBar } from './AtelierPromptBar'
 import type {
@@ -37,6 +39,7 @@ type ProductStudioProject = {
   }
   backendProject?: BackendProductProject
   sourceAsset?: SourceAsset
+  basicProductAsset?: SourceAsset
   objectMaskAsset?: SourceAsset
   objectMaskUrl?: string
   canonicalSet?: CanonicalReferenceSet
@@ -85,6 +88,12 @@ const VIEW_LABELS: Record<string, string> = {
   rear: 'Achterkant',
   top: 'Bovenkant',
   custom: 'Custom',
+}
+
+const POLICY_HINTS: Record<PreservationPolicy, string> = {
+  strict: 'Maximaal behoud van Beauty-vorm en masker. Beste keuze als camera, crop en silhouet exact moeten blijven.',
+  balanced: 'Behoud vorm en positie, maar laat scene en product-polish iets realistischer verbeteren.',
+  creative: 'Vrijere commercial look. Grotere kans dat vorm, materiaal of print verschuift.',
 }
 
 type ProductStudioApi = {
@@ -138,6 +147,14 @@ function backendViewToReference(view: BackendReferenceView): ReferenceView {
   }
 }
 
+function uniqueReferenceViews(views: ReferenceView[]): ReferenceView[] {
+  const byAngle = new Map<string, ReferenceView>()
+  for (const view of views) {
+    byAngle.set(view.angle ?? view.id, view)
+  }
+  return Array.from(byAngle.values())
+}
+
 function deriveActiveStep(project: {
   sourceAsset?: SourceAsset
   canonicalSet?: CanonicalReferenceSet | null
@@ -173,6 +190,7 @@ function projectFromLatestState(prev: ProductStudioProject, snapshot: any): Prod
   const sourceAsset = sourceAssets.find((asset) => asset.type === 'original-image')
     ?? sourceAssets.find((asset) => asset.type === 'normalized-image')
     ?? sourceAssets[0]
+  const basicProductAsset = sourceAssets.find((asset) => asset.type === 'basic-product')
   const objectMaskAsset = sourceAssets.find((asset) => asset.type === 'object-mask') ?? sourceAssets.find((asset) => asset.type === 'manual-mask')
   const finalRenderRecord = (snapshot.latestFinalRender ?? undefined) as FinalRenderVersion | undefined
   const renderPacketRecord = (snapshot.latestRenderPacket ?? undefined) as RenderPacket | undefined
@@ -194,10 +212,11 @@ function projectFromLatestState(prev: ProductStudioProject, snapshot: any): Prod
     updatedAt: backendProject.updated_at,
     backendProject,
     sourceAsset,
+    basicProductAsset,
     objectMaskAsset,
     objectMaskUrl: objectMaskAsset?.url ?? prev.objectMaskUrl,
     sourceImage,
-    references: references.map(backendViewToReference),
+    references: uniqueReferenceViews(references.map(backendViewToReference)),
     canonicalSet,
     reconstruction,
     studioScene,
@@ -287,7 +306,65 @@ function StepPill({ active, done, label }: { active: boolean; done?: boolean; la
   )
 }
 
-function ReferenceCard({ view, onApprove, onReject }: { view: ReferenceView; onApprove: () => void; onReject: () => void }) {
+function InputStatusPill({ label, ready }: { label: string; ready: boolean }) {
+  return (
+    <div className={[
+      'flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-[10px]',
+      ready ? 'border-green-400/18 bg-green-500/8 text-green-300' : 'border-white/[0.06] bg-black/20 text-white/30',
+    ].join(' ')}>
+      <span className="truncate">{label}</span>
+      <span className={['h-1.5 w-1.5 flex-shrink-0 rounded-full', ready ? 'bg-green-300' : 'bg-white/18'].join(' ')} />
+    </div>
+  )
+}
+
+function IconButton({ label, onClick, tone = 'neutral', children }: { label: string; onClick: () => void; tone?: 'neutral' | 'approve' | 'reject'; children: ReactNode }) {
+  const toneClass = tone === 'approve'
+    ? 'border-[#facc15]/25 text-[#facc15] hover:bg-[#facc15]/10'
+    : tone === 'reject'
+      ? 'border-red-400/18 text-red-300/70 hover:bg-red-500/10 hover:text-red-200'
+      : 'border-white/[0.08] text-white/45 hover:bg-white/[0.05] hover:text-white/70'
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className={`grid h-7 w-7 place-items-center rounded-full border transition-colors ${toneClass}`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4.5 10.5 8 14l7.5-8" />
+    </svg>
+  )
+}
+
+function XIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round">
+      <path d="M5.5 5.5 14.5 14.5M14.5 5.5 5.5 14.5" />
+    </svg>
+  )
+}
+
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M16 7a6 6 0 0 0-10.7-2.7L4 5.7" />
+      <path d="M4 2.8v2.9h2.9" />
+      <path d="M4 13a6 6 0 0 0 10.7 2.7l1.3-1.4" />
+      <path d="M16 17.2v-2.9h-2.9" />
+    </svg>
+  )
+}
+
+function ReferenceCard({ view, onApprove, onReject, onRegenerate }: { view: ReferenceView; onApprove: () => void; onReject: () => void; onRegenerate?: () => void }) {
   return (
     <div className="overflow-hidden rounded-lg border border-white/[0.07] bg-[#151515]">
       <div className="aspect-[4/3] bg-black/35">
@@ -297,27 +374,28 @@ function ReferenceCard({ view, onApprove, onReject }: { view: ReferenceView; onA
           <div className="flex h-full items-center justify-center text-xs text-white/28">Wacht op provider</div>
         )}
       </div>
-      <div className="flex items-center justify-between gap-3 px-3 py-2">
+      <div className="px-3 py-2">
         <div className="min-w-0">
           <p className="truncate text-xs font-semibold text-white/80">{view.label}</p>
           <p className="mt-0.5 text-[11px] text-white/36">{STATUS_LABELS[view.status]}</p>
         </div>
-        {view.status === 'inferred' && (
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={onReject}
-              className="rounded-full border border-white/[0.08] px-2.5 py-1 text-[11px] font-medium text-white/45 hover:bg-white/[0.05] hover:text-white/70"
-            >
-              Afwijs
-            </button>
-            <button
-              type="button"
-              onClick={onApprove}
-              className="rounded-full border border-[#facc15]/25 px-2.5 py-1 text-[11px] font-medium text-[#facc15] hover:bg-[#facc15]/10"
-            >
-              Accepteer
-            </button>
+        {(view.status === 'inferred' || onRegenerate) && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {onRegenerate && (
+              <IconButton label="Vervang / opnieuw genereren" onClick={onRegenerate}>
+                <RefreshIcon />
+              </IconButton>
+            )}
+            {view.status === 'inferred' && (
+              <>
+                <IconButton label="Afwijzen" onClick={onReject} tone="reject">
+                  <XIcon />
+                </IconButton>
+                <IconButton label="Goedkeuren" onClick={onApprove} tone="approve">
+                  <CheckIcon />
+                </IconButton>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -343,17 +421,41 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [reconstructionVersions, setReconstructionVersions] = useState<ReconstructionVersion[]>([])
   const [finalRenderVersions, setFinalRenderVersions] = useState<FinalRenderVersion[]>([])
   const [compareSlider, setCompareSlider] = useState(50)
+  const [renderPacketStale, setRenderPacketStale] = useState(false)
 
   const sourceReady = Boolean(project.sourceImage?.src)
-  const approvedCount = project.references.filter((view) => view.status === 'observed' || view.status === 'user-approved' || view.status === 'user-edited').length
-  const meshReady = Boolean(project.reconstruction?.mesh_url || project.reconstruction?.route === 'primitive-proxy')
-  const renderPacketReady = Boolean(project.renderPacketRecord || project.renderPacket)
-  const objectMaskUrl = project.objectMaskUrl ?? project.objectMaskAsset?.url ?? project.renderPacketRecord?.object_mask_url
-  const activeRuns = providerStats?.runs.filter((run) => run.status === 'queued' || run.status === 'processing') ?? []
-  const failedRuns = providerStats?.runs.filter((run) => run.status === 'failed') ?? []
-  const approvedAngles = new Set(project.references
+  const basicProductUrl = project.basicProductAsset?.url
+  const referenceInputAsset = project.sourceAsset
+  const shapeInputAsset = project.basicProductAsset
+  const shapeInputUrl = basicProductUrl
+  const basicShapeReady = Boolean(basicProductUrl)
+  const usableReferenceAngles = new Set(project.references
     .filter((view) => view.status === 'observed' || view.status === 'user-approved' || view.status === 'user-edited')
     .map((view) => view.angle ?? view.id))
+  const approvedCount = Math.min(4, usableReferenceAngles.size)
+  const meshReady = Boolean(project.reconstruction?.mesh_url || project.reconstruction?.route === 'primitive-proxy')
+  const renderPacketReady = Boolean(project.renderPacketRecord || project.renderPacket)
+  const finalRenderBlocked = !renderPacketReady || renderPacketStale
+  const objectMaskUrl = project.objectMaskUrl ?? project.objectMaskAsset?.url ?? project.renderPacketRecord?.object_mask_url
+  const canonicalReference = project.references.find((view) => view.status === 'user-approved' || view.status === 'observed' || view.status === 'user-edited')
+  const beautyPreviewUrl = project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured ?? project.renderPacketRecord?.beauty_url
+  const depthPreviewUrl = project.renderPacket?.passes?.depth ?? project.renderPacketRecord?.depth_url
+  const normalPreviewUrl = project.renderPacket?.passes?.normal ?? project.renderPacketRecord?.normal_url
+  const scenePreviewUrl = project.finalRenderRecord?.scene_url
+    ?? (project.finalRenderRecord?.metadata?.scene_url as string | undefined)
+  const lockedCameraInputs = [
+    { label: 'Beauty camera', ready: Boolean(beautyPreviewUrl) },
+    { label: 'Depth', ready: Boolean(depthPreviewUrl) },
+    { label: 'Normal', ready: Boolean(normalPreviewUrl) },
+    { label: 'Mask', ready: Boolean(objectMaskUrl) },
+    { label: 'Source', ready: Boolean(project.sourceImage?.src) },
+    { label: 'Basic shape', ready: basicShapeReady },
+    { label: 'Canonical', ready: Boolean(canonicalReference?.src) },
+  ]
+  const lockedCameraReady = Boolean(beautyPreviewUrl && depthPreviewUrl && normalPreviewUrl && project.sourceImage?.src && canonicalReference?.src && !renderPacketStale)
+  const activeRuns = providerStats?.runs.filter((run) => run.status === 'queued' || run.status === 'processing') ?? []
+  const failedRuns = providerStats?.runs.filter((run) => run.status === 'failed') ?? []
+  const approvedAngles = usableReferenceAngles
   const hasWeakReferenceCoverage = sourceReady && !project.canonicalSet && (
     approvedCount < 3 || !approvedAngles.has('left') || !approvedAngles.has('right') || (!approvedAngles.has('rear') && !approvedAngles.has('top'))
   )
@@ -361,6 +463,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     .filter((view) => view.backendId && (view.status === 'user-approved' || view.status === 'user-edited' || view.status === 'observed'))
     .map((view) => view.backendId as string)
   const sceneStorageKey = useMemo(() => `huphe:product-studio:${project.id}:scene3d`, [project.id])
+
+  function markRenderPacketStale() {
+    if (!renderPacketReady) return
+    setRenderPacketStale(true)
+  }
 
   useEffect(() => {
     if (!initialImageSrc || project.sourceImage?.src) return
@@ -501,7 +608,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         : []
       return {
         ...prev,
-        references: [...sourceReference, ...backendViews.map(backendViewToReference)],
+        references: uniqueReferenceViews([...sourceReference, ...backendViews.map(backendViewToReference)]),
         activeStep: backendViews.length > 0 ? 'references' : prev.activeStep,
         updatedAt: new Date().toISOString(),
       }
@@ -554,7 +661,20 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         updatedAt: new Date().toISOString(),
       }))
       setBusy('Normaliseren...')
-      void api.normalizeInput({ projectId: backendProject.id, sourceAssetId: asset.id }).catch(() => {})
+      try {
+        const normalizeResult = await api.normalizeInput({ projectId: backendProject.id, sourceAssetId: asset.id })
+        if (normalizeResult?.basicProduct) {
+          const basicProductAsset = normalizeResult.basicProduct as SourceAsset
+          setProject((prev) => ({
+            ...prev,
+            basicProductAsset,
+            updatedAt: new Date().toISOString(),
+          }))
+        }
+        void hydrateLatestState(backendProject.id, false)
+      } catch {
+        // Basic Product is optional for this step; canonical views must keep using the original source/ref-look.
+      }
       setBusy('Views genereren...')
       await api.generateReferenceViews({
         projectId: backendProject.id,
@@ -565,7 +685,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         if (result?.ok) void hydrateLatestState(backendProject.id, false)
       }).catch(() => {})
     } catch (err: any) {
-      setError(err?.message || 'Upload mislukt.')
+      if (!notifyIfCreditsRequired(err)) setError(err?.message || 'Upload mislukt.')
     } finally {
       setBusy(null)
     }
@@ -683,7 +803,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
   async function generateBackendReferenceViews() {
     setError(null)
-    if (!project.backendProject || !project.sourceAsset) {
+    if (!project.backendProject || !referenceInputAsset) {
       setError('Upload eerst een bronfoto via de backend.')
       return
     }
@@ -694,26 +814,71 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
     setBusy('Views genereren...')
     try {
+      const existingAngles = new Set(project.references.map((view) => view.angle ?? view.id))
+      const targetViews = (['left', 'right', 'rear'] as Array<'left' | 'right' | 'rear'>)
+        .filter((angle) => !existingAngles.has(angle))
+      if (targetViews.length === 0) {
+        setError('Alle standaardhoeken bestaan al. Gebruik het rondje op een kaart om die specifieke view te vervangen.')
+        return
+      }
       const result = await api.generateReferenceViews({
         projectId: project.backendProject.id,
-        sourceAssetId: project.sourceAsset.id,
-        targetViews: ['left', 'right', 'rear'],
+        sourceAssetId: referenceInputAsset.id,
+        targetViews,
         productNotes: project.backendProject.notes,
       })
       if (!result?.ok) throw new Error(result?.error || 'Views genereren mislukt.')
       await hydrateLatestState(project.backendProject.id, false)
     } catch (err: any) {
-      setError(err?.message || 'Views genereren mislukt.')
+      if (!notifyIfCreditsRequired(err)) setError(err?.message || 'Views genereren mislukt.')
     } finally {
       setBusy(null)
     }
   }
 
-  async function ensureCanonicalAndReconstruction(route: 'single-view' | 'multi-view' | 'primitive-proxy' = 'primitive-proxy'): Promise<{ canonicalSet: CanonicalReferenceSet; reconstruction: ReconstructionVersion }> {
+  async function regenerateReferenceView(view: ReferenceView) {
+    setError(null)
+    if (!project.backendProject || !referenceInputAsset || !view.angle) {
+      setError('Deze view kan nog niet opnieuw worden gegenereerd.')
+      return
+    }
+    if (!['left', 'right', 'rear', 'top'].includes(view.angle)) {
+      setError('De bronfoto zelf kan niet als AI-view worden vervangen.')
+      return
+    }
+    const api = getProductStudioApi()
+    if (!api) {
+      setError('Product Studio API is nog niet beschikbaar.')
+      return
+    }
+    setBusy(`${view.label} opnieuw genereren...`)
+    try {
+      if (view.backendId) {
+        await api.updateViewStatus(view.backendId, 'superseded').catch(() => null)
+      }
+      const result = await api.generateReferenceViews({
+        projectId: project.backendProject.id,
+        sourceAssetId: referenceInputAsset.id,
+        targetViews: [view.angle as 'left' | 'right' | 'rear' | 'top'],
+        productNotes: project.backendProject.notes,
+      })
+      if (!result?.ok) throw new Error(result?.error || 'View opnieuw genereren mislukt.')
+      await hydrateLatestState(project.backendProject.id, false)
+    } catch (err: any) {
+      if (!notifyIfCreditsRequired(err)) setError(err?.message || 'View opnieuw genereren mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function ensureCanonicalAndReconstruction(route: 'single-view' | 'multi-view' | 'primitive-proxy' = 'primitive-proxy', forceReconstruction = false): Promise<{ canonicalSet: CanonicalReferenceSet; reconstruction: ReconstructionVersion }> {
     const api = getProductStudioApi()
     if (!api) throw new Error('Product Studio API is nog niet beschikbaar.')
     if (!project.backendProject) throw new Error('Maak eerst een project aan.')
     if (!project.sourceImage?.src) throw new Error('Upload eerst een bronfoto.')
+    if (route !== 'primitive-proxy' && !shapeInputUrl) {
+      throw new Error('Basic shape ontbreekt nog. Wacht tot de grijze Basic Product klaar is voordat je TRELLIS start.')
+    }
 
     let canonicalSet = project.canonicalSet
     if (!canonicalSet) {
@@ -730,13 +895,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       )
     }
 
-    let reconstruction = project.reconstruction
+    let reconstruction = forceReconstruction ? undefined : project.reconstruction
     if (!reconstruction) {
       reconstruction = assertOk<ReconstructionVersion>(
         await api.startReconstruction({
           projectId: project.backendProject.id,
           canonicalReferenceSetId: canonicalSet.id,
-          primaryImageUrl: project.sourceImage.src,
+          primaryImageUrl: route === 'primitive-proxy' ? project.sourceImage.src : shapeInputUrl!,
           route,
         }),
         'reconstruction',
@@ -767,7 +932,28 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       }
       await hydrateLatestState(project.backendProject?.id, false)
     } catch (err: any) {
-      setError(err?.message || 'Reconstructie starten mislukt.')
+      if (!notifyIfCreditsRequired(err)) setError(err?.message || 'Reconstructie starten mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function regenerateMesh(route: 'single-view' | 'multi-view' | 'primitive-proxy') {
+    setError(null)
+    setBusy(route === 'primitive-proxy' ? 'Proxy opnieuw maken...' : 'Mesh opnieuw genereren...')
+    try {
+      const api = getProductStudioApi()
+      if (project.reconstruction?.id && api) {
+        await api.updateReconstructionStatus(project.reconstruction.id, 'rejected').catch(() => null)
+      }
+      const result = await ensureCanonicalAndReconstruction(route, true)
+      if (result.reconstruction.mesh_url) {
+        studioRef.current?.addModelFromUrl(result.reconstruction.mesh_url, 'Reconstructed product')
+      }
+      setRenderPacketStale(true)
+      await hydrateLatestState(project.backendProject?.id, false)
+    } catch (err: any) {
+      if (!notifyIfCreditsRequired(err)) setError(err?.message || 'Mesh opnieuw genereren mislukt.')
     } finally {
       setBusy(null)
     }
@@ -800,12 +986,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
   function resetProject() {
     setProject(createProject())
+    setRenderPacketStale(false)
     setError(null)
     setFinalError(null)
   }
 
   async function captureRenderPacket() {
-    const packet = studioRef.current?.captureRenderPacketPreview()
+    const packet = await studioRef.current?.captureRenderPacketPreview()
     if (!packet?.beauty && !packet?.passes) {
       setFinalError('Kan nog geen preview uit de studio maken.')
       return
@@ -869,15 +1056,20 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         activeStep: 'final',
         updatedAt: new Date().toISOString(),
       }))
+      setRenderPacketStale(false)
       await hydrateLatestState(project.backendProject.id, false)
     } catch (err: any) {
-      setFinalError(err?.message || 'Renderpacket opslaan mislukt.')
+      if (!notifyIfCreditsRequired(err)) setFinalError(err?.message || 'Renderpacket opslaan mislukt.')
     } finally {
       setBusy(null)
     }
   }
 
   async function handleFinalPrompt(prompt: string) {
+    if (renderPacketStale) {
+      setFinalError('De studio preview is verouderd. Klik eerst op Update preview zodat de huidige camera en productpositie worden gebruikt.')
+      return
+    }
     const beauty = project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured
     if (!beauty && !project.renderPacketRecord?.beauty_url) {
       setFinalError('Maak eerst een preview uit de studio.')
@@ -888,20 +1080,21 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     try {
       const productApi = getProductStudioApi()
       if (productApi && project.backendProject && project.renderPacketRecord) {
-        const render = assertOk<FinalRenderVersion>(
-          await productApi.generateFinalRender({
-            projectId: project.backendProject.id,
-            renderPacketId: project.renderPacketRecord.id,
-            prompt,
-            preservationPolicy: project.preservationPolicy,
-            resolution: '2K',
-          }),
-          'render',
-        )
+        const result = await productApi.generateFinalRender({
+          projectId: project.backendProject.id,
+          renderPacketId: project.renderPacketRecord.id,
+          prompt,
+          preservationPolicy: project.preservationPolicy,
+          resolution: '2K',
+        })
+        const render = assertOk<FinalRenderVersion>(result, 'render')
+        const renderWithScene: FinalRenderVersion = result.sceneUrl
+          ? { ...render, scene_url: result.sceneUrl, metadata: { ...(render.metadata ?? {}), scene_url: result.sceneUrl } }
+          : render
         if (!render.output_url) throw new Error('Final render is opgeslagen zonder output URL.')
         setProject((prev) => ({
           ...prev,
-          finalRenderRecord: render,
+          finalRenderRecord: renderWithScene,
           finalRender: { prompt: render.prompt ?? prompt, src: render.output_url as string, createdAt: render.created_at },
           activeStep: 'final',
           updatedAt: new Date().toISOString(),
@@ -928,22 +1121,31 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         updatedAt: new Date().toISOString(),
       }))
     } catch (err: any) {
-      setFinalError(err?.message || 'Final render mislukt.')
+      if (!notifyIfCreditsRequired(err)) setFinalError(err?.message || 'Final render mislukt.')
     } finally {
       setFinalLoading(false)
     }
   }
+
+  const [downloadStatus, setDownloadStatus] = useState<string | null>(null)
 
   function downloadFinalRender() {
     const src = project.finalRender?.src
     if (!src) return
     const api = getProductStudioApi()
     if (api && src.startsWith('https://')) {
+      setDownloadStatus('Downloaden...')
       void api.downloadPng({
         imageUrl: src,
         suggestedName: `${project.name.replace(/[^a-z0-9_-]+/gi, '_')}_final.png`,
       }).then((result) => {
-        if (!result?.ok) setFinalError(result?.error || 'Download mislukt.')
+        if (result?.ok) {
+          setDownloadStatus('Opgeslagen in Downloads')
+          setTimeout(() => setDownloadStatus(null), 3000)
+        } else {
+          setFinalError(result?.error || 'Download mislukt.')
+          setDownloadStatus(null)
+        }
       })
       return
     }
@@ -1115,11 +1317,46 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
           </section>
 
+          <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Product basis</p>
+                <p className="mt-1 text-xs text-white/36">
+                  Bron bewaart print en materiaal voor views en polish. Basic Product is alleen de neutrale grijze vorm voor mesh en positionering.
+                </p>
+              </div>
+              <span className={[
+                'rounded-full border px-2 py-1 text-[10px]',
+                basicShapeReady ? 'border-green-400/18 bg-green-500/8 text-green-300' : 'border-[#facc15]/18 bg-[#facc15]/8 text-[#facc15]',
+              ].join(' ')}>
+                {basicShapeReady ? 'Basic shape ready' : 'Wacht op backend'}
+              </span>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              {([
+                ['Bron / ref-look', project.sourceImage?.src],
+                ['Basic shape', basicProductUrl],
+              ] as Array<[string, string | null | undefined]>).map(([label, src]) => (
+                <div key={label} className="overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
+                  <div className="aspect-[4/3]">
+                    {src ? <img src={src} alt={label} className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center px-3 text-center text-[10px] text-white/24">Nog niet aangemaakt</div>}
+                  </div>
+                  <p className="px-2 py-1 text-[10px] text-white/38">{label}</p>
+                </div>
+              ))}
+            </div>
+            {!basicShapeReady && sourceReady && (
+              <p className="mt-2 rounded-md border border-[#facc15]/15 bg-[#facc15]/8 px-2 py-1.5 text-[10px] leading-relaxed text-[#facc15]">
+                Complexe prints zijn nog minder stabiel tot Claude de Basic Product generatie activeert. De app valt tijdelijk terug op de bronfoto als vorminput.
+              </p>
+            )}
+          </section>
+
           <section className="mt-6">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-white/85">Canonical views</h3>
               <div className="flex items-center gap-3">
-                <button type="button" onClick={generateBackendReferenceViews} disabled={!project.sourceAsset || Boolean(busy)} className="text-xs text-[#facc15] hover:text-[#fde68a] disabled:text-white/22">
+                <button type="button" onClick={generateBackendReferenceViews} disabled={!referenceInputAsset || Boolean(busy)} className="text-xs text-[#facc15] hover:text-[#fde68a] disabled:text-white/22">
                   Genereer
                 </button>
                 <button type="button" onClick={() => contactSheetInputRef.current?.click()} className="text-xs text-[#facc15] hover:text-[#fde68a]">
@@ -1130,7 +1367,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             </div>
             <div className="mt-3 grid grid-cols-2 gap-3">
               {project.references.map((view) => (
-                <ReferenceCard key={view.id} view={view} onApprove={() => approveReference(view.id)} onReject={() => rejectReference(view.id)} />
+                <ReferenceCard
+                  key={view.id}
+                  view={view}
+                  onApprove={() => approveReference(view.id)}
+                  onReject={() => rejectReference(view.id)}
+                  onRegenerate={view.angle && ['left', 'right', 'rear', 'top'].includes(view.angle) ? () => void regenerateReferenceView(view) : undefined}
+                />
               ))}
             </div>
             {hasWeakReferenceCoverage && (
@@ -1147,17 +1390,19 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold text-white/70">Mesh review</p>
-                <p className="mt-1 text-xs text-white/36">
-                  {project.reconstruction
-                    ? `${project.reconstruction.route} - ${project.reconstruction.status}`
-                    : 'Maak eerst een canonical set en start de reconstructie.'}
-                </p>
+	                <p className="mt-1 text-xs text-white/36">
+	                  {project.reconstruction
+	                    ? `${project.reconstruction.route} - ${project.reconstruction.status}`
+	                    : basicShapeReady
+	                      ? 'Maak eerst een canonical set en start de reconstructie vanuit Basic shape.'
+	                      : 'Wacht op Basic shape; TRELLIS gebruikt geen print-views of bronfoto voor mesh.'}
+	                </p>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => void startMeshReview('single-view')}
-                  disabled={!project.sourceImage?.src || Boolean(busy)}
+                  disabled={!basicShapeReady || Boolean(busy)}
                   className="rounded-full border border-[#facc15]/25 px-3 py-1.5 text-xs font-medium text-[#facc15] hover:bg-[#facc15]/10 disabled:border-white/[0.05] disabled:text-white/24"
                 >
                   TRELLIS
@@ -1177,20 +1422,54 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <div className="rounded-md border border-white/[0.06] bg-black/20 p-2 text-[11px] text-white/42">
                   {project.reconstruction.mesh_url ? 'GLB geladen in studio.' : 'Proxy fallback: gebruik de bestaande primitive in de studio tot een GLB beschikbaar is.'}
                 </div>
-                <div className="flex items-center gap-2">
+                {project.reconstruction.status === 'approved' ? (
+                  <div className="flex items-center gap-2 rounded-md border border-green-500/20 bg-green-500/8 px-3 py-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 flex-shrink-0 text-green-400">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                    </svg>
+                    <span className="text-xs text-green-400">Mesh goedgekeurd</span>
+                  </div>
+                ) : project.reconstruction.status === 'rejected' ? (
+                  <div className="flex items-center gap-2 rounded-md border border-red-500/20 bg-red-500/8 px-3 py-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 flex-shrink-0 text-red-400">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+                    </svg>
+                    <span className="text-xs text-red-400">Mesh afgewezen</span>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void setMeshStatus('approved')}
+                      className="rounded-full border border-[#facc15]/25 px-3 py-1 text-xs text-[#facc15] hover:bg-[#facc15]/10"
+                    >
+                      Goedkeur
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void setMeshStatus('rejected')}
+                      className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/50 hover:bg-white/[0.06]"
+                    >
+                      Afwijs
+                    </button>
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
                   <button
                     type="button"
-                    onClick={() => void setMeshStatus('approved')}
-                    className="rounded-full border border-[#facc15]/25 px-3 py-1 text-xs text-[#facc15] hover:bg-[#facc15]/10"
+                    onClick={() => void regenerateMesh('single-view')}
+                    disabled={!basicShapeReady || Boolean(busy)}
+                    className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
                   >
-                    Goedkeur
+                    Regeneer TRELLIS
                   </button>
                   <button
                     type="button"
-                    onClick={() => void setMeshStatus('rejected')}
-                    className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/50 hover:bg-white/[0.06]"
+                    onClick={() => void regenerateMesh('primitive-proxy')}
+                    disabled={Boolean(busy)}
+                    className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
                   >
-                    Afwijs
+                    Proxy fallback
                   </button>
                 </div>
               </div>
@@ -1217,16 +1496,56 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   onClick={captureRenderPacket}
                   className="rounded-full border border-[#facc15]/25 px-3 py-1.5 text-xs font-medium text-[#facc15] hover:bg-[#facc15]/10"
                 >
-                  Maak preview
+                  {project.renderPacketRecord ? 'Update preview' : 'Maak preview'}
                 </button>
               </div>
             </div>
-            {project.renderPacket && (
+            {project.renderPacketRecord && (
+              <p className={[
+                'mt-3 rounded-md border px-2 py-1.5 text-[10px]',
+                renderPacketStale ? 'border-red-400/20 bg-red-500/10 text-red-200' : 'border-[#facc15]/15 bg-[#facc15]/8 text-[#facc15]',
+              ].join(' ')}>
+                {renderPacketStale
+                  ? 'Preview verouderd: camera, object, licht of environment is gewijzigd. Klik op Update preview voordat je final rendert.'
+                  : 'Final render gebruikt deze opgeslagen Beauty snapshot. Camera of object verplaatst? Klik eerst op Update preview.'}
+              </p>
+            )}
+            <div className={[
+              'mt-3 rounded-lg border p-3',
+              renderPacketStale
+                ? 'border-red-400/20 bg-red-500/8'
+                : lockedCameraReady
+                  ? 'border-green-400/18 bg-green-500/8'
+                  : 'border-white/[0.07] bg-black/20',
+            ].join(' ')}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className={[
+                    'text-xs font-semibold',
+                    renderPacketStale ? 'text-red-200' : lockedCameraReady ? 'text-green-300' : 'text-white/62',
+                  ].join(' ')}>
+                    {renderPacketStale ? 'Locked Camera verlopen' : lockedCameraReady ? 'Locked Camera klaar' : 'Locked Camera voorbereiding'}
+                  </p>
+                  <p className="mt-1 text-[11px] leading-relaxed text-white/38">
+                    Beauty is de fotografiecamera. Basic shape bepaalt de grijze vorm; source/canonical sturen straks alleen de polish-laag voor print en materiaal.
+                  </p>
+                </div>
+                <span className="rounded-full border border-white/[0.08] px-2 py-1 text-[10px] text-white/38">
+                  Experimental
+                </span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {lockedCameraInputs.map((input) => (
+                  <InputStatusPill key={input.label} label={input.label} ready={input.ready} />
+                ))}
+              </div>
+            </div>
+            {(beautyPreviewUrl || depthPreviewUrl || normalPreviewUrl || objectMaskUrl) && (
               <div className="mt-3 grid grid-cols-4 gap-2">
                 {[
-                  ['Beauty', project.renderPacket.beauty ?? project.renderPacket.passes?.textured],
-                  ['Depth', project.renderPacket.passes?.depth],
-                  ['Normals', project.renderPacket.passes?.normal],
+                  ['Beauty', beautyPreviewUrl],
+                  ['Depth', depthPreviewUrl],
+                  ['Normals', normalPreviewUrl],
                   ['Mask', objectMaskUrl],
                 ].map(([label, src]) => (
                   <div key={label} className="overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
@@ -1272,22 +1591,49 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </button>
               ))}
             </div>
+            <p className="mt-2 rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-[11px] leading-relaxed text-white/42">
+              {POLICY_HINTS[project.preservationPolicy]} De nieuwe flow werkt in twee lagen: eerst een scene met grijze vorm, daarna een polish-laag met de ref-look.
+            </p>
+            <div className={[
+              'mt-3 rounded-md border px-3 py-2',
+              renderPacketStale ? 'border-red-400/20 bg-red-500/8' : lockedCameraReady ? 'border-green-400/18 bg-green-500/8' : 'border-white/[0.06] bg-black/20',
+            ].join(' ')}>
+              <div className="flex items-center justify-between gap-3">
+                <p className={[
+                  'text-[11px] font-semibold',
+                  renderPacketStale ? 'text-red-200' : lockedCameraReady ? 'text-green-300' : 'text-white/50',
+                ].join(' ')}>
+                  Locked Camera {lockedCameraReady ? 'ready' : renderPacketStale ? 'verlopen' : 'nog niet compleet'}
+                </p>
+                <span className="rounded-full border border-white/[0.08] px-2 py-1 text-[10px] text-white/36">
+                  Basic + polish route
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] leading-relaxed text-white/38">
+                Testregel: Scene moet dezelfde camera, crop, schaal en productpositie volgen als Beauty. Final mag daarna alleen het gemaskeerde product naar de source/ref-look polijsten.
+              </p>
+            </div>
             <div className="mt-3">
               <AtelierPromptBar
                 placeholder="Beschrijf de commercial productfoto..."
                 busyPlaceholder="Final render wordt gemaakt..."
                 loading={finalLoading}
-                disabled={!project.renderPacket && !project.renderPacketRecord}
+                disabled={finalRenderBlocked}
                 onSubmit={handleFinalPrompt}
               />
             </div>
+            {renderPacketStale && (
+              <p className="mt-2 text-xs text-red-300">Update eerst de preview; anders gebruikt de backend de vorige camera en Beauty snapshot.</p>
+            )}
             {finalError && <p className="mt-2 text-xs text-red-300">{finalError}</p>}
-            {(project.sourceImage?.src || project.renderPacket?.beauty || project.finalRender?.src) && (
+            {(project.sourceImage?.src || beautyPreviewUrl || project.finalRender?.src) && (
               <div className="mt-3 grid grid-cols-2 gap-2">
                 {([
-                  ['Bron', project.sourceImage?.src],
-                  ['Canonical', project.references.find((view) => view.status === 'user-approved' || view.status === 'observed')?.src],
-                  ['Beauty', project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured ?? project.renderPacketRecord?.beauty_url],
+                  ['Bron / ref-look', project.sourceImage?.src],
+                  ['Basic', basicProductUrl],
+                  ['Canonical', canonicalReference?.src],
+                  ['Beauty', beautyPreviewUrl],
+                  ['Scene', scenePreviewUrl],
                   ['Final', project.finalRender?.src],
                 ] as Array<[string, string | null | undefined]>).map(([label, src]) => (
                   <div key={label} className="overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
@@ -1306,16 +1652,19 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </div>
                 <div className="flex items-center justify-between gap-3 px-3 py-2">
                   <p className="min-w-0 truncate text-xs text-white/48">{project.finalRender.prompt}</p>
-                  <button type="button" onClick={downloadFinalRender} className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/65 hover:bg-white/[0.06]">
-                    Download
+                  <button type="button" onClick={downloadFinalRender} disabled={downloadStatus === 'Downloaden...'} className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/65 hover:bg-white/[0.06] disabled:text-white/24">
+                    {downloadStatus ?? 'Download'}
                   </button>
                 </div>
               </div>
             )}
-            {project.finalRender?.src && (project.renderPacket?.beauty || project.renderPacketRecord?.beauty_url) && (
+            {project.finalRender?.src && beautyPreviewUrl && (
               <div className="mt-3 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
                 <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-semibold text-white/70">Voor/na</p>
+                  <div>
+                    <p className="text-xs font-semibold text-white/70">Beauty versus Final</p>
+                    <p className="mt-0.5 text-[10px] text-white/34">Controleer camera, crop, schaal en productpositie.</p>
+                  </div>
                   <input
                     type="range"
                     min={0}
@@ -1327,7 +1676,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </div>
                 <div className="relative mt-3 aspect-[4/3] overflow-hidden rounded-md bg-black/35">
                   <img
-                    src={project.renderPacket?.beauty ?? project.renderPacketRecord?.beauty_url}
+                    src={beautyPreviewUrl}
                     alt="Voor"
                     className="absolute inset-0 h-full w-full object-contain"
                   />
@@ -1453,7 +1802,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   )
 
   const viewportContent = (
-    <Scene3DEditor ref={studioRef} key={sceneStorageKey} storageKey={sceneStorageKey} className="h-full w-full rounded-lg" />
+    <Scene3DEditor
+      ref={studioRef}
+      key={sceneStorageKey}
+      storageKey={sceneStorageKey}
+      className="h-full w-full rounded-lg"
+      onSceneDirty={markRenderPacketStale}
+    />
   )
 
   if (!sourceReady && !busy) {

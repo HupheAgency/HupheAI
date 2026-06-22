@@ -1,65 +1,69 @@
-# ChatGPT / Codex Agent - Product Studio Fase 1/2
+# ChatGPT / Codex Agent - Basic Product + Polish UX
 
 Projectroot:
 `/Users/tom.zwarts/HupheAI/HupheShell`
 
-Bron van waarheid:
-`docs/comfy/HupheAI-Universal-Product-Studio-Masterdocument-v1_0.md`
-
-Coordinatiebord:
-`.agents/sprint_3D-2D-studio.md`
+Actieve fix-sprint:
+`.agents/sprint-fix-3d-to-2d.md`
 
 ## Rol
 
-ChatGPT/Codex pakt de renderer, UX, bestaande Scene3D-integratie en frontend-koppeling met Claude's Product Studio IPC/preload API op.
+ChatGPT/Codex pakt renderer, Product Studio UX, state mapping, review-schermen en frontend-koppeling met Claude's IPC/API op.
 
 Primair werkgebied:
 
 - `src/renderer/src/components/ProductStudioShell.tsx`
-- `src/renderer/src/components/Scene3DEditor.tsx`
-- `src/renderer/src/components/Scene3DViewport.tsx`
-- `src/renderer/src/hooks/useScene3D.ts`
-- gerichte renderer smoke-tests als die aanwezig zijn
+- `src/renderer/src/lib/product-studio-types.ts`
+- `src/preload/index.ts` alleen als een nieuwe IPC-call aan de renderer zichtbaar moet worden
+- agentdocs en testnotities
 
 Niet doen:
 
 - Geen Supabase migrations/RLS.
 - Geen providerkeys of server-side modelcalls in de renderer.
-- Geen provider/modelnamen hardcoderen buiten bestaande adapter/API-keuzes.
+- Geen final providerroute in de renderer bouwen.
 
-## Fase 1 - Actieve Taken
+## Nu Oppakken
 
-- [x] ProductStudioShell volledig op backend-state laten draaien: project, source asset, reference views, canonical set, reconstruction, studio scene en renderpacket. (`getLatestState` hydratatie + handmatige Sync gekoppeld)
-- [x] LocalStorage alleen nog gebruiken als tijdelijke UI-cache; backend blijft bron van waarheid voor projectdata.
-- [~] Reference review afmaken: generated views tonen, accepteren, afwijzen, vervangen en canonical set aanmaken. (accepteren/afwijzen en canonical set flow gekoppeld; vervangen blijft vervolgwerk)
-- [~] Mesh review scherm bouwen: reconstruction starten/laden, GLB tonen, proxy fallback tonen, accepteren/afwijzen/regenereren. (TRELLIS default, proxy fallback en accept/reject klaar; regenereren blijft vervolgwerk)
-- [x] Reconstructie-resultaat automatisch als GLB-object in de bestaande Scene3D studio plaatsen.
-- [x] Studio scene persistence verbeteren: echte camera, lights, product transform, environment en output opslaan in `saveScene`, niet lege placeholders.
-- [x] Renderpacket review tonen met backend URLs voor beauty, depth en normals.
-- [x] Final render review afmaken met bronfoto, canonical view, beauty preview, final image, prompt, preservation policy en download.
-- [x] Foutenpad-UX zichtbaar maken voor upload failure, provider failure, retry en rollback.
-- [ ] Visuele smoke-test van Product Studio flow.
-- [ ] Visuele smoke-test van bestaande Media/Atelier 3D-editor om regressie te voorkomen.
+- [x] UI state uitbreiden met Basic Product asset uit `source_assets`.
+- [x] Input/review UI tonen: Bron versus Basic Product.
+- [x] Status toevoegen: `Basic shape ready`.
+- [x] Final review voorbereiden op `Scene` tussen Beauty en Final zodra backend dit exposeert.
+- [x] Scene preview uit `provider_runs.metadata.scene_url` tonen in Final.
+- [x] Final prompt copy aanpassen: scene pass gebruikt grijze vorm, polish pass gebruikt ref-look.
+- [x] Canonical view generation gebruikt weer de originele Bron/ref-look, niet Basic shape.
+- [x] Canonical view acties vervangen door kleine icon-only knoppen.
+- [x] UI dedupet canonical views per hoek en telt unieke bruikbare hoeken, nooit 5/4.
+- [x] TRELLIS-knoppen blokkeren tot Basic shape klaar is; geen source fallback meer voor mesh.
+- [x] Waarschuwing tonen als Basic Product ontbreekt: flow werkt dan minder betrouwbaar bij complexe prints.
+- [x] Build draaien en handmatige teststappen vastleggen.
 
-## Fase 2 - Vervolgwerk
+## Wacht Op Claude
 
-- [x] Object-mask renderpass UI tonen zodra de renderpass beschikbaar is.
-- [x] Object-mask uploaden via `productStudio.uploadRenderPass({ passType: 'object-mask' })`.
-- [x] `createRenderPacket` vullen met `objectMaskUrl`.
-- [x] Voor/na-overlay bouwen voor source/canonical/beauty/final.
-- [x] Rollback UI voor reference set, reconstruction en final render versions.
-- [x] Betere jobstatus UI: queued, processing, failed, retry, completed.
-- [x] Safe Camera Zone of onzekerheidswaarschuwing tonen bij zwakke reference coverage.
+- [x] `source_assets.type = 'basic-product'` wordt aangemaakt door `normalize-input`.
+- [x] `get-latest-state` retourneert Basic Product asset.
+- [x] Backend exposeert Scene intermediate of final render metadata zodra scene + polish route klaar is.
+- [x] Claude/backend: retry-route gelijk getrokken met scene + polish route.
+- [x] Claude/backend: repo-migration toegevoegd voor `basic-product`, `inferred` en `provider_runs.metadata`.
 
-## Wacht Op
+## Acceptatie Voor ChatGPT/Codex
 
-- [x] Claude: echte `generate-final-render` / `create-final-render` route die een `FinalRenderVersion` maakt vanuit een `RenderPacket`.
-- [x] Claude: observed/front reference view of canonical-set route die source asset correct kan meenemen.
-- [x] Gemini: echte provider-spike resultaten voor prompt- en routedefaults.
+- [x] De gebruiker ziet duidelijk: Bron, Basic Product, Beauty, Scene/Final.
+- [x] De UI maakt duidelijk dat Basic Product voor mesh/vorm/positie is en Source voor views/materiaal/print.
+- [x] Final render copy zegt niet meer dat depth/normal als gewone multi-image input worden gebruikt.
+- [x] Oude `Multi-image route wacht op backend` tekst is vervangen door de nieuwe twee-laags uitleg.
 
 ## Validatie
 
-- [x] `npx tsc --noEmit`
 - [x] `npm run build`
-- [ ] Handmatige Product Studio smoke-test met eerste testobject.
-- [ ] Handmatige foutenpad-test: provider failure, upload failure, retry en rollback.
+- [x] `npm run build` opnieuw groen na retry/migration afronding.
+
+## Testnotities
+
+- Upload complexe productfoto.
+- Controleer dat `Product basis` Bron en Basic toont.
+- Zolang Claude Basic Product nog niet genereert, toont UI `Wacht op backend` en valt de flow terug op de bronfoto als shape input.
+- Zodra `source_assets.type = 'basic-product'` bestaat, gebruikt reconstructie die basic shape als input.
+- Canonical views moeten altijd vanuit de originele Bron/ref-look komen, zodat de achterkant/print/materialen geleerd worden.
+- Icon acties: refresh = opnieuw genereren/vervangen, x = afwijzen, vinkje = goedkeuren.
+- Eén hoek is één slot. Gebruik refresh op de kaart om die hoek te vervangen.

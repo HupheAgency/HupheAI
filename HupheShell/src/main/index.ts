@@ -2584,7 +2584,36 @@ ipcMain.handle('scene3d:generate', async (_event, payload: { screenshotDataUrl: 
       } catch { /* use original */ }
     }
 
-    const compositionNote = 'Transform this 3D scene into a photorealistic image. Maintain the exact composition, camera angle, subject position, facing direction, lighting and shadows from the reference image. Replace simple 3D materials with realistic surfaces.'
+    // Beschrijf het originele product via LLM zodat Qwen kleur/materiaal kent
+    let productDescription = ''
+    if (referenceImageSrc) {
+      try {
+        const refMatch = referenceImageSrc.match(/^data:(image\/\w+);base64,(.+)$/)
+        if (refMatch) {
+          const descRes = await callOpenRouter({
+            model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+            messages: [
+              { role: 'system', content: 'You are a product photography assistant. Describe the product in the image in one sentence: its color, material, finish, and any visible labels or logos. Be precise about colors (e.g. "matte dark grey" not just "grey"). Output only the description.' },
+              { role: 'user', content: [
+                { type: 'image_url', image_url: { url: referenceImageSrc } },
+                { type: 'text', text: 'Describe this product.' },
+              ] },
+            ],
+            max_tokens: 150,
+          }, effectiveJwt)
+          if (descRes.ok) {
+            const descJson = await descRes.json() as any
+            const desc = descJson?.choices?.[0]?.message?.content?.trim()
+            if (desc) productDescription = desc
+          }
+        }
+      } catch { /* proceed without description */ }
+    }
+
+    const productContext = productDescription
+      ? ` The real product looks like: ${productDescription}. Match these colors and materials exactly in the output.`
+      : ''
+    const compositionNote = `Transform this 3D scene into a photorealistic image. Maintain the exact composition, camera angle, subject position, facing direction, lighting and shadows.${productContext} Replace simple 3D materials with the product's actual realistic surfaces, colors and textures.`
     const fullPrompt = `${compositionNote} ${englishPrompt}`
 
     const dataUrlMatch = screenshotDataUrl.match(/^data:(image\/\w+);base64,(.+)$/)
@@ -2595,6 +2624,7 @@ ipcMain.handle('scene3d:generate', async (_event, payload: { screenshotDataUrl: 
       image_base64: base64Data,
       image_mime_type: mimeType,
       prompt: fullPrompt,
+      strength: 0.45,
       num_inference_steps: 28,
       guidance_scale: 3.5,
       num_images: 1,

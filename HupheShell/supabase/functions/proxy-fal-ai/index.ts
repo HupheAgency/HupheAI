@@ -13,13 +13,15 @@ const FAL_API_KEY = Deno.env.get('FAL_API_KEY')!
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return handleOptions()
 
+  let reservationId: string | null = null
+
   try {
     const userId = await requireUserId(req)
 
     // Controleer of wallet niet geblokkeerd is
     const { data: wallet } = await serviceClient
       .from('wallets')
-      .select('balance, blocked')
+      .select('personal_balance, blocked')
       .eq('user_id', userId)
       .maybeSingle()
 
@@ -37,14 +39,22 @@ Deno.serve(async (req: Request) => {
     }
 
     const body = await req.json()
-    const { model_id, image_base64, image_mime_type, ...falParams } = body
+    const { model_id, image_base64, image_mime_type, control_image_base64, control_image_mime_type, mask_image_base64, mask_image_mime_type, ...falParams } = body
 
     if (!model_id) return json({ error: 'model_id is verplicht' }, 400)
 
-    // Als er een base64-afbeelding meegestuurd is, stuur als data URL
+    // Base64 images omzetten naar data URIs voor fal.ai
     if (image_base64) {
       const mimeType = image_mime_type ?? 'image/png'
       falParams.image_url = `data:${mimeType};base64,${image_base64}`
+    }
+    if (control_image_base64) {
+      const mimeType = control_image_mime_type ?? 'image/png'
+      falParams.control_lora_image_url = `data:${mimeType};base64,${control_image_base64}`
+    }
+    if (mask_image_base64) {
+      const mimeType = mask_image_mime_type ?? 'image/png'
+      falParams.mask_image_url = `data:${mimeType};base64,${mask_image_base64}`
     }
 
     // Haal model op uit de database (allowlist + prijs)
@@ -71,7 +81,7 @@ Deno.serve(async (req: Request) => {
       p_amount: costWithMarkup,
       p_expires_minutes: 5,
     })
-    const reservationId = reservationRows?.[0]?.reservation_id
+    reservationId = reservationRows?.[0]?.reservation_id
 
     if (reserveError?.message?.includes('insufficient_balance')) {
       return json({
@@ -126,6 +136,9 @@ Deno.serve(async (req: Request) => {
     })
 
   } catch (err: any) {
+    if (reservationId) {
+      await serviceClient.rpc('release_reservation_for_user', { p_reservation_id: reservationId }).catch(() => {})
+    }
     if (err instanceof AuthError) {
       return json({ error: err.message }, err.status)
     }

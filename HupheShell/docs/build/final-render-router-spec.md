@@ -21,6 +21,27 @@ type FinalRenderRouterInput = {
 }
 ```
 
+## Composition Priority
+
+De `beautyUrl` uit het RenderPacket is leidend voor compositie:
+
+- camera angle;
+- perspectief;
+- crop/aspect;
+- positie en schaal van het product;
+- facing direction;
+- silhouet.
+
+Source/canonical references zijn alleen leidend voor productwaarheid:
+
+- kleur;
+- materiaal;
+- finish;
+- labels/logo's;
+- details die in de 3D proxy ontbreken.
+
+Belangrijk: final-render prompts mogen source/canonical refs niet laten winnen van de beauty camera. Anders valt het model terug naar een frontale packshot, zelfs wanneer de beauty pass een top-view of andere camera bevat.
+
 ## Preservation Policy (Prompt Templates & Adapter Weights)
 
 Claude heeft de initiële prefix-strategie gebouwd. Hier zijn de verrijkte aanbevelingen en modelinstructies per policy om *Qwen image-edit* of vergelijkbare ControlNet adapters strakker aan te sturen:
@@ -83,10 +104,15 @@ Bij failure:
 - bied policy wijziging;
 - bied terug naar studio.
 
+## Validatie & Kwaliteit
+
+Zie voor de volledige kleuranalyse, prompt tuning per policy en de uitgebreide testmatrix voor materialen het document:
+[Fidelity & Color Benchmark](fidelity-color-benchmark.md)
+
 ## Acceptatiecriteria
 
 - Output wordt nooit automatisch als definitief geaccepteerd.
 - Gebruiker ziet bronfoto, canonical reference, beauty preview en final render.
 - Download is pas beschikbaar wanneer output bestaat.
 - Final render is herleidbaar naar renderpacket, provider run en prompt.
-
+- **Kleur & Identiteit:** Final renders moeten slagen voor de testmatrix in de Fidelity Benchmark, of gebruikers krijgen een warning bij ontbrekende canonical references.

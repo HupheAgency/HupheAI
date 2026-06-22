@@ -14,8 +14,12 @@ export interface RenderPasses {
 
 export interface Scene3DViewportHandle {
   captureScreenshot: () => string | null
+  captureCleanScreenshot: () => string | null
   captureAllPasses: () => RenderPasses | null
 }
+
+const EDITOR_ONLY_USER_DATA = { __editorOnly: true, __helper: true }
+const GIZMO_USER_DATA = { __editorOnly: true, __gizmo: true }
 
 function LightHelper({ light, selected }: { light: Scene3DState['lights'][number]; selected?: boolean }) {
   if (light.type === 'ambient') return null
@@ -30,7 +34,7 @@ function LightHelper({ light, selected }: { light: Scene3DState['lights'][number
   }, [light.position, target])
 
   return (
-    <group position={light.position}>
+    <group position={light.position} userData={EDITOR_ONLY_USER_DATA}>
       {selected && (
         <mesh>
           <octahedronGeometry args={[0.22, 0]} />
@@ -127,7 +131,7 @@ function DirectionalLightWithTarget({ light, castShadow }: { light: Scene3DState
       <directionalLight ref={lightRef} color={light.color} intensity={light.intensity} position={light.position} castShadow={castShadow}
         shadow-mapSize-width={1024} shadow-mapSize-height={1024} shadow-camera-near={0.5} shadow-camera-far={50}
         shadow-camera-left={-10} shadow-camera-right={10} shadow-camera-top={10} shadow-camera-bottom={-10} />
-      <object3D ref={targetRef} position={target} />
+      <object3D ref={targetRef} position={target} userData={EDITOR_ONLY_USER_DATA} />
     </>
   )
 }
@@ -156,7 +160,7 @@ function SpotLightWithTarget({ light, castShadow }: { light: Scene3DState['light
     <>
       <spotLight ref={lightRef} color={light.color} intensity={light.intensity} position={light.position} castShadow={castShadow}
         angle={Math.PI / 6} penumbra={0.5} shadow-mapSize-width={512} shadow-mapSize-height={512} />
-      <object3D ref={targetRef} position={target} />
+      <object3D ref={targetRef} position={target} userData={EDITOR_ONLY_USER_DATA} />
     </>
   )
 }
@@ -228,6 +232,7 @@ function SelectedObjectTransform({
     <TransformControls
       object={mesh}
       mode={transformMode}
+      userData={GIZMO_USER_DATA}
       onMouseDown={() => { if (orbitRef.current) orbitRef.current.enabled = false }}
       onMouseUp={() => {
         if (orbitRef.current) orbitRef.current.enabled = true
@@ -255,7 +260,7 @@ function CameraHelper({ cam, active }: { cam: Scene3DState['cameras'][number]; a
   }, [cam.position, cam.target])
 
   return (
-    <group position={cam.position} ref={groupRef} raycast={() => null}>
+    <group position={cam.position} ref={groupRef} raycast={() => null} userData={EDITOR_ONLY_USER_DATA}>
       {/* Camera body */}
       <mesh>
         <boxGeometry args={[0.28, 0.18, 0.15]} />
@@ -326,6 +331,68 @@ function useJumpToCamera(
   }, [activeCameraId])
 }
 
+function isInsideSceneObjects(obj: THREE.Object3D): boolean {
+  let parent = obj.parent
+  while (parent) {
+    if (parent.userData.__sceneObjects) return true
+    parent = parent.parent
+  }
+  return false
+}
+
+function isEditorOnlyObject(obj: THREE.Object3D): boolean {
+  const type = obj.type.toLowerCase()
+  const name = obj.name.toLowerCase()
+  const explicit = Boolean(
+    obj.userData.__editorOnly ||
+    obj.userData.__gizmo ||
+    obj.userData.__helper ||
+    (obj as any).isTransformControls ||
+    type.includes('transformcontrols'),
+  )
+  if (explicit) return true
+  if (isInsideSceneObjects(obj)) return false
+  return (
+    obj instanceof THREE.GridHelper ||
+    type.includes('gizmo') ||
+    type.includes('grid') ||
+    type.includes('helper') ||
+    name.includes('gizmo') ||
+    name.includes('grid') ||
+    name.includes('helper') ||
+    name.includes('transformcontrols')
+  )
+}
+
+function hideEditorOnlyObjects(scene: THREE.Scene): THREE.Object3D[] {
+  const hidden: THREE.Object3D[] = []
+  scene.traverse((obj) => {
+    if (obj === scene || !obj.visible || obj instanceof THREE.Light) return
+    if (!isEditorOnlyObject(obj)) return
+    obj.visible = false
+    hidden.push(obj)
+  })
+  return hidden
+}
+
+function CleanScreenshotCapture({ captureRef }: { captureRef: React.MutableRefObject<(() => string | null) | null> }) {
+  const { gl, scene, camera } = useThree()
+
+  useEffect(() => {
+    captureRef.current = () => {
+      const hidden = hideEditorOnlyObjects(scene)
+      gl.render(scene, camera)
+      const dataUrl = gl.domElement.toDataURL('image/png')
+      hidden.forEach((obj) => { obj.visible = true })
+      gl.render(scene, camera)
+      return dataUrl
+    }
+    return () => { captureRef.current = null }
+  }, [gl, scene, camera, captureRef])
+
+  return null
+}
+
 function RenderPassCapture({ passRef }: { passRef: React.MutableRefObject<(() => RenderPasses | null) | null> }) {
   const { gl, scene, camera } = useThree()
 
@@ -334,26 +401,7 @@ function RenderPassCapture({ passRef }: { passRef: React.MutableRefObject<(() =>
       const originalOverride = scene.overrideMaterial
       const originalBg = scene.background
 
-      const hiddenTypes = new Set(['GridHelper', 'TransformControlsPlane', 'GizmoHelper'])
-      const hidden: THREE.Object3D[] = []
-      scene.traverse((obj) => {
-        if (
-          !obj.visible ||
-          hiddenTypes.has(obj.type) ||
-          obj.userData.__helper ||
-          obj.userData.__gizmo ||
-          (obj as any).isTransformControls
-        ) return
-        if (
-          obj.type === 'GridHelper' ||
-          obj.name.includes('gizmo') ||
-          obj.name.includes('helper') ||
-          obj.name.includes('Gizmo')
-        ) {
-          obj.visible = false
-          hidden.push(obj)
-        }
-      })
+      const hidden = hideEditorOnlyObjects(scene)
 
       // Textured (normal render)
       gl.render(scene, camera)
@@ -400,6 +448,7 @@ function SceneContent({
   onObjectTransformed,
   onActivateCamera,
   onDeactivateCamera,
+  onViewChanged,
   orbitStateRef,
 }: {
   scene: Scene3DState
@@ -412,6 +461,7 @@ function SceneContent({
   onObjectTransformed: (id: string, position: [number, number, number], rotation: [number, number, number], scale: [number, number, number]) => void
   onActivateCamera: (id: string) => void
   onDeactivateCamera: () => void
+  onViewChanged?: () => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
 }) {
   const orbitRef = useRef<OrbitControlsImpl>(null)
@@ -442,6 +492,7 @@ function SceneContent({
     }
     const startHandler = () => {
       onDeactivateCamera()
+      onViewChanged?.()
     }
     controls.addEventListener('change', handler)
     controls.addEventListener('start', startHandler)
@@ -449,7 +500,7 @@ function SceneContent({
       controls.removeEventListener('change', handler)
       controls.removeEventListener('start', startHandler)
     }
-  }, [threeCamera, orbitStateRef, onDeactivateCamera])
+  }, [threeCamera, orbitStateRef, onDeactivateCamera, onViewChanged])
 
   return (
     <>
@@ -485,6 +536,7 @@ function SceneContent({
       {/* Grid — hide in rendered mode */}
       {viewMode !== 'rendered' && (
         <Grid
+          userData={EDITOR_ONLY_USER_DATA}
           args={[20, 20]}
           cellSize={1}
           cellThickness={0.5}
@@ -523,9 +575,11 @@ function SceneContent({
       )}
 
       {viewMode !== 'rendered' && (
-        <GizmoHelper alignment="bottom-right" margin={[60, 60]}>
-          <GizmoViewport />
-        </GizmoHelper>
+        <group userData={GIZMO_USER_DATA}>
+          <GizmoHelper alignment="bottom-right" margin={[60, 60]}>
+            <GizmoViewport />
+          </GizmoHelper>
+        </group>
       )}
     </>
   )
@@ -542,15 +596,20 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   onObjectTransformed: (id: string, position: [number, number, number], rotation: [number, number, number], scale: [number, number, number]) => void
   onActivateCamera: (id: string) => void
   onDeactivateCamera: () => void
+  onViewChanged?: () => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
-}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, orbitStateRef }, ref) {
+}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<(() => RenderPasses | null) | null>(null)
+  const cleanScreenshotRef = useRef<(() => string | null) | null>(null)
 
   useImperativeHandle(ref, () => ({
     captureScreenshot() {
       if (!canvasRef.current) return null
       return canvasRef.current.toDataURL('image/png')
+    },
+    captureCleanScreenshot() {
+      return cleanScreenshotRef.current?.() ?? null
     },
     captureAllPasses() {
       return passRef.current?.() ?? null
@@ -569,6 +628,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
         shadows
         style={{ background: viewMode === 'rendered' ? '#000000' : '#1a1a1a' }}
       >
+        <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
         <RenderPassCapture passRef={passRef} />
         <SceneContent
           scene={scene}
@@ -581,6 +641,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           onObjectTransformed={onObjectTransformed}
           onActivateCamera={onActivateCamera}
           onDeactivateCamera={onDeactivateCamera}
+          onViewChanged={onViewChanged}
           orbitStateRef={orbitStateRef}
         />
       </Canvas>

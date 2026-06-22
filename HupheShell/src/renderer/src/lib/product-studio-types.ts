@@ -18,6 +18,7 @@ export type ProjectStatus =
 export type SourceAssetType =
   | 'original-image'
   | 'normalized-image'
+  | 'basic-product'
   | 'object-mask'
   | 'manual-mask'
   | 'thumbnail'
@@ -78,7 +79,7 @@ export interface SourceAsset {
   width?: number
   height?: number
   checksum?: string
-  provenance: 'observed'
+  provenance: 'observed' | 'inferred'
   created_at: string
 }
 
@@ -170,6 +171,7 @@ export interface ProviderRun {
   error_message?: string
   retry_count: number
   idempotency_key?: string
+  metadata?: Record<string, unknown>
   created_at: string
   completed_at?: string
 }
@@ -185,6 +187,8 @@ export interface FinalRenderVersion {
   resolution: RenderResolution
   status: FinalRenderStatus
   parent_version_id?: string
+  metadata?: Record<string, unknown>
+  scene_url?: string | null
   created_at: string
   approved_at?: string
 }
