@@ -1,153 +1,168 @@
-# Sprint Fix 3D To 2D - Basic Product + Polish Layer
+# Sprint 3D Naar 2D - Textured Mesh Route
 
 Bron van waarheid:
 `docs/comfy/HupheAI-Universal-Product-Studio-Masterdocument-v1_0.md`
 
-Gerelateerd sprintbord:
-`.agents/sprint_3D-2D-studio.md`
+Actieve richting:
+Route 2. Niet langer proberen om een beeldmodel telkens de canonical print op een grijze Beauty te laten raden. Eerst het 3D object zelf voorzien van productlook/texture, zodat de Studio screenshot al de echte vorm, hoek, print, glans en belichting bevat.
 
 ## Doel
 
-Maak de 3D-to-2D flow betrouwbaar voor complexe producten met prints, patronen, labels en glans.
+Bewijs eerst dat we een geupload product kunnen reconstrueren naar een bruikbaar 3D object met gewrapte productlook.
 
-De gebruiker uploadt een echte productfoto. De app maakt daar eerst een eenvoudige grijze productvariant van voor vorm, diepte, camera en positionering. Pas helemaal aan het einde wordt de originele productlook als polish/skin over het gemaskeerde object gelegd.
+Daarna wordt de 2D render simpeler:
 
-## Probleem
+1. Upload product.
+2. Maak Basic Shape voor reconstructie.
+3. Maak/controleer canonical views uit de echte bron/ref-look.
+4. Bouw mesh.
+5. Projecteer/wrap productlook op mesh.
+6. Toon textured mesh in Studio.
+7. `Update Preview` maakt een Beauty die al productprint, materiaal en camera bevat.
+8. AI hoeft daarna vooral omgeving/background/commercial polish te maken, niet opnieuw de producthoek te verzinnen.
 
-Bij simpele grijze objecten werkt de bestaande flow redelijk, omdat het product al weinig visuele complexiteit heeft. Bij complexe producten, zoals een Chinese porseleinen vaas met blauwe print, moet het beeldmodel tegelijk:
+## Waarom Deze Route
 
-- compositie en camerahoek behouden;
-- omgeving maken;
-- productvorm behouden;
-- print/materiaal/porselein correct toepassen;
-- mask/depth/beauty niet semantisch door elkaar halen.
+De huidige layered image-edit route kan soms werken, maar blijft probabilistisch:
 
-Dat levert mengvormen op: vorm verandert, print vloeit in gras, camera wordt opnieuw gekozen of het product wordt een ander object.
+- product layer valt soms terug naar canonical/frontaal;
+- background en product komen soms net niet uit dezelfde camera;
+- composite moet te veel corrigeren;
+- prompts worden fragiel omdat één model tegelijk hoek, print, licht, achtergrond en blend moet volgen.
 
-## Nieuwe Oplossing
+Met een textured mesh wordt de 3D Studio weer de bron van waarheid:
 
-We voegen twee extra lagen toe rond de bestaande pipeline.
+- camera komt uit de viewport;
+- productpositie komt uit de viewport;
+- print en materiaal zitten op het mesh;
+- final image model krijgt een veel duidelijkere opdracht.
 
-### 1. Basic Product bij Upload
+## Scope Van Deze Sprint
 
-Na upload wordt naast de originele source image een neutrale productvariant gemaakt:
+Belangrijkste succescriterium:
 
-- exact dezelfde hoofdvorm en verhoudingen;
-- geen print, logo, tekst of druk patroon;
-- mat/lichtgrijs materiaal;
-- duidelijke contouren;
-- geschikt voor 3D reconstructie, Beauty, depth, normal en object-mask.
+- [ ] Een textured 3D object renderen in de Studio waarbij de vaas/fles zichtbaar de bronprint/look draagt en meedraait met de camera.
 
-Deze basic product image wordt gebruikt voor reconstructie, 3D positionering en Beauty/depth/mask. De originele source image blijft leidend voor reference generation, productidentiteit, materiaal en print.
+Niet eerst perfect maken:
 
-### 2. Scene Pass blijft op Grijze Beauty
+- perfecte multi-view texture atlas;
+- alle objectcategorieen;
+- automatische unwrap op productieniveau;
+- perfecte final background/composite.
 
-De bestaande RenderPacket/Beauty flow blijft leidend:
+Eerst moet bewezen zijn dat wrapping/projectie werkt.
 
-- Beauty bepaalt camera, crop, schaal, positie en silhouet.
-- Scene pass maakt omgeving/fotografie rond het grijze product.
-- De prompt moet expliciet zeggen dat AI het grijze product exact moet gebruiken en nog geen print/material polish mag verzinnen.
+## Fase 0 - Oude Route Bevriezen
 
-### 3. Polish / Skin Pass aan het Eind
+- [ ] Bestaande Basic Shape, canonical views, TRELLIS mesh en renderpacket flow intact laten.
+- [ ] Layered image-edit route behouden als fallback, maar niet verder tunen als hoofdoplossing.
+- [x] UI duidelijk maken wanneer er een textured mesh beschikbaar is versus alleen een grijze mesh.
 
-Na de scene pass volgt een laatste edit:
-
-Input:
-
-- scene image met grijs object;
-- object mask;
-- originele source/ref image;
-- canonical views als extra productidentiteit wanneer beschikbaar.
-
-Regel:
-
-> Behoud de foto buiten het objectmask exact. Verander alleen het gemaskeerde object. Laat het product eruitzien als de referentiefoto, maar behoud vorm, positie, camera, schaal, crop en licht uit de scene.
-
-Voorbeeld:
-
-Een grijze vaas in gras wordt in de polish pass een witte Chinese porseleinen vaas met blauwe print, in exact dezelfde hoek en positie.
-
-## Pipeline
-
-1. User uploadt productfoto.
-2. Backend maakt/checksum/mask/thumbnail zoals nu.
-3. Backend maakt `basic-product` source asset.
-4. UI toont Source en Basic naast elkaar.
-5. Reference generation gebruikt Bron/ref-look voor print en achterkant; reconstruction gebruikt Basic als vorminput.
-6. 3D Studio gebruikt grijs model/Beauty voor positionering.
-7. Scene pass maakt fotorealistische setting met grijs object.
-8. Polish pass gebruikt source/canonical refs + mask om alleen het object te skinnen.
-9. UI toont Bron, Basic, Beauty, Scene en Final.
-
-## Agentverdeling
+## Fase 1 - Texture Contract
 
 ### Claude - Backend / IPC / Storage
 
-- [x] `product-studio:normalize-input` uitbreiden met Basic Product generatie.
-- [x] Basic Product opslaan als `source_assets.type = 'basic-product'`.
-- [x] Basic Product signed URL meenemen in `get-latest-state`.
-- [x] Reference generation gebruikt de originele Bron/ref-look; reconstruction gebruikt Basic Product als primaire vorminput.
-- [x] Final-render backend splitsen in scene pass + polish pass.
-- [x] Scene pass output opslaan als aparte intermediate asset of metadata.
-- [x] Polish pass object-mask + source/canonical refs gebruiken en alleen productgebied aanpassen.
-- [x] Provider run metadata uitbreiden met `basic_product_url`, `scene_url`, `polish_inputs`.
-- [x] Retry-route dezelfde scene + polish stappen laten gebruiken.
-- [x] Begrijpelijke errors: basic ontbreekt, mask ontbreekt, polish faalt, scene faalt.
-- [x] Repo-migration controleren/toevoegen voor `source_assets.type = 'basic-product'`, `source_assets.provenance = 'inferred'` en `provider_runs.metadata`.
+- [x] Datamodel bepalen voor textured mesh assets:
+  - `textured_mesh_url`
+  - `texture_atlas_url`
+  - `material_manifest`
+  - `texture_source_view_ids`
+  - `texture_status`
+- [x] Opslaglocatie bepalen voor texture atlas en textured GLB/GLTF.
+- [x] IPC-contract maken voor:
+  - `product-studio:create-textured-mesh`
+  - `product-studio:get-texture-status`
+  - `product-studio:retry-texture-wrap`
+- [x] Resultaat koppelen aan project state zodat renderer het textured mesh kan laden.
 
 ### ChatGPT / Codex - Renderer / UX
 
-- [x] UI state uitbreiden met Basic Product asset uit `source_assets`.
-- [x] Input/review UI tonen: Bron versus Basic Product.
-- [x] Duidelijke status toevoegen: `Basic shape ready`.
-- [x] Final review uitbreiden met `Scene` tussen Beauty en Final als backend dit exposeert.
-- [x] Scene preview uit provider metadata zichtbaar maken in de Final UI.
-- [x] Canonical views terugzetten naar Bron/ref-look in plaats van Basic shape.
-- [x] Canonical view acties compact maken met icon-only knoppen: goedkeuren, afwijzen, opnieuw genereren.
-- [x] Linker/rechter canonical-view prompts aangescherpt zodat links en rechts niet als dezelfde generieke zijkant worden gegenereerd.
-- [x] Eén canonical-view slot per hoek afdwingen: dubbelklikken of opnieuw genereren mag niet leiden tot 5/4 views.
-- [x] TRELLIS/reconstructie hard geblokkeerd op Basic Product: geen fallback meer naar bronfoto of print-views.
-- [x] Scene pass aangescherpt met perspective lock: achtergrond moet dezelfde 3D camera, horizon, vloer/grondvlakrichting, diepte en schaal volgen zonder te forceren dat het object altijd op een oppervlak staat.
-- [x] Final prompt copy aanpassen: scene pass gebruikt grijze vorm, polish pass gebruikt ref-look.
-- [x] Blokkade/waarschuwing tonen als Basic Product ontbreekt bij complexe producten.
-- [x] Agentdocs updaten na implementatie.
-- [x] Build draaien en handmatige teststappen vastleggen.
+- [x] Mesh/Studio state uitbreiden met textured mesh status.
+- [x] UI-stap toevoegen: `Texture product` na Mesh.
+- [x] Preview tonen:
+  - grijze mesh;
+  - textured mesh;
+  - gebruikte canonical/source refs.
+- [x] Duidelijke CTA: eerst texture bewijzen, daarna pas final render.
 
-## Acceptatiecriteria
+### Gemini - Provider / Pipeline Research
 
-- [ ] Complexe vaasfoto krijgt een basic grijze variant zonder print.
-- [ ] Basic variant behoudt hoofdvorm en verhoudingen van source.
-- [ ] Canonical views behouden print/materiaal vanuit de bronfoto, niet de grijze Basic shape.
-- [ ] Links en rechts zijn visueel verschillende productzijden wanneer het product asymmetrische print/details heeft.
-- [ ] Canonical teller blijft maximaal 4/4; vervangen supersedet de oude hoek.
-- [ ] 3D/Beauty flow gebruikt basic vorm voor positionering.
-- [ ] TRELLIS krijgt alleen de grijze Basic shape als input.
-- [ ] Scene pass behoudt Beauty camera/crop/schaal en verzint geen print.
-- [ ] Scene pass maakt achtergrondperspectief consistent met de 3D positie van het object, ook bij staand, hangend of zwevend product.
-- [ ] Polish pass verandert alleen gemaskeerd productgebied.
-- [ ] Buiten het objectmask blijft de scene exact gelijk.
-- [ ] Product in Final lijkt op originele source/ref image qua materiaal, kleur, print en glans.
-- [x] Retry gebruikt dezelfde twee-laags route.
+- [x] Beste route kiezen voor eerste texture proof:
+  - ComfyUI/fal texture projection;
+  - multiview-to-texture;
+  - image-to-3D provider met texture output;
+  - local/three.js projective texture prototype.
+- [x] Minimum input contract beschrijven:
+  - source/ref-look;
+  - approved canonical views;
+  - mesh/basic shape;
+  - camera/view metadata.
+- [x] Risico's en fallback per provider noteren.
 
-## Eerste Test
+## Fase 2 - Eerste Wrapping Proof
 
-Gebruik de Chinese porseleinen vaas:
+### Claude - Backend / Pipeline
 
-1. Upload source image.
-2. Controleer Basic Product: grijze vaas, geen blauwe print.
-3. Genereer views vanuit Bron/ref-look; controleer dat print/materiaal zichtbaar blijven op de AI-aanzichten.
-4. Genereer reconstructie/mesh vanuit Basic.
-5. Zet camera close-up/top-view in 3D Studio.
-6. Update preview.
-7. Prompt: `Zet de vaas in een park in het gras met dauwdruppels.`
-8. Controleer Scene: grijze vaas in gras, juiste camera.
-9. Controleer Final: porseleinen vaas met blauwe print, zelfde camera/positie.
+- [x] Eerste texture-wrap route implementeren achter feature flag.
+- [x] Input altijd uit echte bron/canonical views halen, niet uit Basic Shape.
+- [x] Output opslaan als textured asset.
+  - Voor de proof local-first: textured GLB, atlas PNG en manifest JSON worden lokaal onder Electron `userData` opgeslagen en via `huphe://file/...` geladen.
+  - Supabase bewaart voorlopig alleen de status en lokale viewer-URL's, zodat de desktop-app direct kan testen zonder storage MIME/timeout-gedoe.
+- [x] Foutenpad: als texture wrap faalt, grijze mesh behouden en duidelijke error teruggeven.
 
-## Besluit
+### ChatGPT / Codex - Renderer / Studio
 
-Geen nieuwe ControlNet/depth-route als eerste stap. Eerst de bestaande werkende image-edit infrastructuur benutten, maar de taak opdelen:
+- [x] Textured mesh kunnen laden in `Scene3DViewport`.
+- [x] Toggle of status tonen: `Grey shape` / `Textured product`.
+- [x] `Update Preview` gebruikt textured mesh zodra beschikbaar.
+- [x] Beauty thumbnail gebruikt de actieve Studio mesh; zodra `textured_mesh_url` beschikbaar is wordt dit `Textured Beauty`.
 
-- Bron/ref-look = views, identiteit, print, materiaal en polish-referentie.
-- Basic Product = vorm, mesh en positionering.
-- Scene pass = wereld/fotografie.
-- Polish pass = productlook/material/print.
+### Gemini - Validatie
+
+- [x] Testmatrix maken met minimaal:
+  - grijze fles;
+  - blauwe porseleinen vaas;
+  - product met logo/tekst;
+  - glossy product;
+  - asymmetrisch product.
+- [x] Acceptatiecriteria voor wrapping:
+  - print beweegt mee met mesh;
+  - front/side/back logisch;
+  - geen canonical-flat paste;
+  - geen texture slipping bij camera-rotatie.
+
+## Fase 3 - Background Na Textured Beauty
+
+Pas starten als Fase 2 zichtbaar werkt.
+
+### Claude - Backend
+
+- [ ] Background call baseren op textured Beauty + scene manifest.
+- [ ] Background moet leeg zijn maar camera, horizon, grondvlak en belichting matchen.
+- [ ] Composite mag background iets aanpassen aan product, maar product niet hertekenen.
+
+### ChatGPT / Codex - UI
+
+- [ ] Final UI labelen als:
+  - Textured Beauty
+  - Background
+  - Composite
+- [ ] Vergelijker houden voor debug.
+- [ ] Waarschuwen als final render wordt gestart zonder textured Beauty.
+
+## Fase 4 - Acceptatie
+
+- [ ] Vaas met print draait in 3D en behoudt print/look.
+- [ ] Screenshot/Beauty vanuit top angle toont dezelfde top angle met print.
+- [ ] Screenshot/Beauty vanuit side angle toont side angle met passende texture.
+- [ ] Background generatie verandert product niet.
+- [ ] Composite behoudt product uit textured Beauty.
+- [ ] Oude prompt-only product-layer route is alleen fallback.
+
+## Belangrijke Regels
+
+- Basic Shape is voor geometrie en reconstructie, niet voor productlook.
+- Canonical/source refs zijn voor texture/look, niet voor positionering.
+- Studio camera is leidend voor compositie.
+- Textured mesh is de nieuwe kern. Pas daarna komt 2D AI polish.
+- Texture proof-assets blijven lokaal totdat de wrapping zichtbaar betrouwbaar is; pas daarna beslissen we of/hoe ze naar Supabase moeten voor delen/sync.

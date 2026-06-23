@@ -1,69 +1,93 @@
-# ChatGPT / Codex Agent - Basic Product + Polish UX
+# ChatGPT / Codex Agent - Textured Mesh UX
 
 Projectroot:
 `/Users/tom.zwarts/HupheAI/HupheShell`
 
-Actieve fix-sprint:
+Actieve sprint:
 `.agents/sprint-fix-3d-to-2d.md`
 
 ## Rol
 
-ChatGPT/Codex pakt renderer, Product Studio UX, state mapping, review-schermen en frontend-koppeling met Claude's IPC/API op.
+ChatGPT/Codex pakt de renderer, Product Studio UX, Scene3D viewport, state mapping, previews en debugschermen.
 
-Primair werkgebied:
+Hoofddoel:
+Zorgen dat de gebruiker kan zien, testen en vertrouwen dat het product echt als textured 3D object in de Studio staat.
+
+## Primair Werkgebied
 
 - `src/renderer/src/components/ProductStudioShell.tsx`
+- `src/renderer/src/components/Scene3DEditor.tsx`
+- `src/renderer/src/components/Scene3DViewport.tsx`
 - `src/renderer/src/lib/product-studio-types.ts`
-- `src/preload/index.ts` alleen als een nieuwe IPC-call aan de renderer zichtbaar moet worden
-- agentdocs en testnotities
+- `src/preload/index.ts` alleen wanneer nieuwe IPC zichtbaar moet worden
+- `.agents/` documentatie
 
-Niet doen:
+## Niet Doen
 
-- Geen Supabase migrations/RLS.
-- Geen providerkeys of server-side modelcalls in de renderer.
-- Geen final providerroute in de renderer bouwen.
+- Geen providerkeys in renderer.
+- Geen Supabase migrations.
+- Geen texture provider zelf in renderer bouwen.
+- Geen oude prompt-only product-layer route verder tunen als hoofdoplossing.
 
-## Nu Oppakken
+## Fase 1 - Texture UX Contract
 
-- [x] UI state uitbreiden met Basic Product asset uit `source_assets`.
-- [x] Input/review UI tonen: Bron versus Basic Product.
-- [x] Status toevoegen: `Basic shape ready`.
-- [x] Final review voorbereiden op `Scene` tussen Beauty en Final zodra backend dit exposeert.
-- [x] Scene preview uit `provider_runs.metadata.scene_url` tonen in Final.
-- [x] Final prompt copy aanpassen: scene pass gebruikt grijze vorm, polish pass gebruikt ref-look.
-- [x] Canonical view generation gebruikt weer de originele Bron/ref-look, niet Basic shape.
-- [x] Canonical view acties vervangen door kleine icon-only knoppen.
-- [x] UI dedupet canonical views per hoek en telt unieke bruikbare hoeken, nooit 5/4.
-- [x] TRELLIS-knoppen blokkeren tot Basic shape klaar is; geen source fallback meer voor mesh.
-- [x] Waarschuwing tonen als Basic Product ontbreekt: flow werkt dan minder betrouwbaar bij complexe prints.
-- [x] Build draaien en handmatige teststappen vastleggen.
+- [x] Product Studio state uitbreiden met texturevelden zodra Claude contract klaarzet:
+  - `textured_mesh_url`
+  - `texture_atlas_url`
+  - `material_manifest`
+  - `texture_status`
+- [x] UI-stap toevoegen na Mesh: `Texture product`.
+- [x] Statussen tonen:
+  - `Nog geen texture`
+  - `Texture wordt gemaakt`
+  - `Textured mesh klaar`
+  - `Texture mislukt`
+- [x] Knoppen toevoegen:
+  - `Texture product`
+  - `Opnieuw texturen`
+  - `Laad preview`
 
-## Wacht Op Claude
+## Fase 2 - Textured Mesh In Studio
 
-- [x] `source_assets.type = 'basic-product'` wordt aangemaakt door `normalize-input`.
-- [x] `get-latest-state` retourneert Basic Product asset.
-- [x] Backend exposeert Scene intermediate of final render metadata zodra scene + polish route klaar is.
-- [x] Claude/backend: retry-route gelijk getrokken met scene + polish route.
-- [x] Claude/backend: repo-migration toegevoegd voor `basic-product`, `inferred` en `provider_runs.metadata`.
+- [x] `Scene3DViewport` textured mesh laten laden wanneer beschikbaar.
+- [x] Duidelijke toggle/status tonen: `Grey shape` versus `Textured product`.
+- [x] `Update Preview` moet textured mesh gebruiken zodra die beschikbaar is.
+- [x] Beauty thumbnail gebruikt de actieve Studio mesh; zodra `textured_mesh_url` beschikbaar is wordt dit `Textured Beauty`.
+- [x] Lokale texture-assets kunnen laden via `huphe://file/...`:
+  - textured GLB;
+  - texture atlas PNG;
+  - manifest JSON.
+- [x] Debug UI tonen met welke asset actief is:
+  - grijze mesh URL;
+  - textured mesh URL;
+  - texture atlas URL;
+  - laatste renderpacket.
 
-## Acceptatie Voor ChatGPT/Codex
+## Fase 3 - Final UI Na Textured Beauty
 
-- [x] De gebruiker ziet duidelijk: Bron, Basic Product, Beauty, Scene/Final.
-- [x] De UI maakt duidelijk dat Basic Product voor mesh/vorm/positie is en Source voor views/materiaal/print.
-- [x] Final render copy zegt niet meer dat depth/normal als gewone multi-image input worden gebruikt.
-- [x] Oude `Multi-image route wacht op backend` tekst is vervangen door de nieuwe twee-laags uitleg.
+- [x] Final render blokkeren of waarschuwen als er geen textured Beauty is.
+- [x] Final preview labels aanpassen:
+  - `Textured Beauty`
+  - `Background`
+  - `Composite`
+- [x] Lightbox/thumbnail viewer blijven gebruiken voor alle lagen.
+- [ ] Vergelijker toevoegen voor `Textured Beauty` versus `Composite`.
 
 ## Validatie
 
+- [ ] Handmatige test: blauwe porseleinen vaas toont print in Studio.
+- [ ] Handmatige test: camera draaien laat print meedraaien.
+- [ ] Handmatige test: `Update Preview` maakt een Beauty met print in exact dezelfde hoek.
+- [ ] Handmatige test: fallback naar grijze mesh blijft werken als texture wrap faalt.
 - [x] `npm run build`
-- [x] `npm run build` opnieuw groen na retry/migration afronding.
 
-## Testnotities
+## Wacht Op Claude
 
-- Upload complexe productfoto.
-- Controleer dat `Product basis` Bron en Basic toont.
-- Zolang Claude Basic Product nog niet genereert, toont UI `Wacht op backend` en valt de flow terug op de bronfoto als shape input.
-- Zodra `source_assets.type = 'basic-product'` bestaat, gebruikt reconstructie die basic shape als input.
-- Canonical views moeten altijd vanuit de originele Bron/ref-look komen, zodat de achterkant/print/materialen geleerd worden.
-- Icon acties: refresh = opnieuw genereren/vervangen, x = afwijzen, vinkje = goedkeuren.
-- Eén hoek is één slot. Gebruik refresh op de kaart om die hoek te vervangen.
+- [x] IPC-contract voor texture generation.
+- [x] Statevelden voor textured assets.
+- [x] Eerste textured mesh output route.
+
+## Wacht Op Gemini
+
+- [x] Provider/pipeline advies voor eerste wrapping proof.
+- [x] Acceptatiecriteria voor texture slipping en view fidelity.

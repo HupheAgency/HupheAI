@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { Component, Suspense, useEffect, useRef, type ReactNode } from 'react'
 import * as THREE from 'three'
 import { Clone, useGLTF } from '@react-three/drei'
 import type { Mesh, Group } from 'three'
@@ -73,6 +73,42 @@ function GltfModel({ url }: { url: string }) {
   return <Clone object={gltf.scene} />
 }
 
+class GltfErrorBoundary extends Component<
+  { children: ReactNode; fallback?: ReactNode; resetKey: string },
+  { hasError: boolean }
+> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error('[GltfModel] failed to load model', error)
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false })
+    }
+  }
+
+  render() {
+    return this.state.hasError ? this.props.fallback ?? null : this.props.children
+  }
+}
+
+function GltfFallback({ color, viewMode }: { color: string; viewMode: ViewMode }) {
+  return (
+    <mesh>
+      <boxGeometry args={[0.8, 0.8, 0.8]} />
+      {viewMode === 'wireframe'
+        ? <meshBasicMaterial color={color} wireframe />
+        : <meshStandardMaterial color={color} roughness={0.8} />}
+    </mesh>
+  )
+}
+
 export default function SceneObject({
   obj,
   selected,
@@ -118,7 +154,11 @@ export default function SceneObject({
         onClick={(e) => { e.stopPropagation(); onClick() }}
       >
         <group position={pivot}>
-          <GltfModel url={obj.gltfUrl} />
+          <GltfErrorBoundary resetKey={obj.gltfUrl} fallback={<GltfFallback color={obj.material.color} viewMode={viewMode} />}>
+            <Suspense fallback={<GltfFallback color={obj.material.color} viewMode={viewMode} />}>
+              <GltfModel key={obj.gltfUrl} url={obj.gltfUrl} />
+            </Suspense>
+          </GltfErrorBoundary>
         </group>
       </group>
     )

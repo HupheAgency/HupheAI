@@ -12,10 +12,52 @@ export interface RenderPasses {
   normal: string
 }
 
+export interface Scene3DRenderManifest {
+  version: 1
+  capturedAt: string
+  viewport: {
+    width: number
+    height: number
+    aspect: number
+  }
+  camera: {
+    position: [number, number, number]
+    target: [number, number, number]
+    fov: number
+    near: number
+    far: number
+    projectionMatrix: number[]
+    viewMatrix: number[]
+  }
+  product: {
+    objectId?: string
+    name?: string
+    type?: string
+    position?: [number, number, number]
+    rotation?: [number, number, number]
+    scale?: [number, number, number]
+    pivot?: [number, number, number]
+    screenBbox?: { x: number; y: number; width: number; height: number }
+    worldBounds?: { min: [number, number, number]; max: [number, number, number] }
+  }
+  groundPlane: {
+    y: number
+    origin: [number, number, number]
+    normal: [number, number, number]
+    screenLine?: { x1: number; y1: number; x2: number; y2: number }
+  }
+  scene: {
+    environment: string | null
+    background: Scene3DBackground
+    resolution: [number, number]
+  }
+}
+
 export interface Scene3DViewportHandle {
   captureScreenshot: () => string | null
   captureCleanScreenshot: () => string | null
   captureAllPasses: () => RenderPasses | null
+  captureRenderManifest: () => Scene3DRenderManifest | null
 }
 
 const EDITOR_ONLY_USER_DATA = { __editorOnly: true, __helper: true }
@@ -437,6 +479,122 @@ function RenderPassCapture({ passRef }: { passRef: React.MutableRefObject<(() =>
   return null
 }
 
+function projectWorldPoint(point: THREE.Vector3, camera: THREE.Camera, width: number, height: number) {
+  const projected = point.clone().project(camera)
+  return {
+    x: ((projected.x + 1) / 2) * width,
+    y: ((1 - projected.y) / 2) * height,
+  }
+}
+
+function SceneManifestCapture({
+  manifestRef,
+  sceneState,
+  orbitStateRef,
+}: {
+  manifestRef: React.MutableRefObject<(() => Scene3DRenderManifest | null) | null>
+  sceneState: Scene3DState
+  orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
+}) {
+  const { gl, scene, camera } = useThree()
+
+  useEffect(() => {
+    manifestRef.current = () => {
+      const width = gl.domElement.width || gl.domElement.clientWidth || sceneState.resolution[0]
+      const height = gl.domElement.height || gl.domElement.clientHeight || sceneState.resolution[1]
+      const productObject = sceneState.objects.find((object) => object.type === 'gltf') ?? sceneState.objects[0]
+      const productIndex = productObject ? sceneState.objects.indexOf(productObject) : -1
+      const sceneObjects = scene.children.find((child) => child.type === 'Group' && child.userData.__sceneObjects)
+      const productThreeObject = productIndex >= 0 ? sceneObjects?.children[productIndex] : undefined
+      const target = orbitStateRef.current?.target
+        ?? sceneState.cameras.find((sceneCamera) => sceneCamera.id === sceneState.activeCameraId)?.target
+        ?? sceneState.cameras[0]?.target
+        ?? [0, 0.5, 0]
+
+      let screenBbox: Scene3DRenderManifest['product']['screenBbox']
+      let worldBounds: Scene3DRenderManifest['product']['worldBounds']
+      if (productThreeObject) {
+        const box = new THREE.Box3().setFromObject(productThreeObject)
+        if (!box.isEmpty()) {
+          const min = box.min
+          const max = box.max
+          const corners = [
+            new THREE.Vector3(min.x, min.y, min.z),
+            new THREE.Vector3(min.x, min.y, max.z),
+            new THREE.Vector3(min.x, max.y, min.z),
+            new THREE.Vector3(min.x, max.y, max.z),
+            new THREE.Vector3(max.x, min.y, min.z),
+            new THREE.Vector3(max.x, min.y, max.z),
+            new THREE.Vector3(max.x, max.y, min.z),
+            new THREE.Vector3(max.x, max.y, max.z),
+          ].map((point) => projectWorldPoint(point, camera, width, height))
+          const xs = corners.map((point) => point.x)
+          const ys = corners.map((point) => point.y)
+          const x = Math.max(0, Math.min(...xs))
+          const y = Math.max(0, Math.min(...ys))
+          screenBbox = {
+            x,
+            y,
+            width: Math.min(width, Math.max(...xs)) - x,
+            height: Math.min(height, Math.max(...ys)) - y,
+          }
+          worldBounds = {
+            min: min.toArray() as [number, number, number],
+            max: max.toArray() as [number, number, number],
+          }
+        }
+      }
+
+      const groundLeft = projectWorldPoint(new THREE.Vector3(-10, 0, 0), camera, width, height)
+      const groundRight = projectWorldPoint(new THREE.Vector3(10, 0, 0), camera, width, height)
+
+      return {
+        version: 1,
+        capturedAt: new Date().toISOString(),
+        viewport: {
+          width,
+          height,
+          aspect: width / Math.max(height, 1),
+        },
+        camera: {
+          position: camera.position.toArray() as [number, number, number],
+          target,
+          fov: 'fov' in camera ? (camera as THREE.PerspectiveCamera).fov : sceneState.cameras[0]?.fov ?? 50,
+          near: camera.near,
+          far: camera.far,
+          projectionMatrix: camera.projectionMatrix.toArray(),
+          viewMatrix: camera.matrixWorldInverse.toArray(),
+        },
+        product: {
+          objectId: productObject?.id,
+          name: productObject?.name,
+          type: productObject?.type,
+          position: productObject?.position,
+          rotation: productObject?.rotation,
+          scale: productObject?.scale,
+          pivot: productObject?.pivot,
+          screenBbox,
+          worldBounds,
+        },
+        groundPlane: {
+          y: 0,
+          origin: [0, 0, 0],
+          normal: [0, 1, 0],
+          screenLine: { x1: groundLeft.x, y1: groundLeft.y, x2: groundRight.x, y2: groundRight.y },
+        },
+        scene: {
+          environment: sceneState.environment,
+          background: sceneState.background,
+          resolution: sceneState.resolution,
+        },
+      }
+    }
+    return () => { manifestRef.current = null }
+  }, [camera, gl, manifestRef, orbitStateRef, scene, sceneState])
+
+  return null
+}
+
 function SceneContent({
   scene,
   selectedObjectId,
@@ -602,6 +760,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<(() => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<(() => string | null) | null>(null)
+  const manifestRef = useRef<(() => Scene3DRenderManifest | null) | null>(null)
 
   useImperativeHandle(ref, () => ({
     captureScreenshot() {
@@ -613,6 +772,9 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     },
     captureAllPasses() {
       return passRef.current?.() ?? null
+    },
+    captureRenderManifest() {
+      return manifestRef.current?.() ?? null
     },
   }))
 
@@ -630,6 +792,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
       >
         <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
         <RenderPassCapture passRef={passRef} />
+        <SceneManifestCapture manifestRef={manifestRef} sceneState={scene} orbitStateRef={orbitStateRef} />
         <SceneContent
           scene={scene}
           selectedObjectId={selectedObjectId}

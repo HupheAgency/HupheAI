@@ -240,7 +240,7 @@ contextBridge.exposeInMainWorld('api', {
     updateReconstructionStatus: (id: string, status: string) => ipcRenderer.invoke('product-studio:update-reconstruction-status', id, status),
     saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) =>
       ipcRenderer.invoke('product-studio:save-scene', args),
-    createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string }) =>
+    createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; sceneManifest?: Record<string, unknown> }) =>
       ipcRenderer.invoke('product-studio:create-render-packet', args),
     listFinalRenders: (projectId: string) => ipcRenderer.invoke('product-studio:list-final-renders', projectId),
     updateFinalRenderStatus: (id: string, status: string) => ipcRenderer.invoke('product-studio:update-final-render-status', id, status),
@@ -257,6 +257,12 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:generate-reference-views', args),
     startReconstruction: (args: { projectId: string; canonicalReferenceSetId: string; primaryImageUrl: string; route?: 'single-view' | 'multi-view' | 'primitive-proxy'; seed?: number }) =>
       ipcRenderer.invoke('product-studio:start-reconstruction', args),
+    createTexturedMesh: (args: { projectId: string; reconstructionVersionId: string; sourceViewIds?: string[] }) =>
+      ipcRenderer.invoke('product-studio:create-textured-mesh', args),
+    getTextureStatus: (reconstructionVersionId: string) =>
+      ipcRenderer.invoke('product-studio:get-texture-status', reconstructionVersionId),
+    retryTextureWrap: (reconstructionVersionId: string) =>
+      ipcRenderer.invoke('product-studio:retry-texture-wrap', reconstructionVersionId),
     registerSourceAsReference: (args: { projectId: string; sourceAssetId: string; angle?: 'hero' | 'front' }) =>
       ipcRenderer.invoke('product-studio:register-source-as-reference', args),
     getLatestState: (projectId: string) =>

@@ -42,6 +42,8 @@ export type ReconstructionRoute = 'single-view' | 'multi-view' | 'primitive-prox
 
 export type ReconstructionStatus = 'processing' | 'review' | 'approved' | 'rejected' | 'failed'
 
+export type TextureStatus = 'none' | 'pending' | 'processing' | 'completed' | 'failed'
+
 export type ProviderType = 'reference-view' | 'reconstruction' | 'final-render' | 'analysis'
 
 export type JobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled'
@@ -117,6 +119,12 @@ export interface ReconstructionVersion {
   provider_run_id?: string
   route: ReconstructionRoute
   mesh_url?: string
+  textured_mesh_url?: string | null
+  texture_atlas_url?: string | null
+  material_manifest?: Record<string, unknown> | null
+  texture_source_view_ids?: string[] | null
+  texture_status?: TextureStatus
+  texture_error?: string | null
   preview_url?: string
   pbr_asset_urls?: Record<string, string>
   status: ReconstructionStatus
@@ -149,6 +157,7 @@ export interface RenderPacket {
   object_mask_url?: string
   depth_url?: string
   normal_url?: string
+  scene_manifest?: Record<string, unknown>
   auxiliary_asset_urls?: Record<string, string>
   metadata_url?: string
   created_at: string
@@ -189,6 +198,11 @@ export interface FinalRenderVersion {
   parent_version_id?: string
   metadata?: Record<string, unknown>
   scene_url?: string | null
+  background_plate_url?: string | null
+  product_layer_url?: string | null
+  shadow_layer_url?: string | null
+  composite_url?: string | null
+  layer_metadata?: Record<string, unknown>
   created_at: string
   approved_at?: string
 }

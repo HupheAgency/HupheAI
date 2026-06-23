@@ -110,9 +110,12 @@ type ProductStudioApi = {
   listReconstructions: (projectId: string) => Promise<any>
   startReconstruction: (args: { projectId: string; canonicalReferenceSetId: string; primaryImageUrl: string; route?: 'single-view' | 'multi-view' | 'primitive-proxy'; seed?: number }) => Promise<any>
   updateReconstructionStatus: (id: string, status: string) => Promise<any>
+  createTexturedMesh: (args: { projectId: string; reconstructionVersionId: string; sourceViewIds?: string[] }) => Promise<any>
+  getTextureStatus: (reconstructionVersionId: string) => Promise<any>
+  retryTextureWrap: (reconstructionVersionId: string) => Promise<any>
   saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) => Promise<any>
   uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask'; dataUrl: string }) => Promise<any>
-  createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string }) => Promise<any>
+  createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; sceneManifest?: Record<string, unknown> }) => Promise<any>
   listFinalRenders: (projectId: string) => Promise<any>
   updateFinalRenderStatus: (id: string, status: string) => Promise<any>
   generateFinalRender: (args: { projectId: string; renderPacketId: string; prompt: string; preservationPolicy?: 'strict' | 'balanced' | 'creative'; resolution?: '0.5K' | '1K' | '2K' | '4K' }) => Promise<any>
@@ -318,6 +321,88 @@ function InputStatusPill({ label, ready }: { label: string; ready: boolean }) {
   )
 }
 
+function ManifestStatusPill({ label, ready }: { label: string; ready: boolean }) {
+  return (
+    <div className={[
+      'flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-[10px]',
+      ready ? 'border-[#facc15]/20 bg-[#facc15]/8 text-[#facc15]' : 'border-white/[0.06] bg-black/20 text-white/30',
+    ].join(' ')}>
+      <span className="truncate">{label}</span>
+      <span className={['h-1.5 w-1.5 flex-shrink-0 rounded-full', ready ? 'bg-[#facc15]' : 'bg-white/18'].join(' ')} />
+    </div>
+  )
+}
+
+function ImageLightbox({
+  image,
+  currentIndex,
+  total,
+  onClose,
+  onPrev,
+  onNext,
+}: {
+  image: { label: string; src: string }
+  currentIndex: number
+  total: number
+  onClose: () => void
+  onPrev: () => void
+  onNext: () => void
+}) {
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+      if (event.key === 'ArrowLeft') onPrev()
+      if (event.key === 'ArrowRight') onNext()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onClose, onNext, onPrev])
+
+  return (
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/88 p-4" role="dialog" aria-modal="true" aria-label={image.label} onClick={onClose}>
+      <div className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-white/[0.12] bg-[#101010] shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3 border-b border-white/[0.08] px-4 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-white/80">{image.label}</p>
+            <p className="mt-0.5 text-[10px] text-white/34">{currentIndex + 1}/{total}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-white/[0.1] text-white/58 transition-colors hover:bg-white/[0.06] hover:text-white"
+            aria-label="Sluiten"
+          >
+            <XIcon />
+          </button>
+        </div>
+        <div className="relative min-h-0 flex-1 bg-black/55 p-4">
+          {total > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={onPrev}
+                className="absolute left-4 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/[0.12] bg-black/60 text-xl text-white/70 transition-colors hover:bg-white/[0.08] hover:text-white"
+                aria-label="Vorige afbeelding"
+              >
+                ‹
+              </button>
+              <button
+                type="button"
+                onClick={onNext}
+                className="absolute right-4 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/[0.12] bg-black/60 text-xl text-white/70 transition-colors hover:bg-white/[0.08] hover:text-white"
+                aria-label="Volgende afbeelding"
+              >
+                ›
+              </button>
+            </>
+          )}
+          <img src={image.src} alt={image.label} className="mx-auto max-h-[78vh] max-w-full object-contain" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function IconButton({ label, onClick, tone = 'neutral', children }: { label: string; onClick: () => void; tone?: 'neutral' | 'approve' | 'reject'; children: ReactNode }) {
   const toneClass = tone === 'approve'
     ? 'border-[#facc15]/25 text-[#facc15] hover:bg-[#facc15]/10'
@@ -422,6 +507,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [finalRenderVersions, setFinalRenderVersions] = useState<FinalRenderVersion[]>([])
   const [compareSlider, setCompareSlider] = useState(50)
   const [renderPacketStale, setRenderPacketStale] = useState(false)
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
 
   const sourceReady = Boolean(project.sourceImage?.src)
   const basicProductUrl = project.basicProductAsset?.url
@@ -434,8 +520,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     .map((view) => view.angle ?? view.id))
   const approvedCount = Math.min(4, usableReferenceAngles.size)
   const meshReady = Boolean(project.reconstruction?.mesh_url || project.reconstruction?.route === 'primitive-proxy')
+  const textureStatus = project.reconstruction?.texture_status ?? 'none'
+  const texturedMeshUrl = project.reconstruction?.textured_mesh_url ?? undefined
+  const textureAtlasUrl = project.reconstruction?.texture_atlas_url ?? undefined
+  const textureOutputMissing = textureStatus === 'completed' && !texturedMeshUrl
+  const texturedMeshReady = Boolean(texturedMeshUrl && textureStatus === 'completed')
+  const activeStudioMeshUrl = texturedMeshUrl ?? project.reconstruction?.mesh_url
+  const textureInProgress = textureStatus === 'pending' || textureStatus === 'processing'
   const renderPacketReady = Boolean(project.renderPacketRecord || project.renderPacket)
-  const finalRenderBlocked = !renderPacketReady || renderPacketStale
+  const finalRenderRequiresTexture = meshReady && !texturedMeshReady
+  const finalRenderBlocked = !renderPacketReady || renderPacketStale || finalRenderRequiresTexture
   const objectMaskUrl = project.objectMaskUrl ?? project.objectMaskAsset?.url ?? project.renderPacketRecord?.object_mask_url
   const canonicalReference = project.references.find((view) => view.status === 'user-approved' || view.status === 'observed' || view.status === 'user-edited')
   const beautyPreviewUrl = project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured ?? project.renderPacketRecord?.beauty_url
@@ -443,6 +537,53 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const normalPreviewUrl = project.renderPacket?.passes?.normal ?? project.renderPacketRecord?.normal_url
   const scenePreviewUrl = project.finalRenderRecord?.scene_url
     ?? (project.finalRenderRecord?.metadata?.scene_url as string | undefined)
+  const finalMetadata = project.finalRenderRecord?.metadata ?? {}
+  const backgroundPlateUrl = project.finalRenderRecord?.background_plate_url ?? (finalMetadata.background_plate_url as string | undefined)
+  const productLayerUrl = project.finalRenderRecord?.product_layer_url ?? (finalMetadata.product_layer_url as string | undefined)
+  const shadowLayerUrl = project.finalRenderRecord?.shadow_layer_url ?? (finalMetadata.shadow_layer_url as string | undefined)
+  const finalCompositeUrl = project.finalRenderRecord?.composite_url
+    ?? (finalMetadata.composite_url as string | undefined)
+    ?? (finalMetadata.final_composite_url as string | undefined)
+    ?? project.finalRenderRecord?.output_url
+  const beautyLayerLabel = texturedMeshReady ? 'Textured Beauty' : 'Beauty'
+  const finalLayerPreviews: Array<[string, string | null | undefined]> = [
+    ['Bron / ref-look', project.sourceImage?.src],
+    ['Basic', basicProductUrl],
+    ['Canonical', canonicalReference?.src],
+    [beautyLayerLabel, beautyPreviewUrl],
+    ['Product layer', productLayerUrl],
+    ...(scenePreviewUrl ? [['Scene', scenePreviewUrl] as [string, string | null | undefined]] : []),
+    ['Background', backgroundPlateUrl],
+    ...(shadowLayerUrl ? [['Shadow', shadowLayerUrl] as [string, string | null | undefined]] : []),
+    ['Composite', finalCompositeUrl ?? project.finalRender?.src],
+  ]
+  const availableLightboxPreviews = finalLayerPreviews
+    .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
+  const lightboxImage = lightboxIndex === null ? null : availableLightboxPreviews[lightboxIndex] ?? null
+  const openLightbox = (label: string, src: string) => {
+    const index = availableLightboxPreviews.findIndex(([itemLabel, itemSrc]) => itemLabel === label && itemSrc === src)
+    if (index >= 0) setLightboxIndex(index)
+  }
+  const showPreviousLightboxImage = () => {
+    setLightboxIndex((current) => {
+      if (current === null || availableLightboxPreviews.length === 0) return current
+      return (current - 1 + availableLightboxPreviews.length) % availableLightboxPreviews.length
+    })
+  }
+  const showNextLightboxImage = () => {
+    setLightboxIndex((current) => {
+      if (current === null || availableLightboxPreviews.length === 0) return current
+      return (current + 1) % availableLightboxPreviews.length
+    })
+  }
+  const renderManifest = project.renderPacket?.manifest ?? project.renderPacketRecord?.scene_manifest
+  const manifestStatus = [
+    { label: 'Camera', ready: Boolean(renderManifest?.camera?.position?.length && renderManifest?.camera?.target?.length) },
+    { label: 'Ground', ready: Boolean(renderManifest?.groundPlane?.screenLine) },
+    { label: 'Product bbox', ready: Boolean(renderManifest?.product?.screenBbox) },
+    { label: 'Depth', ready: Boolean(depthPreviewUrl) },
+    { label: 'Mask', ready: Boolean(objectMaskUrl) },
+  ]
   const lockedCameraInputs = [
     { label: 'Beauty camera', ready: Boolean(beautyPreviewUrl) },
     { label: 'Depth', ready: Boolean(depthPreviewUrl) },
@@ -450,9 +591,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     { label: 'Mask', ready: Boolean(objectMaskUrl) },
     { label: 'Source', ready: Boolean(project.sourceImage?.src) },
     { label: 'Basic shape', ready: basicShapeReady },
+    { label: 'Textured mesh', ready: texturedMeshReady },
     { label: 'Canonical', ready: Boolean(canonicalReference?.src) },
   ]
-  const lockedCameraReady = Boolean(beautyPreviewUrl && depthPreviewUrl && normalPreviewUrl && project.sourceImage?.src && canonicalReference?.src && !renderPacketStale)
+  const lockedCameraReady = Boolean(beautyPreviewUrl && depthPreviewUrl && normalPreviewUrl && renderManifest?.camera && renderManifest?.groundPlane && project.sourceImage?.src && canonicalReference?.src && !renderPacketStale)
   const activeRuns = providerStats?.runs.filter((run) => run.status === 'queued' || run.status === 'processing') ?? []
   const failedRuns = providerStats?.runs.filter((run) => run.status === 'failed') ?? []
   const approvedAngles = usableReferenceAngles
@@ -514,9 +656,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }, [project.backendProject?.id, project.id])
 
   useEffect(() => {
-    if (!project.reconstruction?.mesh_url) return
-    studioRef.current?.addModelFromUrl(project.reconstruction.mesh_url, 'Reconstructed product')
-  }, [project.reconstruction?.mesh_url])
+    if (!activeStudioMeshUrl) return
+    studioRef.current?.addModelFromUrl(activeStudioMeshUrl, texturedMeshReady ? 'Textured product' : 'Reconstructed product')
+    if (texturedMeshReady) setRenderPacketStale(true)
+  }, [activeStudioMeshUrl, texturedMeshReady])
 
   useEffect(() => {
     const projectId = getStoredProjectId(project)
@@ -535,6 +678,32 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }, 5000)
     return () => window.clearInterval(timer)
   }, [activeRuns.length, project.backendProject?.id, project.id])
+
+  useEffect(() => {
+    if (!textureInProgress || !project.reconstruction?.id) return
+    const reconstructionId = project.reconstruction.id
+    const api = getProductStudioApi()
+    if (!api) return
+    const timer = window.setInterval(() => {
+      api.getTextureStatus(reconstructionId)
+        .then((result) => {
+          if (!result?.ok || !result.texture) return
+          const texture = result.texture as Partial<ReconstructionVersion>
+          setProject((prev) => ({
+            ...prev,
+            reconstruction: prev.reconstruction?.id === reconstructionId
+              ? { ...prev.reconstruction, ...texture }
+              : prev.reconstruction,
+          }))
+          if (texture.texture_status === 'completed' || texture.texture_status === 'failed') {
+            const projectId = getStoredProjectId(project)
+            if (projectId) void hydrateLatestState(projectId, false)
+          }
+        })
+        .catch(() => null)
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [textureInProgress, project.reconstruction?.id, project.backendProject?.id, project.id])
 
   async function hydrateLatestState(projectId = getStoredProjectId(project), showBusy = true) {
     if (!projectId) return
@@ -984,6 +1153,47 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
   }
 
+  async function startTextureWrap(forceRetry = false) {
+    const projectId = getStoredProjectId(project)
+    const reconstructionId = project.reconstruction?.id
+    if (!projectId || !reconstructionId) {
+      setError('Maak eerst een mesh voordat je product texture maakt.')
+      return
+    }
+    const api = getProductStudioApi()
+    if (!api) {
+      setError('Product Studio API is nog niet beschikbaar.')
+      return
+    }
+    const sourceViewIds = project.canonicalSet?.view_ids?.length
+      ? project.canonicalSet.view_ids
+      : approvedBackendViewIds
+    setBusy(forceRetry ? 'Texture opnieuw starten...' : 'Product texture voorbereiden...')
+    setError(null)
+    try {
+      const result = forceRetry
+        ? await api.retryTextureWrap(reconstructionId)
+        : await api.createTexturedMesh({ projectId, reconstructionVersionId: reconstructionId, sourceViewIds })
+      if (!result?.ok) throw new Error(result?.error || 'Texture wrapping starten mislukt.')
+      setProject((prev) => ({
+        ...prev,
+        reconstruction: prev.reconstruction
+          ? {
+              ...prev.reconstruction,
+              texture_status: 'pending',
+              texture_error: null,
+              texture_source_view_ids: sourceViewIds,
+            }
+          : prev.reconstruction,
+      }))
+      await hydrateLatestState(projectId, false)
+    } catch (err: any) {
+      setError(err?.message || 'Texture wrapping starten mislukt.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   function resetProject() {
     setProject(createProject())
     setRenderPacketStale(false)
@@ -1027,7 +1237,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           lights: scenePayload.lights,
           productTransform: scenePayload.productTransform,
           environment: scenePayload.environment,
-          output: scenePayload.output,
+          output: {
+            ...scenePayload.output,
+            sceneManifest: packet.manifest,
+          },
         }),
         'scene',
       )
@@ -1042,6 +1255,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           objectMaskUrl,
           depthUrl: depthUpload?.url,
           normalUrl: normalUpload?.url,
+          sceneManifest: packet.manifest ?? undefined,
         }),
         'packet',
       )
@@ -1068,6 +1282,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   async function handleFinalPrompt(prompt: string) {
     if (renderPacketStale) {
       setFinalError('De studio preview is verouderd. Klik eerst op Update preview zodat de huidige camera en productpositie worden gebruikt.')
+      return
+    }
+    if (meshReady && !texturedMeshReady) {
+      setFinalError('Maak eerst een textured mesh en klik daarna op Update preview. Deze sprint test route 2: de Beauty moet al print en materiaal uit 3D bevatten.')
       return
     }
     const beauty = project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured
@@ -1260,6 +1478,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           <StepPill label="Input" active={project.activeStep === 'input'} done={sourceReady} />
           <StepPill label="Views" active={project.activeStep === 'references'} done={approvedCount >= 2 || Boolean(project.canonicalSet)} />
           <StepPill label="Mesh" active={project.activeStep === 'mesh'} done={meshReady} />
+          <StepPill label="Texture" active={meshReady && !texturedMeshReady && project.activeStep !== 'input' && project.activeStep !== 'references'} done={texturedMeshReady} />
           <StepPill label="Studio" active={project.activeStep === 'studio'} done={renderPacketReady} />
           <StepPill label="Final" active={project.activeStep === 'final'} done={Boolean(project.finalRender?.src || project.finalRenderRecord?.output_url)} />
         </div>
@@ -1477,6 +1696,95 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           </section>
 
           <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Texture product</p>
+                <p className="mt-1 text-xs text-white/36">
+                  {texturedMeshReady
+                    ? 'Textured mesh klaar. Studio gebruikt nu het product met print/look als 3D bron.'
+                    : textureInProgress
+                      ? 'Texture wrap staat klaar voor de provider. Zodra de backend output levert, laadt de Studio automatisch de textured mesh.'
+                      : textureStatus === 'failed' || textureOutputMissing
+                        ? 'Texture wrapping is mislukt. De grijze mesh blijft bruikbaar als fallback.'
+                        : meshReady
+                          ? 'Volgende stap: projecteer de bron/canonical productlook op de mesh.'
+                          : 'Maak eerst een mesh voordat texture wrapping mogelijk is.'}
+                </p>
+              </div>
+              <span className={[
+                'rounded-full border px-2 py-1 text-[10px]',
+                texturedMeshReady
+                  ? 'border-green-400/20 bg-green-500/8 text-green-300'
+                  : textureStatus === 'failed' || textureOutputMissing
+                    ? 'border-red-400/20 bg-red-500/8 text-red-200'
+                    : textureInProgress
+                      ? 'border-[#facc15]/20 bg-[#facc15]/8 text-[#facc15]'
+                      : 'border-white/[0.08] text-white/38',
+              ].join(' ')}>
+                {textureOutputMissing ? 'mesh ontbreekt' : textureStatus === 'none' ? 'geen texture' : textureStatus}
+              </span>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="rounded-md border border-white/[0.06] bg-black/20 p-2">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-white/34">Grey shape</p>
+                <p className="mt-1 truncate text-[11px] text-white/42">{project.reconstruction?.mesh_url || 'Nog geen GLB'}</p>
+              </div>
+              <div className="rounded-md border border-white/[0.06] bg-black/20 p-2">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-white/34">Textured mesh</p>
+                <p className="mt-1 truncate text-[11px] text-white/42">{texturedMeshUrl || 'Nog niet beschikbaar'}</p>
+              </div>
+            </div>
+            {textureAtlasUrl && (
+              <div className="mt-3 overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
+                <div className="aspect-[2/1]">
+                  <img src={textureAtlasUrl} alt="Texture atlas" className="h-full w-full object-contain" />
+                </div>
+                <p className="px-2 py-1 text-[10px] text-white/38">Texture atlas</p>
+              </div>
+            )}
+            {project.reconstruction?.texture_error && (
+              <p className="mt-3 rounded-md border border-red-400/20 bg-red-500/8 px-2 py-1.5 text-[10px] text-red-200">
+                {project.reconstruction.texture_error}
+              </p>
+            )}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void startTextureWrap(false)}
+                disabled={!meshReady || textureInProgress || Boolean(busy)}
+                className="rounded-full border border-[#facc15]/25 px-3 py-1.5 text-xs font-medium text-[#facc15] hover:bg-[#facc15]/10 disabled:border-white/[0.05] disabled:text-white/24"
+              >
+                Texture product
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!texturedMeshUrl) return
+                  studioRef.current?.addModelFromUrl(texturedMeshUrl, 'Textured product')
+                  setRenderPacketStale(true)
+                }}
+                disabled={!texturedMeshUrl}
+                className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+              >
+                Laad preview
+              </button>
+              <button
+                type="button"
+                onClick={() => void startTextureWrap(true)}
+                disabled={textureStatus !== 'failed' || Boolean(busy)}
+                className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+              >
+                Opnieuw texturen
+              </button>
+            </div>
+            {!texturedMeshReady && meshReady && (
+              <p className="mt-3 rounded-md border border-[#facc15]/15 bg-[#facc15]/8 px-2 py-1.5 text-[10px] text-[#facc15]">
+                Final is voor deze sprint geblokkeerd tot Beauty uit een textured mesh komt. Zo testen we eerst echt of wrapping werkt.
+              </p>
+            )}
+          </section>
+
+          <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold text-white/70">Render packet</p>
@@ -1527,7 +1835,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                     {renderPacketStale ? 'Locked Camera verlopen' : lockedCameraReady ? 'Locked Camera klaar' : 'Locked Camera voorbereiding'}
                   </p>
                   <p className="mt-1 text-[11px] leading-relaxed text-white/38">
-                    Beauty is de fotografiecamera. Basic shape bepaalt de grijze vorm; source/canonical sturen straks alleen de polish-laag voor print en materiaal.
+                    Beauty is de fotografiecamera. Met route 2 moet deze Beauty uit de textured mesh komen, zodat print, materiaal en hoek al in 3D kloppen.
                   </p>
                 </div>
                 <span className="rounded-full border border-white/[0.08] px-2 py-1 text-[10px] text-white/38">
@@ -1539,11 +1847,31 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   <InputStatusPill key={input.label} label={input.label} ready={input.ready} />
                 ))}
               </div>
+              <div className="mt-3 border-t border-white/[0.06] pt-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-white/34">Scene manifest</p>
+                  {renderManifest?.capturedAt && (
+                    <span className="text-[10px] text-white/28">
+                      {new Date(renderManifest.capturedAt).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  {manifestStatus.map((item) => (
+                    <ManifestStatusPill key={item.label} label={item.label} ready={item.ready} />
+                  ))}
+                </div>
+                {renderManifest?.product?.screenBbox && (
+                  <p className="mt-2 text-[10px] text-white/30">
+                    Product bbox {Math.round(renderManifest.product.screenBbox.width)}x{Math.round(renderManifest.product.screenBbox.height)}px · camera bepaalt compositie en horizon.
+                  </p>
+                )}
+              </div>
             </div>
             {(beautyPreviewUrl || depthPreviewUrl || normalPreviewUrl || objectMaskUrl) && (
               <div className="mt-3 grid grid-cols-4 gap-2">
                 {[
-                  ['Beauty', beautyPreviewUrl],
+                  [beautyLayerLabel, beautyPreviewUrl],
                   ['Depth', depthPreviewUrl],
                   ['Normals', normalPreviewUrl],
                   ['Mask', objectMaskUrl],
@@ -1592,7 +1920,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               ))}
             </div>
             <p className="mt-2 rounded-md border border-white/[0.06] bg-black/20 px-3 py-2 text-[11px] leading-relaxed text-white/42">
-              {POLICY_HINTS[project.preservationPolicy]} De nieuwe flow werkt in twee lagen: eerst een scene met grijze vorm, daarna een polish-laag met de ref-look.
+              {POLICY_HINTS[project.preservationPolicy]} Route 2 gebruikt eerst een textured 3D product. Daarna pas maken we background en composite.
             </p>
             <div className={[
               'mt-3 rounded-md border px-3 py-2',
@@ -1606,13 +1934,18 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   Locked Camera {lockedCameraReady ? 'ready' : renderPacketStale ? 'verlopen' : 'nog niet compleet'}
                 </p>
                 <span className="rounded-full border border-white/[0.08] px-2 py-1 text-[10px] text-white/36">
-                  Basic + polish route
+                  Textured mesh route
                 </span>
               </div>
               <p className="mt-1 text-[11px] leading-relaxed text-white/38">
-                Testregel: Scene moet dezelfde camera, crop, schaal en productpositie volgen als Beauty. Final mag daarna alleen het gemaskeerde product naar de source/ref-look polijsten.
+                Testregel: Beauty moet al het echte product bevatten vanuit de textured mesh. Final mag daarna productpositie en productlook niet opnieuw verzinnen.
               </p>
             </div>
+            {finalRenderRequiresTexture && (
+              <p className="mt-3 rounded-md border border-[#facc15]/15 bg-[#facc15]/8 px-3 py-2 text-[11px] text-[#facc15]">
+                Wacht met Final render tot `Texture product` klaar is en je daarna `Update preview` hebt geklikt.
+              </p>
+            )}
             <div className="mt-3">
               <AtelierPromptBar
                 placeholder="Beschrijf de commercial productfoto..."
@@ -1628,20 +1961,19 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             {finalError && <p className="mt-2 text-xs text-red-300">{finalError}</p>}
             {(project.sourceImage?.src || beautyPreviewUrl || project.finalRender?.src) && (
               <div className="mt-3 grid grid-cols-2 gap-2">
-                {([
-                  ['Bron / ref-look', project.sourceImage?.src],
-                  ['Basic', basicProductUrl],
-                  ['Canonical', canonicalReference?.src],
-                  ['Beauty', beautyPreviewUrl],
-                  ['Scene', scenePreviewUrl],
-                  ['Final', project.finalRender?.src],
-                ] as Array<[string, string | null | undefined]>).map(([label, src]) => (
-                  <div key={label} className="overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
+                {finalLayerPreviews.map(([label, src]) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => { if (src) openLightbox(label, src) }}
+                    disabled={!src}
+                    className="overflow-hidden rounded-md border border-white/[0.06] bg-black/30 text-left transition-colors hover:border-white/[0.18] hover:bg-white/[0.04] disabled:cursor-default disabled:hover:border-white/[0.06] disabled:hover:bg-black/30"
+                  >
                     <div className="aspect-[4/3]">
                       {src ? <img src={src} alt={label} className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center text-[10px] text-white/24">Nog leeg</div>}
                     </div>
                     <p className="px-2 py-1 text-[10px] text-white/38">{label}</p>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
@@ -1867,7 +2199,21 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }
 
   if (renderLayout) {
-    return <>{renderLayout(sidebarContent, viewportContent)}</>
+    return (
+      <>
+        {renderLayout(sidebarContent, viewportContent)}
+        {lightboxImage && (
+          <ImageLightbox
+            image={{ label: lightboxImage[0], src: lightboxImage[1] }}
+            currentIndex={lightboxIndex ?? 0}
+            total={availableLightboxPreviews.length}
+            onClose={() => setLightboxIndex(null)}
+            onPrev={showPreviousLightboxImage}
+            onNext={showNextLightboxImage}
+          />
+        )}
+      </>
+    )
   }
 
   return (
@@ -1878,6 +2224,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       <main className="min-w-0 flex-1 p-4">
         {viewportContent}
       </main>
+      {lightboxImage && (
+        <ImageLightbox
+          image={{ label: lightboxImage[0], src: lightboxImage[1] }}
+          currentIndex={lightboxIndex ?? 0}
+          total={availableLightboxPreviews.length}
+          onClose={() => setLightboxIndex(null)}
+          onPrev={showPreviousLightboxImage}
+          onNext={showNextLightboxImage}
+        />
+      )}
     </div>
   )
 }

@@ -364,23 +364,27 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     objectMaskUrl?: string
     depthUrl?: string
     normalUrl?: string
+    sceneManifest?: Record<string, unknown>
   }) => {
     const jwt = getJwt()
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
     const sb = getUserClient(jwt)
 
+    const insert: Record<string, unknown> = {
+      project_id: args.projectId,
+      canonical_reference_set_id: args.canonicalReferenceSetId,
+      reconstruction_version_id: args.reconstructionVersionId,
+      studio_scene_version_id: args.studioSceneVersionId,
+      beauty_url: args.beautyUrl,
+      object_mask_url: args.objectMaskUrl,
+      depth_url: args.depthUrl,
+      normal_url: args.normalUrl,
+    }
+    if (args.sceneManifest) insert.scene_manifest = args.sceneManifest
+
     const { data, error } = await sb
       .from('render_packets')
-      .insert({
-        project_id: args.projectId,
-        canonical_reference_set_id: args.canonicalReferenceSetId,
-        reconstruction_version_id: args.reconstructionVersionId,
-        studio_scene_version_id: args.studioSceneVersionId,
-        beauty_url: args.beautyUrl,
-        object_mask_url: args.objectMaskUrl,
-        depth_url: args.depthUrl,
-        normal_url: args.normalUrl,
-      })
+      .insert(insert)
       .select()
       .single()
 
@@ -1057,114 +1061,133 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         if (viewIds.length > 0) {
           const { data: canonicalViews } = await sb
             .from('reference_views')
-            .select('asset_url')
+            .select('id, asset_url')
             .in('id', viewIds)
             .neq('status', 'rejected')
-          canonicalReferenceUrls = (canonicalViews ?? [])
-            .map((view) => view.asset_url)
+          const canonicalById = new Map((canonicalViews ?? [])
+            .map((view) => [view.id, view.asset_url] as const))
+          canonicalReferenceUrls = viewIds
+            .map((id) => canonicalById.get(id))
             .filter((url): url is string => typeof url === 'string' && url.length > 0)
             .slice(0, 4)
         }
       }
 
-      const policyInstructions: Record<string, string> = {
-        strict: 'Werk extreem behoudend. Bewaar de basisafbeelding bijna letterlijk en pas alleen de expliciet gevraagde wijziging toe.',
-        balanced: 'Maak het beeld fotorealistisch, maar behoud de basisafbeelding exact als compositie en camerastand.',
-        creative: 'Voeg sfeer toe waar de prompt daarom vraagt, maar behoud compositie, camerastand, crop, positie en silhouet exact.',
-      }
+      const maskBuffer = await loadImageBuffer(maskUrl, 'Object mask')
+      const depthBuffer = await loadImageBuffer(packet.depth_url, 'Depth map')
 
-      // ========== SCENE PASS ==========
-      // Maakt omgeving/fotografie rond het grijze product.
-      // Product mag grijs blijven — geen print/materiaal polish.
+      // ========== PRODUCT LAYER ==========
+      // Gepolisht product op transparant/neutraal, zelfde positie/hoek.
 
-      const scenePrompt = [
-        'Use this image as the exact basis. This is a 3D studio render of a plain grey product.',
-        'Do NOT change the camera angle, perspective, crop, scale, product position, product shape, or silhouette.',
-        'Do NOT add any print, pattern, label, logo, or texture to the product. Keep the product plain grey as-is.',
-        'Only change the BACKGROUND and LIGHTING to create the requested photographic scene.',
-        'Scene geometry rule: build the background in the same 3D camera space as the product. Match horizon line, lens perspective, floor/ground plane direction, depth, scale, and vanishing points to the input image.',
-        'Respect the product position in 3D space. If the prompt asks the product to stand on a surface, create that surface at the correct height and perspective. If the prompt asks it to float or hang, preserve that spatial relation and make the environment perspective match it.',
-        'Add shadows, contact shadows, ambient occlusion, or cast shadows only when they are physically appropriate for the requested scene and object position.',
-        'Do not create a background that ignores the product camera, makes the floor/counter perspective inconsistent, or places scene geometry at an impossible depth relative to the product.',
-        'Make the scene photorealistic with natural lighting, shadows, and reflections.',
-        policyInstructions[preservationPolicy] ?? policyInstructions.balanced,
-        '',
-        'Requested scene:',
-        args.prompt,
-        '',
-        'Generate only the image, no text.',
-      ].join('\n')
+      let productLayerBuffer: Buffer | null = null
+      let productLayerSignedUrl: string | null = null
 
-      const sceneJson = await callModel([{
-        role: 'user',
-        content: [
+      const primaryCanonicalUrl = canonicalReferenceUrls[0] ?? sourceUrl
+      const primaryCanonicalBuffer = await loadImageBuffer(primaryCanonicalUrl, 'Canonical')
+
+      if (primaryCanonicalBuffer) {
+        const canonicalDataUrl = await toDataUrl(primaryCanonicalBuffer)
+
+        const productParts: any[] = [
+          {
+            type: 'text',
+            text: [
+              'You will receive exactly two images.',
+              'Image 1 is beauty.png: the grey 3D render. This image is the absolute source of truth for composition, camera angle, crop, scale, product position, silhouette, and lighting.',
+              'Image 2 is canonical_1.png: the product appearance reference. Use this only for skin, texture, color, print, material, finish, labels, and visual identity.',
+              'Edit Image 1 only. Do not redraw, copy, resize, crop, rotate, or reposition the product from Image 2.',
+              'Transfer only the surface appearance from Image 2 onto the product in Image 1: skin, texture, color, print, material, finish, labels, and visual identity.',
+              'The output must keep the exact product bounding box, pose, camera angle, silhouette, crop, and pixel position from Image 1.',
+              'If there is any conflict between Image 1 geometry and Image 2 appearance, Image 1 geometry always wins.',
+              'Keep the exact light direction from beauty.png. Preserve the same highlight side, same shadow side, same rim light, same internal surface shading, and same exposure from beauty.png.',
+              'Only replace the grey material with the canonical product skin. Do not relight the object.',
+              'Do not copy the camera angle, crop, scale, or pose from canonical_1.png.',
+              'Do not change the composition, angle, lighting, silhouette, scale, crop, or position from beauty.png.',
+              'Do not generate or preserve any cast shadow outside the product silhouette. The area around the product must stay pure black so the backend can composite it separately.',
+              'Do not add a floor, table, background, reflection, environment, or contact shadow.',
+              'Return only the edited image.',
+            ].join('\n'),
+          },
           { type: 'image_url', image_url: { url: beautyDataUrl } },
-          { type: 'text', text: scenePrompt },
-        ],
-      }])
-      const sceneBuffer = await extractImageFromResponse(sceneJson)
-
-      // Scene opslaan als intermediate
-      const scenePath = `${user.id}/${args.projectId}/scene_${run.id}.png`
-      await sb.storage
-        .from('atelier-assets')
-        .upload(scenePath, sceneBuffer, { contentType: 'image/png', upsert: true })
-      const { data: sceneUrlData } = await sb.storage
-        .from('atelier-assets')
-        .createSignedUrl(scenePath, 86400)
-      const sceneSignedUrl = sceneUrlData?.signedUrl
-
-      // ========== POLISH PASS ==========
-      // Source/ref image + object mask → alleen productgebied aanpassen met echte materialen.
-
-      let outBuffer: Buffer
-      const hasSourceAndMask = sourceUrl && maskUrl
-
-      if (hasSourceAndMask) {
-        const sourceBuffer = await loadImageBuffer(sourceUrl, 'Source product')
-        const maskBuffer = await loadImageBuffer(maskUrl, 'Object mask')
-        const sceneDataUrl = await toDataUrl(sceneBuffer)
-
-        const polishParts: any[] = [
-          { type: 'image_url', image_url: { url: sceneDataUrl } },
-          { type: 'text', text: '[SCENE] This is the scene with the grey product in the correct position, angle, and environment. Keep everything OUTSIDE the product area exactly as-is.' },
+          { type: 'image_url', image_url: { url: canonicalDataUrl } },
         ]
 
-        if (maskBuffer) {
-          const maskDataUrl = await toDataUrl(maskBuffer)
-          polishParts.push({ type: 'image_url', image_url: { url: maskDataUrl } })
-          polishParts.push({ type: 'text', text: '[OBJECT MASK] White = product area, Black = background. Only modify the white (product) area. The background must remain pixel-perfect.' })
-        }
+        const productJson = await callModel([{ role: 'user', content: productParts }])
+        productLayerBuffer = await extractImageFromResponse(productJson)
 
-        if (sourceBuffer) {
-          const sourceDataUrl = await toDataUrl(sourceBuffer)
-          polishParts.push({ type: 'image_url', image_url: { url: sourceDataUrl } })
-          polishParts.push({ type: 'text', text: '[SOURCE PRODUCT] This is the real product. Use its exact color, material, finish, texture, print, labels, and logos. Apply these to the product area in the scene.' })
-        }
+        const plPath = `${user.id}/${args.projectId}/product_layer_${run.id}.png`
+        await sb.storage.from('atelier-assets').upload(plPath, productLayerBuffer, { contentType: 'image/png', upsert: true })
+        const { data: plUrlData } = await sb.storage.from('atelier-assets').createSignedUrl(plPath, 86400)
+        productLayerSignedUrl = plUrlData?.signedUrl
+      }
 
-        for (const [index, canonicalUrl] of canonicalReferenceUrls.entries()) {
-          const canonicalBuffer = await loadImageBuffer(canonicalUrl, `Canonical reference ${index + 1}`)
-          if (!canonicalBuffer) continue
-          polishParts.push({ type: 'image_url', image_url: { url: await toDataUrl(canonicalBuffer) } })
-          polishParts.push({ type: 'text', text: `[CANONICAL VIEW ${index + 1}] Extra product identity reference. Use it to infer side/back print and material when the scene camera shows a different angle.` })
-        }
+      // ========== BACKGROUND PLATE ==========
+      // Lege achtergrond zonder product, gematcht op de perfecte product layer.
 
-        polishParts.push({ type: 'text', text: [
-          'POLISH PASS: Replace only the product area (white in the mask) with the real product look from the source image.',
-          'Keep the exact same shape, position, angle, scale, and silhouette from the scene.',
-          'Keep all lighting, shadows, and reflections from the scene consistent.',
-          'The background outside the mask must not change at all.',
-          'Generate only the image, no text.',
-        ].join('\n') })
+      const bgParts: any[] = [
+        { type: 'text', text: [
+          'You will receive beauty.png and product_layer.png, and sometimes mask.png and depth.png.',
+          'beauty.png is the strict 3D camera and geometry reference.',
+          'product_layer.png is the finished product in the correct camera angle, scale, crop, position, silhouette, and lighting.',
+          'Generate a clean empty background plate that physically matches product_layer.png and beauty.png.',
+          'Use the exact same camera angle, camera height, lens, field of view, crop, horizon, vanishing points, ground plane direction, lighting direction, exposure, and proportions.',
+          'The generated surface/floor/counter must align with the product contact plane implied by beauty.png and product_layer.png.',
+          'The empty place where the product belongs must remain at the same pixel position and scale, but the product itself must be removed.',
+          'Do not include any vase, bottle, product, silhouette, placeholder, reflection, or cast shadow of the product.',
+          'Do not choose a new room camera angle. Do not create a wide interior shot if the product layer is a tight product angle.',
+          'If mask.png is provided, the white mask area is the product area that must be filled with natural background continuation.',
+          'If depth.png is provided, use it only to understand the scene perspective and ground plane.',
+          `Requested environment: ${args.prompt}`,
+          'Return only the clean empty background image.',
+        ].join('\n') },
+        { type: 'image_url', image_url: { url: beautyDataUrl } },
+      ]
+      if (productLayerBuffer) bgParts.push({ type: 'image_url', image_url: { url: await toDataUrl(productLayerBuffer) } })
+      if (maskBuffer) bgParts.push({ type: 'image_url', image_url: { url: await toDataUrl(maskBuffer) } })
+      if (depthBuffer) bgParts.push({ type: 'image_url', image_url: { url: await toDataUrl(depthBuffer) } })
 
-        const polishJson = await callModel([{
-          role: 'user',
-          content: polishParts,
-        }])
-        outBuffer = await extractImageFromResponse(polishJson)
+      const bgJson = await callModel([{ role: 'user', content: bgParts }])
+      const bgBuffer = await extractImageFromResponse(bgJson)
+
+      const bgPath = `${user.id}/${args.projectId}/bg_plate_${run.id}.png`
+      await sb.storage.from('atelier-assets').upload(bgPath, bgBuffer, { contentType: 'image/png', upsert: true })
+      const { data: bgUrlData } = await sb.storage.from('atelier-assets').createSignedUrl(bgPath, 86400)
+      const bgSignedUrl = bgUrlData?.signedUrl
+
+      // ========== COMPOSITE ==========
+      // AI eindfase: background + product layer samenvoegen tot één natuurlijk beeld.
+
+      let outBuffer: Buffer
+      if (productLayerBuffer) {
+        const bgDataUrl = await toDataUrl(bgBuffer)
+        const productDataUrl = await toDataUrl(productLayerBuffer)
+        const compositeParts: any[] = [
+          {
+            type: 'text',
+            text: [
+              'You will receive exactly two images.',
+              'Image 1 is background.png: the clean environment/background plate.',
+              'Image 2 is product_layer.png: the finished product in the correct camera angle, scale, crop, lighting direction, and silhouette.',
+              'Create one final photorealistic image by placing product_layer.png into background.png.',
+              'The product layer is the absolute source of truth for the product. Do not change its shape, camera angle, pose, scale, crop, print, material, texture, or details.',
+              'The background is the source for the environment style and objects, but you may adjust/warp/crop/extend the background, counter, floor, horizon, perspective, and lighting so the space physically matches the product layer perfectly.',
+              'The final background must feel photographed from the product-layer camera, not from the original background camera.',
+              'Make the surface under the product align with the product contact point, scale, lens, and horizon. Correct the counter/floor perspective if needed.',
+              'The final image must visibly contain the product from product_layer.png. Do not omit it, shrink it, hide it, replace it, or move it to a shelf/background object.',
+              'Keep the product at the exact same pixel position, size, and crop as in product_layer.png. Do not move it to a more natural place in the room.',
+              'Blend them naturally: remove the black product-layer background, preserve the product, match background exposure/color/perspective to the product, and add subtle realistic contact shadow or ambient shadow where appropriate.',
+              'Do not create a new product. Do not replace the product with canonical/reference pose. Do not crop closer. Do not move the product away from its product_layer position.',
+              'Return only the final merged image.',
+            ].join('\n'),
+          },
+          { type: 'image_url', image_url: { url: bgDataUrl } },
+          { type: 'image_url', image_url: { url: productDataUrl } },
+        ]
+
+        const compositeJson = await callModel([{ role: 'user', content: compositeParts }])
+        outBuffer = await extractImageFromResponse(compositeJson)
       } else {
-        // Geen source/mask beschikbaar → scene pass is het eindresultaat
-        outBuffer = sceneBuffer
+        outBuffer = bgBuffer
       }
 
       const storagePath = `${user.id}/${args.projectId}/final_${run.id}.png`
@@ -1178,7 +1201,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
       const finalUrl = urlData?.signedUrl ?? packet.beauty_url
 
-      // FinalRenderVersion opslaan
+      // FinalRenderVersion opslaan met layered assets
       const { data: render, error: renderError } = await sb
         .from('final_render_versions')
         .insert({
@@ -1186,10 +1209,19 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           render_packet_id: args.renderPacketId,
           provider_run_id: run.id,
           output_url: finalUrl,
+          background_plate_url: bgSignedUrl,
+          product_layer_url: productLayerSignedUrl,
+          composite_url: finalUrl,
           preservation_policy: preservationPolicy,
           prompt: args.prompt,
           resolution,
           status: 'review',
+          layer_metadata: {
+            has_background_plate: !!bgSignedUrl,
+            has_product_layer: !!productLayerSignedUrl,
+            has_ai_composite: !!productLayerBuffer,
+            has_mask_composite: false,
+          },
         })
         .select()
         .single()
@@ -1204,19 +1236,16 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           latency_ms: Date.now() - startTime,
           completed_at: new Date().toISOString(),
           metadata: {
-            basic_product_url: basicProductUrl ?? null,
-            scene_url: sceneSignedUrl ?? null,
-            polish_pass: !!hasSourceAndMask,
-            polish_inputs: {
-              source_url: sourceUrl ?? null,
-              object_mask_url: maskUrl ?? null,
-              canonical_reference_urls: canonicalReferenceUrls,
-            },
+            background_plate_url: bgSignedUrl ?? null,
+            product_layer_url: productLayerSignedUrl ?? null,
+            composite_method: productLayerBuffer ? 'ai-background-product-composite' : 'background-only',
             inputs_used: {
               beauty: true,
               basic_product: !!basicProductUrl,
               source: !!sourceUrl,
               object_mask: !!maskUrl,
+              depth: !!depthBuffer,
+              scene_manifest: !!packet.scene_manifest,
               canonical_references: canonicalReferenceUrls.length,
             },
           },
@@ -1229,7 +1258,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         .update({ status: 'render_pending' })
         .eq('id', args.projectId)
 
-      return { ok: true, render, providerRunId: run.id, sceneUrl: sceneSignedUrl }
+      return { ok: true, render, providerRunId: run.id, backgroundPlateUrl: bgSignedUrl, productLayerUrl: productLayerSignedUrl }
     } catch (err: any) {
       await sb
         .from('provider_runs')
@@ -1564,6 +1593,224 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
   })
 
+  // --- Textured Mesh ---
+
+  ipcMain.handle('product-studio:create-textured-mesh', async (_e, args: {
+    projectId: string
+    reconstructionVersionId: string
+    sourceViewIds?: string[]
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
+
+    const { data: recon } = await sb
+      .from('reconstruction_versions')
+      .select('*')
+      .eq('id', args.reconstructionVersionId)
+      .single()
+
+    if (!recon) return { ok: false, error: 'Reconstruction niet gevonden.' }
+    if (!recon.mesh_url) return { ok: false, error: 'Geen mesh beschikbaar om te texturen.' }
+
+    const viewIds = args.sourceViewIds ?? []
+
+    await sb
+      .from('reconstruction_versions')
+      .update({
+        texture_status: 'processing',
+        texture_error: null,
+        texture_source_view_ids: viewIds,
+      })
+      .eq('id', args.reconstructionVersionId)
+
+    const startTime = Date.now()
+
+    try {
+      console.log('[create-textured-mesh] Start voor recon:', args.reconstructionVersionId)
+      const { projectTexture } = await import('./lib/texture-projector')
+
+      console.log('[create-textured-mesh] Downloading mesh:', recon.mesh_url?.slice(0, 80))
+      const glbRes = await fetch(recon.mesh_url)
+      if (!glbRes.ok) throw new Error(`Kan mesh niet downloaden: ${glbRes.status}`)
+      const glbBuffer = Buffer.from(await glbRes.arrayBuffer())
+      console.log('[create-textured-mesh] Mesh downloaded:', glbBuffer.length, 'bytes')
+
+      let viewImages: Array<{ angle: string; imageBuffer: Buffer }> = []
+
+      if (viewIds.length > 0) {
+        const { data: views } = await sb
+          .from('reference_views')
+          .select('id, angle, asset_url')
+          .in('id', viewIds)
+          .neq('status', 'rejected')
+        for (const v of views ?? []) {
+          if (!v.asset_url) continue
+          const imgRes = await fetch(v.asset_url)
+          if (!imgRes.ok) continue
+          viewImages.push({
+            angle: v.angle ?? 'front',
+            imageBuffer: Buffer.from(await imgRes.arrayBuffer()),
+          })
+        }
+      }
+
+      if (viewImages.length === 0) {
+        const { data: allViews } = await sb
+          .from('reference_views')
+          .select('id, angle, asset_url')
+          .eq('project_id', args.projectId)
+          .in('status', ['active', 'draft'])
+          .order('created_at')
+        for (const v of allViews ?? []) {
+          if (!v.asset_url) continue
+          const imgRes = await fetch(v.asset_url)
+          if (!imgRes.ok) continue
+          viewImages.push({
+            angle: v.angle ?? 'front',
+            imageBuffer: Buffer.from(await imgRes.arrayBuffer()),
+          })
+        }
+      }
+
+      if (viewImages.length === 0) {
+        const { data: sourceAssets } = await sb
+          .from('source_assets')
+          .select('url')
+          .eq('project_id', args.projectId)
+          .eq('type', 'original-image')
+          .limit(1)
+          .maybeSingle()
+        if (sourceAssets?.url) {
+          const imgRes = await fetch(sourceAssets.url)
+          if (imgRes.ok) {
+            viewImages.push({
+              angle: 'front',
+              imageBuffer: Buffer.from(await imgRes.arrayBuffer()),
+            })
+          }
+        }
+      }
+
+      if (viewImages.length === 0) throw new Error('Geen referentiebeelden beschikbaar voor texture wrapping.')
+
+      const result = await projectTexture({
+        glbBuffer,
+        views: viewImages,
+        atlasSize: 1024,
+      })
+
+      const textureDir = join(
+        app.getPath('userData'),
+        'product-studio',
+        user.id,
+        args.projectId,
+        'textures',
+      )
+      await mkdir(textureDir, { recursive: true })
+
+      const meshPath = join(textureDir, `textured_mesh_${args.reconstructionVersionId}.glb`)
+      const atlasPath = join(textureDir, `texture_atlas_${args.reconstructionVersionId}.png`)
+      const manifestPath = join(textureDir, `material_manifest_${args.reconstructionVersionId}.json`)
+      const runVersion = Date.now()
+      const toHupheFileUrl = (filePath: string) => `huphe://file/${encodeURIComponent(filePath)}?v=${runVersion}`
+      const texturedMeshUrl = toHupheFileUrl(meshPath)
+      const textureAtlasUrl = toHupheFileUrl(atlasPath)
+      const materialManifest = {
+        ...result.manifest,
+        storage: 'local',
+        textured_mesh_path: meshPath,
+        texture_atlas_path: atlasPath,
+        material_manifest_path: manifestPath,
+      }
+
+      console.log('[create-textured-mesh] Writing local texture output:', textureDir)
+      await Promise.all([
+        writeFile(meshPath, result.texturedGlbBuffer),
+        writeFile(atlasPath, result.atlasBuffer),
+        writeFile(manifestPath, JSON.stringify(materialManifest, null, 2)),
+      ])
+      console.log('[create-textured-mesh] Local texture output written')
+
+      await sb
+        .from('reconstruction_versions')
+        .update({
+          texture_status: 'completed',
+          texture_error: null,
+          textured_mesh_url: texturedMeshUrl,
+          texture_atlas_url: textureAtlasUrl,
+          material_manifest: materialManifest,
+        })
+        .eq('id', args.reconstructionVersionId)
+      console.log('[create-textured-mesh] DB updated. Done in', Date.now() - startTime, 'ms')
+
+      return {
+        ok: true,
+        reconstructionVersionId: args.reconstructionVersionId,
+        texturedMeshUrl,
+        textureAtlasUrl,
+        manifest: materialManifest,
+        latencyMs: Date.now() - startTime,
+      }
+    } catch (err: any) {
+      await sb
+        .from('reconstruction_versions')
+        .update({
+          texture_status: 'failed',
+          texture_error: err.message,
+        })
+        .eq('id', args.reconstructionVersionId)
+
+      return { ok: false, error: err.message }
+    }
+  })
+
+  ipcMain.handle('product-studio:get-texture-status', async (_e, reconstructionVersionId: string) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+
+    const { data, error } = await sb
+      .from('reconstruction_versions')
+      .select('id, texture_status, texture_error, textured_mesh_url, texture_atlas_url, material_manifest')
+      .eq('id', reconstructionVersionId)
+      .single()
+
+    if (error) return { ok: false, error: error.message }
+    return { ok: true, texture: data }
+  })
+
+  ipcMain.handle('product-studio:retry-texture-wrap', async (_e, reconstructionVersionId: string) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+
+    const { data: recon } = await sb
+      .from('reconstruction_versions')
+      .select('texture_status')
+      .eq('id', reconstructionVersionId)
+      .single()
+
+    if (!recon) return { ok: false, error: 'Reconstruction niet gevonden.' }
+    if (recon.texture_status !== 'failed') return { ok: false, error: 'Alleen failed texture wraps kunnen worden herstart.' }
+
+    await sb
+      .from('reconstruction_versions')
+      .update({
+        texture_status: 'pending',
+        texture_error: null,
+        textured_mesh_url: null,
+        texture_atlas_url: null,
+        material_manifest: null,
+      })
+      .eq('id', reconstructionVersionId)
+
+    return { ok: true }
+  })
+
   // --- Retry Provider Run ---
 
   ipcMain.handle('product-studio:retry-provider-run', async (_e, runId: string) => {
@@ -1719,10 +1966,12 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           '', 'Requested scene:', frv.prompt, '', 'Generate only the image, no text.',
         ].join('\n')
 
-        const sceneJson = await callModel([{ role: 'user', content: [
-          { type: 'image_url', image_url: { url: beautyDataUrl } },
-          { type: 'text', text: scenePrompt },
-        ]}])
+        const sceneJson = await callModel([{
+          role: 'user', content: [
+            { type: 'image_url', image_url: { url: beautyDataUrl } },
+            { type: 'text', text: scenePrompt },
+          ]
+        }])
         const sceneBuffer = await extractImageFromResponse(sceneJson)
 
         const scenePath = `${user.id}/${run.project_id}/scene_${runId}_retry${run.retry_count + 1}.png`

@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useImperativeHandle, useRef } from 'react'
 import { useScene3D } from '../hooks/useScene3D'
-import Scene3DViewport, { type RenderPasses, type Scene3DViewportHandle } from './Scene3DViewport'
+import Scene3DViewport, { type RenderPasses, type Scene3DRenderManifest, type Scene3DViewportHandle } from './Scene3DViewport'
 import Scene3DToolbar from './Scene3DToolbar'
 import Scene3DPropertiesPanel from './Scene3DPropertiesPanel'
 import type { Scene3DLight, Scene3DObject, Scene3DObjectType, Scene3DState } from '../lib/scene3d-types'
@@ -8,6 +8,7 @@ import type { Scene3DLight, Scene3DObject, Scene3DObjectType, Scene3DState } fro
 export interface Scene3DRenderPacketPreview {
   beauty: string | null
   passes: RenderPasses | null
+  manifest: Scene3DRenderManifest | null
 }
 
 export interface Scene3DEditorHandle {
@@ -108,6 +109,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
       return {
         beauty: viewportRef.current?.captureCleanScreenshot() ?? null,
         passes: viewportRef.current?.captureAllPasses() ?? null,
+        manifest: viewportRef.current?.captureRenderManifest() ?? null,
       }
     },
     getScene() {
