@@ -1,7 +1,7 @@
 import { ipcMain, app } from 'electron'
 import { createClient } from '@supabase/supabase-js'
 import { createHash } from 'crypto'
-import { writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, mkdir } from 'fs/promises'
 import { join } from 'path'
 
 const meta = (import.meta as any).env ?? {}
@@ -13,6 +13,25 @@ function getUserClient(jwt: string) {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: { headers: { Authorization: `Bearer ${jwt}` } },
   })
+}
+
+async function saveAssetLocally(userId: string, projectId: string, filename: string, buffer: Buffer): Promise<string> {
+  const dir = join(app.getPath('userData'), 'product-studio', userId, projectId)
+  const subDir = filename.includes('/') ? join(dir, filename.substring(0, filename.lastIndexOf('/'))) : dir
+  await mkdir(subDir, { recursive: true })
+  const filePath = join(dir, filename)
+  await writeFile(filePath, buffer)
+  return `huphe://file/${encodeURIComponent(filePath)}?v=${Date.now()}`
+}
+
+async function migrateSupabaseUrlToLocal(sb: any, userId: string, projectId: string, url: string, filename: string): Promise<string> {
+  if (!url.includes('supabase.co/storage/') && !url.includes('fal.media/')) return url
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return url
+    const buffer = Buffer.from(await res.arrayBuffer())
+    return await saveAssetLocally(userId, projectId, filename, buffer)
+  } catch { return url }
 }
 
 export function registerProductStudioIPC(getJwt: () => string | null): void {
@@ -127,23 +146,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const { data: { user } } = await sb.auth.getUser()
     if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
 
-    const storagePath = `${user.id}/${args.projectId}/original.${ext}`
-
-    const { error: uploadError } = await sb.storage
-      .from('atelier-assets')
-      .upload(storagePath, new Uint8Array(args.fileBuffer), {
-        contentType: args.mimeType,
-        upsert: true,
-      })
-
-    if (uploadError) return { ok: false, error: uploadError.message }
-
-    const { data: urlData } = await sb.storage
-      .from('atelier-assets')
-      .createSignedUrl(storagePath, 86400)
-
-    const url = urlData?.signedUrl
-    if (!url) return { ok: false, error: 'Signed URL aanmaken mislukt.' }
+    const url = await saveAssetLocally(user.id, args.projectId, `original.${ext}`, Buffer.from(args.fileBuffer))
 
     const { data: asset, error: assetError } = await sb
       .from('source_assets')
@@ -364,6 +367,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     objectMaskUrl?: string
     depthUrl?: string
     normalUrl?: string
+    calibrationUrl?: string
+    lightMapUrl?: string
     sceneManifest?: Record<string, unknown>
   }) => {
     const jwt = getJwt()
@@ -381,6 +386,10 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       normal_url: args.normalUrl,
     }
     if (args.sceneManifest) insert.scene_manifest = args.sceneManifest
+    const auxiliaryAssetUrls: Record<string, unknown> = {}
+    if (args.calibrationUrl) auxiliaryAssetUrls.calibration_url = args.calibrationUrl
+    if (args.lightMapUrl) auxiliaryAssetUrls.light_map_url = args.lightMapUrl
+    if (Object.keys(auxiliaryAssetUrls).length > 0) insert.auxiliary_asset_urls = auxiliaryAssetUrls
 
     const { data, error } = await sb
       .from('render_packets')
@@ -493,8 +502,12 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         image_mime_type: mimeType,
       }, jwt) as any
 
-      const maskUrl = maskResult?.image?.url
-      if (maskUrl) {
+      const falMaskUrl = maskResult?.image?.url
+      if (falMaskUrl) {
+        const maskRes = await fetch(falMaskUrl)
+        if (!maskRes.ok) throw new Error('Kan mask niet downloaden.')
+        const maskBuf = Buffer.from(await maskRes.arrayBuffer())
+        const maskUrl = await saveAssetLocally(user.id, args.projectId, 'object_mask.png', maskBuf)
         const { data: maskAsset } = await sb
           .from('source_assets')
           .insert({
@@ -522,33 +535,21 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         .toBuffer()
 
       const thumbMeta = await sharp(thumbBuffer).metadata()
-      const thumbPath = `${user.id}/${args.projectId}/thumbnail.png`
-
-      await sb.storage
-        .from('atelier-assets')
-        .upload(thumbPath, thumbBuffer, { contentType: 'image/png', upsert: true })
-
-      const { data: thumbUrlData } = await sb.storage
-        .from('atelier-assets')
-        .createSignedUrl(thumbPath, 86400)
-
-      if (thumbUrlData?.signedUrl) {
-        const { data: thumbAsset } = await sb
-          .from('source_assets')
-          .insert({
-            project_id: args.projectId,
-            type: 'thumbnail',
-            url: thumbUrlData.signedUrl,
-            mime_type: 'image/png',
-            width: thumbMeta.width,
-            height: thumbMeta.height,
-            provenance: 'observed',
-          })
-          .select()
-          .single()
-
-        results.thumbnail = thumbAsset
-      }
+      const thumbUrl = await saveAssetLocally(user.id, args.projectId, 'thumbnail.png', thumbBuffer)
+      const { data: thumbAsset } = await sb
+        .from('source_assets')
+        .insert({
+          project_id: args.projectId,
+          type: 'thumbnail',
+          url: thumbUrl,
+          mime_type: 'image/png',
+          width: thumbMeta.width,
+          height: thumbMeta.height,
+          provenance: 'observed',
+        })
+        .select()
+        .single()
+      results.thumbnail = thumbAsset
     } catch (err: any) {
       results.thumbnailError = err.message
     }
@@ -623,30 +624,19 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         }
 
         if (basicBuffer) {
-          const basicPath = `${user.id}/${args.projectId}/basic_product.png`
-          await sb.storage
-            .from('atelier-assets')
-            .upload(basicPath, basicBuffer, { contentType: 'image/png', upsert: true })
-
-          const { data: basicUrlData } = await sb.storage
-            .from('atelier-assets')
-            .createSignedUrl(basicPath, 86400)
-
-          if (basicUrlData?.signedUrl) {
-            const { data: basicAsset } = await sb
-              .from('source_assets')
-              .insert({
-                project_id: args.projectId,
-                type: 'basic-product',
-                url: basicUrlData.signedUrl,
-                mime_type: 'image/png',
-                provenance: 'inferred',
-              })
-              .select()
-              .single()
-
-            results.basicProduct = basicAsset
-          }
+          const basicUrl = await saveAssetLocally(user.id, args.projectId, 'basic_product.png', basicBuffer)
+          const { data: basicAsset } = await sb
+            .from('source_assets')
+            .insert({
+              project_id: args.projectId,
+              type: 'basic-product',
+              url: basicUrl,
+              mime_type: 'image/png',
+              provenance: 'inferred',
+            })
+            .select()
+            .single()
+          results.basicProduct = basicAsset
         }
       }
     } catch (err: any) {
@@ -677,23 +667,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const { data: { user } } = await sb.auth.getUser()
     if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
 
-    const storagePath = `${user.id}/${args.projectId}/mesh_${args.reconstructionVersionId}.glb`
-
-    const { error: uploadError } = await sb.storage
-      .from('atelier-assets')
-      .upload(storagePath, new Uint8Array(args.glbBuffer), {
-        contentType: 'model/gltf-binary',
-        upsert: true,
-      })
-
-    if (uploadError) return { ok: false, error: uploadError.message }
-
-    const { data: urlData } = await sb.storage
-      .from('atelier-assets')
-      .createSignedUrl(storagePath, 86400)
-
-    const meshUrl = urlData?.signedUrl
-    if (!meshUrl) return { ok: false, error: 'Signed URL aanmaken mislukt.' }
+    const meshUrl = await saveAssetLocally(user.id, args.projectId, `mesh_${args.reconstructionVersionId}.glb`, Buffer.from(args.glbBuffer))
 
     const { error } = await sb
       .from('reconstruction_versions')
@@ -714,11 +688,17 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
 
     try {
-      if (!args.imageUrl.startsWith('https://')) return { ok: false, error: 'Alleen HTTPS URLs toegestaan.' }
-      const imgRes = await fetch(args.imageUrl)
-      if (!imgRes.ok) return { ok: false, error: `Download mislukt: ${imgRes.status}` }
-
-      const buffer = Buffer.from(await imgRes.arrayBuffer())
+      let buffer: Buffer
+      if (args.imageUrl.startsWith('huphe://file/')) {
+        const filePath = decodeURIComponent(args.imageUrl.replace('huphe://file/', '').split('?')[0])
+        buffer = await readFile(filePath)
+      } else if (args.imageUrl.startsWith('https://')) {
+        const imgRes = await fetch(args.imageUrl)
+        if (!imgRes.ok) return { ok: false, error: `Download mislukt: ${imgRes.status}` }
+        buffer = Buffer.from(await imgRes.arrayBuffer())
+      } else {
+        return { ok: false, error: 'Alleen HTTPS of huphe:// URLs toegestaan.' }
+      }
       const rawName = args.suggestedName ?? `HupheAI_render_${Date.now()}.png`
       const fileName = rawName.replace(/[^a-zA-Z0-9._-]/g, '_')
 
@@ -738,7 +718,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
   ipcMain.handle('product-studio:upload-render-pass', async (_e, args: {
     projectId: string
-    passType: 'beauty' | 'depth' | 'normal' | 'object-mask'
+    passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map'
     dataUrl: string
   }) => {
     const jwt = getJwt()
@@ -757,20 +737,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const [, mimeType, base64] = match
     const buffer = Buffer.from(base64, 'base64')
     const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png'
-    const storagePath = `${user.id}/${args.projectId}/${args.passType}_${Date.now()}.${ext}`
-
-    const { error: uploadError } = await sb.storage
-      .from('atelier-assets')
-      .upload(storagePath, buffer, { contentType: mimeType, upsert: true })
-
-    if (uploadError) return { ok: false, error: uploadError.message }
-
-    const { data: urlData } = await sb.storage
-      .from('atelier-assets')
-      .createSignedUrl(storagePath, 86400)
-
-    if (!urlData?.signedUrl) return { ok: false, error: 'Signed URL aanmaken mislukt.' }
-    return { ok: true, url: urlData.signedUrl }
+    const url = await saveAssetLocally(user.id, args.projectId, `${args.passType}_${Date.now()}.${ext}`, buffer)
+    return { ok: true, url }
   })
 
   // --- Source Asset als Observed Reference View ---
@@ -856,15 +824,53 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
     }
 
+    // Migreer remote URLs (Supabase/fal) naar lokaal bij laden
+    const { data: { user: authUser } } = await sb.auth.getUser()
+    const userId = authUser?.id
+    const sourceAssets = sourceRes.data ?? []
+    const referenceViews = viewsRes.data ?? []
+    const latestReconstruction = reconRes.data?.[0] ?? null
+    const latestRenderPacket = packetRes.data?.[0] ?? null
+
+    if (userId) {
+      for (const sa of sourceAssets) {
+        if (sa.url && !sa.url.startsWith('huphe://')) {
+          const ext = sa.type === 'original-image' ? (sa.mime_type?.split('/')?.[1] ?? 'png') : 'png'
+          const filename = sa.type === 'thumbnail' ? 'thumbnail.png' : sa.type === 'object-mask' ? 'object_mask.png' : sa.type === 'basic-product' ? 'basic_product.png' : `original.${ext}`
+          const localUrl = await migrateSupabaseUrlToLocal(sb, userId, projectId, sa.url, filename)
+          if (localUrl !== sa.url) {
+            sa.url = localUrl
+            await sb.from('source_assets').update({ url: localUrl }).eq('id', sa.id)
+          }
+        }
+      }
+      for (const rv of referenceViews) {
+        if (rv.asset_url && !rv.asset_url.startsWith('huphe://')) {
+          const localUrl = await migrateSupabaseUrlToLocal(sb, userId, projectId, rv.asset_url, `views/${rv.angle}_${rv.id}.png`)
+          if (localUrl !== rv.asset_url) {
+            rv.asset_url = localUrl
+            await sb.from('reference_views').update({ asset_url: localUrl }).eq('id', rv.id)
+          }
+        }
+      }
+      if (latestReconstruction?.mesh_url && !latestReconstruction.mesh_url.startsWith('huphe://')) {
+        const localUrl = await migrateSupabaseUrlToLocal(sb, userId, projectId, latestReconstruction.mesh_url, `mesh_${latestReconstruction.id}.glb`)
+        if (localUrl !== latestReconstruction.mesh_url) {
+          latestReconstruction.mesh_url = localUrl
+          await sb.from('reconstruction_versions').update({ mesh_url: localUrl }).eq('id', latestReconstruction.id)
+        }
+      }
+    }
+
     return {
       ok: true,
       project: projectRes.data,
-      sourceAssets: sourceRes.data ?? [],
-      referenceViews: viewsRes.data ?? [],
+      sourceAssets,
+      referenceViews,
       latestCanonicalSet: canonicalRes.data?.[0] ?? null,
-      latestReconstruction: reconRes.data?.[0] ?? null,
+      latestReconstruction,
       latestScene: sceneRes.data?.[0] ?? null,
-      latestRenderPacket: packetRes.data?.[0] ?? null,
+      latestRenderPacket,
       latestFinalRender,
     }
   })
@@ -893,7 +899,219 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     return { ok: true, url: data.signedUrl }
   })
 
-  // --- Generate Final Render (RenderPacket → FinalRenderVersion via OpenRouter image edit) ---
+  // --- Shared helpers for image loading / model calls ---
+
+  function createImageHelpers(jwt: string) {
+    let _sharp: any
+    let _callOpenRouter: typeof import('./lib/proxy').callOpenRouter
+
+    async function init() {
+      _sharp = (await import('sharp')).default
+      const proxy = await import('./lib/proxy')
+      _callOpenRouter = proxy.callOpenRouter
+    }
+
+    async function loadImageBuffer(url: string | null | undefined, label: string, required = false): Promise<Buffer | null> {
+      if (!url) { if (required) throw new Error(`${label} ontbreekt.`); return null }
+      if (url.startsWith('data:image/')) {
+        const match = url.match(/^data:image\/\w+;base64,(.+)$/)
+        if (!match) { if (required) throw new Error(`${label} heeft een ongeldig data URL formaat.`); return null }
+        return Buffer.from(match[1], 'base64')
+      }
+      if (url.startsWith('huphe://file/')) {
+        try { return await readFile(decodeURIComponent(url.replace('huphe://file/', '').split('?')[0])) }
+        catch { if (required) throw new Error(`${label} kon niet worden gelezen.`); return null }
+      }
+      if (!url.startsWith('https://')) { if (required) throw new Error(`${label} moet HTTPS zijn.`); return null }
+      const response = await fetch(url)
+      if (!response.ok) { if (required) throw new Error(`${label} kon niet worden opgehaald.`); return null }
+      return Buffer.from(await response.arrayBuffer())
+    }
+
+    async function extractImageFromResponse(json: any): Promise<Buffer> {
+      const message = json?.choices?.[0]?.message
+      const images: any[] = message?.images ?? []
+      let imgUrl: string | null = null
+      let imgB64: string | null = null
+      for (const img of images) {
+        if (typeof img === 'string') {
+          if (img.startsWith('http') || img.startsWith('data:')) imgUrl = img
+          else imgB64 = img
+          break
+        }
+        if (img?.b64_json) { imgB64 = img.b64_json; break }
+        const u = img?.image_url?.url ?? img?.url
+        if (u) { imgUrl = u; break }
+      }
+      if (!imgUrl && !imgB64 && Array.isArray(message?.content)) {
+        for (const part of message.content) {
+          if (part?.type === 'image_url') { imgUrl = part.image_url?.url; break }
+          if (part?.type === 'image' && part?.image?.url) { imgUrl = part.image.url; break }
+          if (part?.type === 'image' && part?.image?.b64_json) { imgB64 = part.image.b64_json; break }
+          if (part?.type === 'image' && typeof part?.url === 'string') { imgUrl = part.url; break }
+          if (part?.type === 'image' && typeof part?.b64_json === 'string') { imgB64 = part.b64_json; break }
+        }
+      }
+      if (!imgUrl && !imgB64 && typeof message?.content === 'string') {
+        const m = message.content.match(/data:image\/[a-z]+;base64,([A-Za-z0-9+/=]+)/)
+        if (m) imgB64 = m[1]
+      }
+      if (!imgUrl && !imgB64) {
+        const debugKeys = JSON.stringify({
+          hasMessage: !!message, contentType: typeof message?.content,
+          contentIsArray: Array.isArray(message?.content),
+          contentPartTypes: Array.isArray(message?.content) ? message.content.map((p: any) => p?.type) : [],
+          imagesLength: images.length,
+        })
+        throw new Error(`Geen afbeelding ontvangen van OpenRouter. Debug: ${debugKeys}`)
+      }
+      if (imgB64) return Buffer.from(imgB64.replace(/^data:image\/\w+;base64,/, ''), 'base64')
+      if (imgUrl!.startsWith('data:')) return Buffer.from(imgUrl!.replace(/^data:image\/\w+;base64,/, ''), 'base64')
+      const dl = await fetch(imgUrl!)
+      if (!dl.ok) throw new Error(`Kan output niet downloaden: ${imgUrl!.slice(0, 80)}`)
+      return Buffer.from(await dl.arrayBuffer())
+    }
+
+    async function callModel(messages: any[], modelOverride?: string): Promise<any> {
+      const model = modelOverride ?? PRODUCT_STUDIO_FINAL_RENDER_MODEL
+      const basePayload: any = { model, messages, stream: false, modalities: ['image', 'text'] }
+      let res = await _callOpenRouter(basePayload, jwt)
+      let raw = await res.text()
+      if (res.status === 404 && raw.includes('output modalities: image, text')) {
+        res = await _callOpenRouter({ model, modalities: ['image'], messages, stream: false }, jwt)
+        raw = await res.text()
+      }
+      if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${raw.slice(0, 300)}`)
+      try { return JSON.parse(raw) } catch { throw new Error(`Onverwacht OpenRouter antwoord: ${raw.slice(0, 200)}`) }
+    }
+
+    async function toDataUrl(buf: Buffer, maxSize = 1536): Promise<string> {
+      const png = await _sharp(buf)
+        .rotate()
+        .resize({ width: maxSize, height: maxSize, fit: 'inside', withoutEnlargement: true })
+        .png({ compressionLevel: 9 })
+        .toBuffer()
+      return `data:image/png;base64,${png.toString('base64')}`
+    }
+
+    return { init, loadImageBuffer, extractImageFromResponse, callModel, toDataUrl, get sharp() { return _sharp } }
+  }
+
+  // --- STAP 1: Generate Product Layer (retexturing: calibration pose + canonical skin) ---
+
+  ipcMain.handle('product-studio:generate-product-layer', async (_e, args: {
+    projectId: string
+    renderPacketId: string
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
+
+    const { data: packet } = await sb.from('render_packets').select('*').eq('id', args.renderPacketId).single()
+    if (!packet) return { ok: false, error: 'RenderPacket niet gevonden.' }
+
+    const { data: run, error: runError } = await sb.from('provider_runs').insert({
+      project_id: args.projectId,
+      provider_type: 'final-render',
+      provider_name: 'openrouter',
+      model_name: 'google/gemini-3.1-flash-image-preview',
+      status: 'processing',
+      idempotency_key: `product-layer-${args.renderPacketId}-${Date.now()}`,
+    }).select().single()
+    if (runError || !run) return { ok: false, error: runError?.message ?? 'Provider run aanmaken mislukt.' }
+
+    const startTime = Date.now()
+    try {
+      const h = createImageHelpers(jwt)
+      await h.init()
+
+      const beautyBuffer = await h.loadImageBuffer(packet.beauty_url, 'Beauty', true)
+      if (!beautyBuffer) throw new Error('Beauty render ontbreekt.')
+      const auxiliaryAssetUrls = (packet.auxiliary_asset_urls ?? {}) as Record<string, unknown>
+      const calibrationUrl = typeof auxiliaryAssetUrls.calibration_url === 'string' ? auxiliaryAssetUrls.calibration_url : null
+      const calibrationBuffer = await h.loadImageBuffer(calibrationUrl, 'Calibration')
+
+      const { data: sourceAssets } = await sb.from('source_assets').select('type, url').eq('project_id', args.projectId).in('type', ['original-image', 'object-mask'])
+      let sourceUrl: string | null = null
+      let maskUrl: string | null = null
+      for (const sa of sourceAssets ?? []) {
+        if (sa.type === 'original-image') sourceUrl = sa.url
+        if (sa.type === 'object-mask') maskUrl = sa.url
+      }
+
+      let canonicalReferenceUrls: string[] = []
+      if (packet.canonical_reference_set_id) {
+        const { data: canonicalSet } = await sb.from('canonical_reference_sets').select('view_ids').eq('id', packet.canonical_reference_set_id).maybeSingle()
+        const viewIds = Array.isArray(canonicalSet?.view_ids) ? canonicalSet.view_ids : []
+        if (viewIds.length > 0) {
+          const { data: canonicalViews } = await sb.from('reference_views').select('id, asset_url').in('id', viewIds).neq('status', 'rejected')
+          const canonicalById = new Map((canonicalViews ?? []).map((view) => [view.id, view.asset_url] as const))
+          canonicalReferenceUrls = viewIds.map((id) => canonicalById.get(id)).filter((url): url is string => typeof url === 'string' && url.length > 0).slice(0, 4)
+        }
+      }
+
+      const activeMaskUrl = packet.object_mask_url ?? maskUrl
+      const maskBuffer = await h.loadImageBuffer(activeMaskUrl, 'Object mask')
+
+      const primaryCanonicalUrl = canonicalReferenceUrls[0] ?? sourceUrl
+      const primaryCanonicalBuffer = await h.loadImageBuffer(primaryCanonicalUrl, 'Canonical')
+      if (!primaryCanonicalBuffer) throw new Error('Geen canonical referentie beschikbaar.')
+
+      const canonicalDataUrl = await h.toDataUrl(primaryCanonicalBuffer)
+      const calibrationDataUrl = await h.toDataUrl(calibrationBuffer ?? beautyBuffer)
+      const beautyDataUrl = await h.toDataUrl(beautyBuffer)
+
+      const productParts: any[] = [
+        {
+          type: 'text',
+          text: [
+            'Image 1 is calibration.png: keep this exact composition, camera angle, scale, crop, silhouette and product position.',
+            'Image 2 is beauty.png: same product pose with the real lighting and 3D shape.',
+            'Image 3 is canonical.png: use only its skin, texture, material, print and colors.',
+            'Output Image 1/Image 2 with the skin from Image 3. Do not change the pose, crop, size or angle.',
+          ].join('\n'),
+        },
+        { type: 'image_url', image_url: { url: calibrationDataUrl } },
+        { type: 'image_url', image_url: { url: beautyDataUrl } },
+        { type: 'image_url', image_url: { url: canonicalDataUrl } },
+      ]
+
+      const productJson = await h.callModel([{ role: 'user', content: productParts }], 'google/gemini-3.1-flash-image-preview')
+      let productLayerBuffer = await h.extractImageFromResponse(productJson)
+
+      // Apply object mask als alpha channel
+      if (maskBuffer) {
+        const productMeta = await h.sharp(productLayerBuffer).metadata()
+        const pw = productMeta.width ?? 1536
+        const ph = productMeta.height ?? 1536
+        const alphaMask = await h.sharp(maskBuffer).resize(pw, ph, { fit: 'fill' }).grayscale().threshold(32).toBuffer()
+        productLayerBuffer = await h.sharp(productLayerBuffer).resize(pw, ph, { fit: 'fill' }).removeAlpha().joinChannel(alphaMask).png({ compressionLevel: 9 }).toBuffer()
+      }
+
+      const productLayerUrl = await saveAssetLocally(user.id, args.projectId, `product_layer_${run.id}.png`, productLayerBuffer)
+
+      // Sla product_layer_url op in het render packet zodat stap 2 het kan gebruiken
+      await sb.from('render_packets').update({ product_layer_url: productLayerUrl }).eq('id', args.renderPacketId)
+
+      await sb.from('provider_runs').update({
+        status: 'completed',
+        latency_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      }).eq('id', run.id)
+
+      return { ok: true, productLayerUrl, providerRunId: run.id }
+    } catch (err: any) {
+      await sb.from('provider_runs').update({
+        status: 'failed', error_message: err.message,
+        latency_ms: Date.now() - startTime, completed_at: new Date().toISOString(),
+      }).eq('id', run.id)
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // --- STAP 2: Generate Final Render (background + clean plate, gebruikt bestaande product layer) ---
 
   ipcMain.handle('product-studio:generate-final-render', async (_e, args: {
     projectId: string
@@ -905,22 +1123,159 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const jwt = getJwt()
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
     const sb = getUserClient(jwt)
-
     const { data: { user } } = await sb.auth.getUser()
     if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
 
-    const { data: packet } = await sb
-      .from('render_packets')
-      .select('*')
-      .eq('id', args.renderPacketId)
-      .single()
-
+    const { data: packet } = await sb.from('render_packets').select('*').eq('id', args.renderPacketId).single()
     if (!packet) return { ok: false, error: 'RenderPacket niet gevonden.' }
 
     const preservationPolicy = args.preservationPolicy ?? 'balanced'
     const resolution = args.resolution ?? '2K'
 
-    // Provider run aanmaken
+    const { data: run, error: runError } = await sb.from('provider_runs').insert({
+      project_id: args.projectId,
+      provider_type: 'final-render',
+      provider_name: 'openrouter',
+      model_name: PRODUCT_STUDIO_FINAL_RENDER_MODEL,
+      status: 'processing',
+      idempotency_key: `final-${args.renderPacketId}-${Date.now()}`,
+    }).select().single()
+    if (runError || !run) return { ok: false, error: runError?.message ?? 'Provider run aanmaken mislukt.' }
+
+    const startTime = Date.now()
+    try {
+      const h = createImageHelpers(jwt)
+      await h.init()
+
+      // Laad de bestaande product layer (uit stap 1)
+      const productLayerUrl = (packet as any).product_layer_url as string | null
+      const productLayerBuffer = await h.loadImageBuffer(productLayerUrl, 'Product layer')
+      const beautyBuffer = await h.loadImageBuffer(packet.beauty_url, 'Beauty', true)
+      if (!beautyBuffer) throw new Error('Beauty render ontbreekt.')
+
+      const inputDataUrl = productLayerBuffer
+        ? await h.toDataUrl(productLayerBuffer)
+        : await h.toDataUrl(beautyBuffer)
+
+      // Camera-beschrijving uit manifest
+      let cameraDescription = ''
+      const manifest = packet.scene_manifest as any
+      if (manifest?.camera?.position && manifest?.camera?.target) {
+        const [cx, cy, cz] = manifest.camera.position as [number, number, number]
+        const [tx, ty, tz] = manifest.camera.target as [number, number, number]
+        const dx = cx - tx, dy = cy - ty, dz = cz - tz
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+        const elevationDeg = Math.round(Math.asin(dy / (dist || 1)) * (180 / Math.PI))
+        const azimuthDeg = Math.round(Math.atan2(dx, dz) * (180 / Math.PI))
+        const verticalDesc = elevationDeg > 25 ? 'from above (bird\'s eye)' : elevationDeg > 10 ? 'slightly from above' : elevationDeg < -10 ? 'from below (low angle)' : 'at eye level'
+        const horizontalDesc = Math.abs(azimuthDeg) < 15 ? 'front view' : Math.abs(azimuthDeg) > 165 ? 'rear view' : Math.abs(azimuthDeg) > 75 ? 'side view' : azimuthDeg > 0 ? 'three-quarter view from the right' : 'three-quarter view from the left'
+        cameraDescription = `The product is photographed ${verticalDesc}, ${horizontalDesc} (elevation ~${elevationDeg}°, azimuth ~${azimuthDeg}°). The background MUST use exactly this same camera angle and perspective — the vanishing points, horizon line, and floor plane must match.`
+      }
+
+      // Background genereren
+      const backgroundParts: any[] = [
+        {
+          type: 'text',
+          text: [
+            `Place the product from the image into a scene. Scene description: ${args.prompt}`,
+            '', cameraDescription ? `CAMERA: ${cameraDescription}` : '', '',
+            'CRITICAL RULES:',
+            '- Keep the product EXACTLY as it appears in the image — same texture, same colors, same details, same position and size.',
+            '- Do NOT alter, simplify, or re-interpret the product in any way.',
+            '- Only generate the environment/background around and behind the product.',
+            '- The background perspective and vanishing points MUST match the product\'s camera angle exactly.',
+            '- The surface/floor the product sits on must align with the product\'s ground plane.',
+            '- Match the lighting direction of the environment to the product.',
+          ].filter(Boolean).join('\n'),
+        },
+        { type: 'image_url', image_url: { url: inputDataUrl } },
+      ]
+
+      const backgroundJson = await h.callModel([{ role: 'user', content: backgroundParts }])
+      const outBuffer = await h.extractImageFromResponse(backgroundJson)
+      const finalUrl = await saveAssetLocally(user.id, args.projectId, `final_${run.id}.png`, outBuffer)
+
+      // Clean plate
+      let bgSignedUrl: string | null = null
+      try {
+        const cleanPlateParts: any[] = [
+          {
+            type: 'text',
+            text: [
+              'Remove the single main/central product from this image.',
+              'Fill the area where the product was with a natural, seamless continuation of the background.',
+              'The result should look like the product was never there.',
+              'Keep everything else in the scene exactly as it is — lighting, surfaces, other objects, shadows.',
+              'Output the full image at the same resolution.',
+            ].join('\n'),
+          },
+          { type: 'image_url', image_url: { url: await h.toDataUrl(outBuffer) } },
+        ]
+        const cleanPlateJson = await h.callModel([{ role: 'user', content: cleanPlateParts }])
+        const cleanPlateBuffer = await h.extractImageFromResponse(cleanPlateJson)
+        bgSignedUrl = await saveAssetLocally(user.id, args.projectId, `clean_plate_${run.id}.png`, cleanPlateBuffer)
+      } catch (cleanErr: any) {
+        console.error('[clean-plate] Failed:', cleanErr?.message ?? cleanErr)
+        bgSignedUrl = finalUrl
+      }
+
+      const { data: render, error: renderError } = await sb.from('final_render_versions').insert({
+        project_id: args.projectId,
+        render_packet_id: args.renderPacketId,
+        provider_run_id: run.id,
+        output_url: finalUrl,
+        background_plate_url: bgSignedUrl,
+        product_layer_url: productLayerUrl,
+        composite_url: finalUrl,
+        preservation_policy: preservationPolicy,
+        prompt: args.prompt,
+        resolution,
+        status: 'review',
+        layer_metadata: {
+          route: 'split-product-background',
+          has_background_plate: bgSignedUrl !== finalUrl,
+          has_product_layer: !!productLayerUrl,
+        },
+      }).select().single()
+      if (renderError) throw new Error(renderError.message)
+
+      await sb.from('provider_runs').update({
+        status: 'completed',
+        latency_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      }).eq('id', run.id)
+
+      await sb.from('product_projects').update({ status: 'render_pending' }).eq('id', args.projectId)
+
+      return { ok: true, render, providerRunId: run.id, backgroundPlateUrl: bgSignedUrl, productLayerUrl }
+    } catch (err: any) {
+      await sb.from('provider_runs').update({
+        status: 'failed', error_message: err.message,
+        latency_ms: Date.now() - startTime, completed_at: new Date().toISOString(),
+      }).eq('id', run.id)
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // --- Generate Clean Plate (verwijder product uit composite) ---
+
+  ipcMain.handle('product-studio:generate-clean-plate', async (_e, args: {
+    projectId: string
+    finalRenderVersionId: string
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
+
+    const { data: frv } = await sb
+      .from('final_render_versions')
+      .select('*')
+      .eq('id', args.finalRenderVersionId)
+      .single()
+    if (!frv) return { ok: false, error: 'FinalRenderVersion niet gevonden.' }
+
     const { data: run, error: runError } = await sb
       .from('provider_runs')
       .insert({
@@ -929,347 +1284,123 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         provider_name: 'openrouter',
         model_name: PRODUCT_STUDIO_FINAL_RENDER_MODEL,
         status: 'processing',
-        idempotency_key: `final-${args.renderPacketId}-${Date.now()}`,
+        idempotency_key: `clean-plate-${args.finalRenderVersionId}-${Date.now()}`,
       })
       .select()
       .single()
-
-    if (runError) return { ok: false, error: runError.message }
+    if (runError || !run) return { ok: false, error: runError?.message ?? 'Provider run aanmaken mislukt.' }
 
     const startTime = Date.now()
-
     try {
       const sharp = (await import('sharp')).default
       const { callOpenRouter } = await import('./lib/proxy')
 
-      async function loadImageBuffer(url: string | null | undefined, label: string, required = false): Promise<Buffer | null> {
-        if (!url) {
-          if (required) throw new Error(`${label} ontbreekt.`)
-          return null
+      async function loadBuf(url: string | null | undefined): Promise<Buffer | null> {
+        if (!url) return null
+        if (url.startsWith('huphe://file/')) {
+          try { return await readFile(decodeURIComponent(url.replace('huphe://file/', '').split('?')[0])) } catch { return null }
         }
-        if (url.startsWith('data:image/')) {
-          const match = url.match(/^data:image\/\w+;base64,(.+)$/)
-          if (!match) {
-            if (required) throw new Error(`${label} heeft een ongeldig data URL formaat.`)
-            return null
-          }
-          return Buffer.from(match[1], 'base64')
+        if (url.startsWith('https://')) {
+          const r = await fetch(url); return r.ok ? Buffer.from(await r.arrayBuffer()) : null
         }
-        if (!url.startsWith('https://')) {
-          if (required) throw new Error(`${label} moet HTTPS zijn.`)
-          return null
-        }
-        const response = await fetch(url)
-        if (!response.ok) {
-          if (required) throw new Error(`${label} kon niet worden opgehaald.`)
-          return null
-        }
-        return Buffer.from(await response.arrayBuffer())
+        return null
       }
 
-      // Helper: extract image buffer from OpenRouter response
-      async function extractImageFromResponse(json: any): Promise<Buffer> {
-        const message = json?.choices?.[0]?.message
-        const images: any[] = message?.images ?? []
-        let imgUrl: string | null = null
-        let imgB64: string | null = null
-        for (const img of images) {
-          if (typeof img === 'string') {
-            if (img.startsWith('http') || img.startsWith('data:')) imgUrl = img
-            else imgB64 = img
-            break
-          }
-          if (img?.b64_json) { imgB64 = img.b64_json; break }
-          const u = img?.image_url?.url ?? img?.url
-          if (u) { imgUrl = u; break }
-        }
-        if (!imgUrl && !imgB64 && Array.isArray(message?.content)) {
-          for (const part of message.content) {
-            if (part?.type === 'image_url') { imgUrl = part.image_url?.url; break }
-          }
-        }
-        if (!imgUrl && !imgB64) throw new Error('Geen afbeelding ontvangen van OpenRouter.')
-        if (imgB64) return Buffer.from(imgB64.replace(/^data:image\/\w+;base64,/, ''), 'base64')
-        if (imgUrl!.startsWith('data:')) return Buffer.from(imgUrl!.replace(/^data:image\/\w+;base64,/, ''), 'base64')
-        const dl = await fetch(imgUrl!)
-        if (!dl.ok) throw new Error(`Kan output niet downloaden: ${imgUrl!.slice(0, 80)}`)
-        return Buffer.from(await dl.arrayBuffer())
-      }
+      const compositeBuffer = await loadBuf(frv.output_url ?? frv.composite_url)
+      if (!compositeBuffer) throw new Error('Composite afbeelding niet gevonden.')
 
-      // Helper: callModel met fallback modalities
-      async function callModel(messages: any[]): Promise<any> {
-        let res = await callOpenRouter({
-          model: PRODUCT_STUDIO_FINAL_RENDER_MODEL,
-          modalities: ['image', 'text'],
-          messages,
-          stream: false,
-        }, jwt)
-        let raw = await res.text()
-        if (res.status === 404 && raw.includes('output modalities: image, text')) {
-          res = await callOpenRouter({
-            model: PRODUCT_STUDIO_FINAL_RENDER_MODEL,
-            modalities: ['image'],
-            messages,
-            stream: false,
-          }, jwt)
-          raw = await res.text()
-        }
-        if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${raw.slice(0, 300)}`)
-        try { return JSON.parse(raw) } catch {
-          throw new Error(`Onverwacht OpenRouter antwoord: ${raw.slice(0, 200)}`)
-        }
-      }
+      // Zoek object mask
+      const { data: sourceAssets } = await sb
+        .from('source_assets')
+        .select('type, url')
+        .eq('project_id', args.projectId)
+        .eq('type', 'object-mask')
+      const maskUrl = sourceAssets?.[0]?.url ?? null
+      const maskBuffer = await loadBuf(maskUrl)
 
-      // Helper: buffer → resized data URL
       async function toDataUrl(buf: Buffer, maxSize = 1536): Promise<string> {
         const png = await sharp(buf)
-          .rotate()
           .resize({ width: maxSize, height: maxSize, fit: 'inside', withoutEnlargement: true })
           .png({ compressionLevel: 9 })
           .toBuffer()
         return `data:image/png;base64,${png.toString('base64')}`
       }
 
-      const beautyBuffer = await loadImageBuffer(packet.beauty_url, 'Beauty', true)
-      if (!beautyBuffer) throw new Error('Beauty render ontbreekt.')
-      const beautyDataUrl = await toDataUrl(beautyBuffer)
-
-      // Haal source en object-mask op
-      const { data: sourceAssets } = await sb
-        .from('source_assets')
-        .select('type, url')
-        .eq('project_id', args.projectId)
-        .in('type', ['original-image', 'object-mask', 'basic-product'])
-
-      let sourceUrl: string | null = null
-      let maskUrl: string | null = null
-      let basicProductUrl: string | null = null
-      for (const sa of sourceAssets ?? []) {
-        if (sa.type === 'original-image') sourceUrl = sa.url
-        if (sa.type === 'object-mask') maskUrl = sa.url
-        if (sa.type === 'basic-product') basicProductUrl = sa.url
-      }
-
-      let canonicalReferenceUrls: string[] = []
-      if (packet.canonical_reference_set_id) {
-        const { data: canonicalSet } = await sb
-          .from('canonical_reference_sets')
-          .select('view_ids')
-          .eq('id', packet.canonical_reference_set_id)
-          .maybeSingle()
-        const viewIds = Array.isArray(canonicalSet?.view_ids) ? canonicalSet.view_ids : []
-        if (viewIds.length > 0) {
-          const { data: canonicalViews } = await sb
-            .from('reference_views')
-            .select('id, asset_url')
-            .in('id', viewIds)
-            .neq('status', 'rejected')
-          const canonicalById = new Map((canonicalViews ?? [])
-            .map((view) => [view.id, view.asset_url] as const))
-          canonicalReferenceUrls = viewIds
-            .map((id) => canonicalById.get(id))
-            .filter((url): url is string => typeof url === 'string' && url.length > 0)
-            .slice(0, 4)
-        }
-      }
-
-      const maskBuffer = await loadImageBuffer(maskUrl, 'Object mask')
-      const depthBuffer = await loadImageBuffer(packet.depth_url, 'Depth map')
-
-      // ========== PRODUCT LAYER ==========
-      // Gepolisht product op transparant/neutraal, zelfde positie/hoek.
-
-      let productLayerBuffer: Buffer | null = null
-      let productLayerSignedUrl: string | null = null
-
-      const primaryCanonicalUrl = canonicalReferenceUrls[0] ?? sourceUrl
-      const primaryCanonicalBuffer = await loadImageBuffer(primaryCanonicalUrl, 'Canonical')
-
-      if (primaryCanonicalBuffer) {
-        const canonicalDataUrl = await toDataUrl(primaryCanonicalBuffer)
-
-        const productParts: any[] = [
-          {
-            type: 'text',
-            text: [
-              'You will receive exactly two images.',
-              'Image 1 is beauty.png: the grey 3D render. This image is the absolute source of truth for composition, camera angle, crop, scale, product position, silhouette, and lighting.',
-              'Image 2 is canonical_1.png: the product appearance reference. Use this only for skin, texture, color, print, material, finish, labels, and visual identity.',
-              'Edit Image 1 only. Do not redraw, copy, resize, crop, rotate, or reposition the product from Image 2.',
-              'Transfer only the surface appearance from Image 2 onto the product in Image 1: skin, texture, color, print, material, finish, labels, and visual identity.',
-              'The output must keep the exact product bounding box, pose, camera angle, silhouette, crop, and pixel position from Image 1.',
-              'If there is any conflict between Image 1 geometry and Image 2 appearance, Image 1 geometry always wins.',
-              'Keep the exact light direction from beauty.png. Preserve the same highlight side, same shadow side, same rim light, same internal surface shading, and same exposure from beauty.png.',
-              'Only replace the grey material with the canonical product skin. Do not relight the object.',
-              'Do not copy the camera angle, crop, scale, or pose from canonical_1.png.',
-              'Do not change the composition, angle, lighting, silhouette, scale, crop, or position from beauty.png.',
-              'Do not generate or preserve any cast shadow outside the product silhouette. The area around the product must stay pure black so the backend can composite it separately.',
-              'Do not add a floor, table, background, reflection, environment, or contact shadow.',
-              'Return only the edited image.',
-            ].join('\n'),
-          },
-          { type: 'image_url', image_url: { url: beautyDataUrl } },
-          { type: 'image_url', image_url: { url: canonicalDataUrl } },
-        ]
-
-        const productJson = await callModel([{ role: 'user', content: productParts }])
-        productLayerBuffer = await extractImageFromResponse(productJson)
-
-        const plPath = `${user.id}/${args.projectId}/product_layer_${run.id}.png`
-        await sb.storage.from('atelier-assets').upload(plPath, productLayerBuffer, { contentType: 'image/png', upsert: true })
-        const { data: plUrlData } = await sb.storage.from('atelier-assets').createSignedUrl(plPath, 86400)
-        productLayerSignedUrl = plUrlData?.signedUrl
-      }
-
-      // ========== BACKGROUND PLATE ==========
-      // Lege achtergrond zonder product, gematcht op de perfecte product layer.
-
-      const bgParts: any[] = [
-        { type: 'text', text: [
-          'You will receive beauty.png and product_layer.png, and sometimes mask.png and depth.png.',
-          'beauty.png is the strict 3D camera and geometry reference.',
-          'product_layer.png is the finished product in the correct camera angle, scale, crop, position, silhouette, and lighting.',
-          'Generate a clean empty background plate that physically matches product_layer.png and beauty.png.',
-          'Use the exact same camera angle, camera height, lens, field of view, crop, horizon, vanishing points, ground plane direction, lighting direction, exposure, and proportions.',
-          'The generated surface/floor/counter must align with the product contact plane implied by beauty.png and product_layer.png.',
-          'The empty place where the product belongs must remain at the same pixel position and scale, but the product itself must be removed.',
-          'Do not include any vase, bottle, product, silhouette, placeholder, reflection, or cast shadow of the product.',
-          'Do not choose a new room camera angle. Do not create a wide interior shot if the product layer is a tight product angle.',
-          'If mask.png is provided, the white mask area is the product area that must be filled with natural background continuation.',
-          'If depth.png is provided, use it only to understand the scene perspective and ground plane.',
-          `Requested environment: ${args.prompt}`,
-          'Return only the clean empty background image.',
-        ].join('\n') },
-        { type: 'image_url', image_url: { url: beautyDataUrl } },
+      const parts: any[] = [
+        {
+          type: 'text',
+          text: [
+            'Remove the main product from this image and fill the area with a natural continuation of the background.',
+            'The result should look like the product was never there — seamless inpainting.',
+            'Keep the rest of the scene (lighting, surfaces, objects in background) exactly as they are.',
+          ].join('\n'),
+        },
+        { type: 'image_url', image_url: { url: await toDataUrl(compositeBuffer) } },
       ]
-      if (productLayerBuffer) bgParts.push({ type: 'image_url', image_url: { url: await toDataUrl(productLayerBuffer) } })
-      if (maskBuffer) bgParts.push({ type: 'image_url', image_url: { url: await toDataUrl(maskBuffer) } })
-      if (depthBuffer) bgParts.push({ type: 'image_url', image_url: { url: await toDataUrl(depthBuffer) } })
-
-      const bgJson = await callModel([{ role: 'user', content: bgParts }])
-      const bgBuffer = await extractImageFromResponse(bgJson)
-
-      const bgPath = `${user.id}/${args.projectId}/bg_plate_${run.id}.png`
-      await sb.storage.from('atelier-assets').upload(bgPath, bgBuffer, { contentType: 'image/png', upsert: true })
-      const { data: bgUrlData } = await sb.storage.from('atelier-assets').createSignedUrl(bgPath, 86400)
-      const bgSignedUrl = bgUrlData?.signedUrl
-
-      // ========== COMPOSITE ==========
-      // AI eindfase: background + product layer samenvoegen tot één natuurlijk beeld.
-
-      let outBuffer: Buffer
-      if (productLayerBuffer) {
-        const bgDataUrl = await toDataUrl(bgBuffer)
-        const productDataUrl = await toDataUrl(productLayerBuffer)
-        const compositeParts: any[] = [
-          {
-            type: 'text',
-            text: [
-              'You will receive exactly two images.',
-              'Image 1 is background.png: the clean environment/background plate.',
-              'Image 2 is product_layer.png: the finished product in the correct camera angle, scale, crop, lighting direction, and silhouette.',
-              'Create one final photorealistic image by placing product_layer.png into background.png.',
-              'The product layer is the absolute source of truth for the product. Do not change its shape, camera angle, pose, scale, crop, print, material, texture, or details.',
-              'The background is the source for the environment style and objects, but you may adjust/warp/crop/extend the background, counter, floor, horizon, perspective, and lighting so the space physically matches the product layer perfectly.',
-              'The final background must feel photographed from the product-layer camera, not from the original background camera.',
-              'Make the surface under the product align with the product contact point, scale, lens, and horizon. Correct the counter/floor perspective if needed.',
-              'The final image must visibly contain the product from product_layer.png. Do not omit it, shrink it, hide it, replace it, or move it to a shelf/background object.',
-              'Keep the product at the exact same pixel position, size, and crop as in product_layer.png. Do not move it to a more natural place in the room.',
-              'Blend them naturally: remove the black product-layer background, preserve the product, match background exposure/color/perspective to the product, and add subtle realistic contact shadow or ambient shadow where appropriate.',
-              'Do not create a new product. Do not replace the product with canonical/reference pose. Do not crop closer. Do not move the product away from its product_layer position.',
-              'Return only the final merged image.',
-            ].join('\n'),
-          },
-          { type: 'image_url', image_url: { url: bgDataUrl } },
-          { type: 'image_url', image_url: { url: productDataUrl } },
-        ]
-
-        const compositeJson = await callModel([{ role: 'user', content: compositeParts }])
-        outBuffer = await extractImageFromResponse(compositeJson)
-      } else {
-        outBuffer = bgBuffer
+      if (maskBuffer) {
+        parts.push({
+          type: 'text',
+          text: 'The white area in this mask shows exactly where the product is. Remove only what is inside the white mask area.',
+        })
+        parts.push({ type: 'image_url', image_url: { url: await toDataUrl(maskBuffer) } })
       }
 
-      const storagePath = `${user.id}/${args.projectId}/final_${run.id}.png`
-      await sb.storage
-        .from('atelier-assets')
-        .upload(storagePath, outBuffer, { contentType: 'image/png', upsert: true })
+      let res = await callOpenRouter({
+        model: PRODUCT_STUDIO_FINAL_RENDER_MODEL,
+        modalities: ['image', 'text'],
+        messages: [{ role: 'user', content: parts }],
+        stream: false,
+      }, jwt)
+      let raw = await res.text()
+      if (res.status === 404 && raw.includes('output modalities: image, text')) {
+        res = await callOpenRouter({
+          model: PRODUCT_STUDIO_FINAL_RENDER_MODEL,
+          modalities: ['image'],
+          messages: [{ role: 'user', content: parts }],
+          stream: false,
+        }, jwt)
+        raw = await res.text()
+      }
+      if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${raw.slice(0, 300)}`)
 
-      const { data: urlData } = await sb.storage
-        .from('atelier-assets')
-        .createSignedUrl(storagePath, 86400)
+      const json = JSON.parse(raw)
+      const msg = json?.choices?.[0]?.message
+      let cleanPlateBuffer: Buffer | null = null
+      const images: any[] = msg?.images ?? []
+      for (const img of images) {
+        if (typeof img === 'string') {
+          if (img.startsWith('data:')) { const m = img.match(/;base64,(.+)$/); if (m) cleanPlateBuffer = Buffer.from(m[1], 'base64') }
+          else cleanPlateBuffer = Buffer.from(img, 'base64')
+          break
+        }
+        if (img?.b64_json) { cleanPlateBuffer = Buffer.from(img.b64_json, 'base64'); break }
+        const u = img?.image_url?.url ?? img?.url
+        if (u?.startsWith('data:')) { const m = u.match(/;base64,(.+)$/); if (m) cleanPlateBuffer = Buffer.from(m[1], 'base64') }
+      }
+      if (!cleanPlateBuffer && typeof msg?.content === 'string') {
+        const m = msg.content.match(/data:image\/\w+;base64,([A-Za-z0-9+/=]+)/)
+        if (m) cleanPlateBuffer = Buffer.from(m[1], 'base64')
+      }
+      if (!cleanPlateBuffer) throw new Error('Geen clean plate afbeelding ontvangen.')
 
-      const finalUrl = urlData?.signedUrl ?? packet.beauty_url
+      const cleanPlateUrl = await saveAssetLocally(user.id, args.projectId, `clean_plate_${args.finalRenderVersionId}.png`, cleanPlateBuffer)
 
-      // FinalRenderVersion opslaan met layered assets
-      const { data: render, error: renderError } = await sb
-        .from('final_render_versions')
-        .insert({
-          project_id: args.projectId,
-          render_packet_id: args.renderPacketId,
-          provider_run_id: run.id,
-          output_url: finalUrl,
-          background_plate_url: bgSignedUrl,
-          product_layer_url: productLayerSignedUrl,
-          composite_url: finalUrl,
-          preservation_policy: preservationPolicy,
-          prompt: args.prompt,
-          resolution,
-          status: 'review',
-          layer_metadata: {
-            has_background_plate: !!bgSignedUrl,
-            has_product_layer: !!productLayerSignedUrl,
-            has_ai_composite: !!productLayerBuffer,
-            has_mask_composite: false,
-          },
-        })
-        .select()
-        .single()
+      await sb.from('final_render_versions').update({ background_plate_url: cleanPlateUrl }).eq('id', args.finalRenderVersionId)
 
-      if (renderError) throw new Error(renderError.message)
+      await sb.from('provider_runs').update({
+        status: 'completed',
+        latency_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      }).eq('id', run.id)
 
-      // Provider run updaten met metadata over welke inputs/passes zijn gebruikt
-      await sb
-        .from('provider_runs')
-        .update({
-          status: 'completed',
-          latency_ms: Date.now() - startTime,
-          completed_at: new Date().toISOString(),
-          metadata: {
-            background_plate_url: bgSignedUrl ?? null,
-            product_layer_url: productLayerSignedUrl ?? null,
-            composite_method: productLayerBuffer ? 'ai-background-product-composite' : 'background-only',
-            inputs_used: {
-              beauty: true,
-              basic_product: !!basicProductUrl,
-              source: !!sourceUrl,
-              object_mask: !!maskUrl,
-              depth: !!depthBuffer,
-              scene_manifest: !!packet.scene_manifest,
-              canonical_references: canonicalReferenceUrls.length,
-            },
-          },
-        })
-        .eq('id', run.id)
-
-      // Project status updaten
-      await sb
-        .from('product_projects')
-        .update({ status: 'render_pending' })
-        .eq('id', args.projectId)
-
-      return { ok: true, render, providerRunId: run.id, backgroundPlateUrl: bgSignedUrl, productLayerUrl: productLayerSignedUrl }
+      return { ok: true, cleanPlateUrl, providerRunId: run.id }
     } catch (err: any) {
-      await sb
-        .from('provider_runs')
-        .update({
-          status: 'failed',
-          error_message: err.message,
-          latency_ms: Date.now() - startTime,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', run.id)
-
+      await sb.from('provider_runs').update({
+        status: 'failed',
+        error_message: err.message,
+        latency_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      }).eq('id', run.id)
       return { ok: false, error: err.message }
     }
   })
@@ -1368,8 +1499,16 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           resolution: '1K',
         }, jwt) as any
 
-        const imageUrl = result?.images?.[0]?.url
-        if (!imageUrl) continue
+        const falImageUrl = result?.images?.[0]?.url
+        if (!falImageUrl) continue
+
+        // Download van fal en sla lokaal op
+        const { data: { user: authUser } } = await sb.auth.getUser()
+        if (!authUser) continue
+        const imgRes = await fetch(falImageUrl)
+        if (!imgRes.ok) continue
+        const imgBuf = Buffer.from(await imgRes.arrayBuffer())
+        const imageUrl = await saveAssetLocally(authUser.id, args.projectId, `views/${angle}_${Date.now()}.png`, imgBuf)
 
         // Reference view opslaan
         const { data: view } = await sb
@@ -1444,8 +1583,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
     const sb = getUserClient(jwt)
 
-    if (args.primaryImageUrl && !args.primaryImageUrl.startsWith('https://')) {
-      return { ok: false, error: 'Primary image URL moet HTTPS zijn.' }
+    if (args.primaryImageUrl && !args.primaryImageUrl.startsWith('https://') && !args.primaryImageUrl.startsWith('huphe://file/')) {
+      return { ok: false, error: 'Primary image URL moet HTTPS of huphe:// zijn.' }
     }
 
     const { data: { user } } = await sb.auth.getUser()
@@ -1533,16 +1672,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       if (!glbRes.ok) throw new Error('Kan GLB niet downloaden.')
       const glbBuffer = Buffer.from(await glbRes.arrayBuffer())
 
-      const storagePath = `${user.id}/${args.projectId}/mesh_${run.id}.glb`
-      await sb.storage
-        .from('atelier-assets')
-        .upload(storagePath, glbBuffer, { contentType: 'model/gltf-binary', upsert: true })
-
-      const { data: meshUrlData } = await sb.storage
-        .from('atelier-assets')
-        .createSignedUrl(storagePath, 86400)
-
-      const meshUrl = meshUrlData?.signedUrl ?? glbUrl
+      const meshUrl = await saveAssetLocally(user.id, args.projectId, `mesh_${run.id}.glb`, glbBuffer)
 
       // Reconstruction version opslaan
       const { data: recon, error: reconError } = await sb
@@ -1768,6 +1898,56 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
   })
 
+  ipcMain.handle('product-studio:apply-debug-texture', async (_e, args: {
+    projectId: string
+    reconstructionVersionId: string
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
+
+    const { data: recon } = await sb
+      .from('reconstruction_versions')
+      .select('mesh_url')
+      .eq('id', args.reconstructionVersionId)
+      .single()
+    if (!recon?.mesh_url) return { ok: false, error: 'Geen mesh beschikbaar.' }
+
+    const { applyDebugTexture } = await import('./lib/texture-projector')
+    let glbBuffer: Buffer
+    if (recon.mesh_url.startsWith('huphe://file/')) {
+      glbBuffer = await readFile(decodeURIComponent(recon.mesh_url.replace('huphe://file/', '').split('?')[0]))
+    } else {
+      const res = await fetch(recon.mesh_url)
+      glbBuffer = Buffer.from(await res.arrayBuffer())
+    }
+    const result = await applyDebugTexture(glbBuffer)
+
+    const textureDir = join(app.getPath('userData'), 'product-studio', user.id, args.projectId, 'textures')
+    await mkdir(textureDir, { recursive: true })
+
+    const meshPath = join(textureDir, `textured_mesh_${args.reconstructionVersionId}.glb`)
+    const atlasPath = join(textureDir, `texture_atlas_${args.reconstructionVersionId}.png`)
+    const runVersion = Date.now()
+    const toUrl = (p: string) => `huphe://file/${encodeURIComponent(p)}?v=${runVersion}`
+
+    await Promise.all([
+      writeFile(meshPath, result.texturedGlbBuffer),
+      writeFile(atlasPath, result.atlasBuffer),
+    ])
+
+    await sb.from('reconstruction_versions').update({
+      texture_status: 'completed',
+      texture_error: null,
+      textured_mesh_url: toUrl(meshPath),
+      texture_atlas_url: toUrl(atlasPath),
+    }).eq('id', args.reconstructionVersionId)
+
+    return { ok: true, texturedMeshUrl: toUrl(meshPath), textureAtlasUrl: toUrl(atlasPath) }
+  })
+
   ipcMain.handle('product-studio:get-texture-status', async (_e, reconstructionVersionId: string) => {
     const jwt = getJwt()
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
@@ -1906,6 +2086,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         async function loadBuf(url: string | null | undefined): Promise<Buffer | null> {
           if (!url) return null
           if (url.startsWith('data:image/')) { const m = url.match(/;base64,(.+)$/); return m ? Buffer.from(m[1], 'base64') : null }
+          if (url.startsWith('huphe://file/')) {
+            try { return await readFile(decodeURIComponent(url.replace('huphe://file/', '').split('?')[0])) } catch { return null }
+          }
           if (!url.startsWith('https://')) return null
           const r = await fetch(url); return r.ok ? Buffer.from(await r.arrayBuffer()) : null
         }
@@ -1974,10 +2157,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         }])
         const sceneBuffer = await extractImageFromResponse(sceneJson)
 
-        const scenePath = `${user.id}/${run.project_id}/scene_${runId}_retry${run.retry_count + 1}.png`
-        await sb.storage.from('atelier-assets').upload(scenePath, sceneBuffer, { contentType: 'image/png', upsert: true })
-        const { data: sceneUrlData } = await sb.storage.from('atelier-assets').createSignedUrl(scenePath, 86400)
-        const sceneSignedUrl = sceneUrlData?.signedUrl
+        const sceneSignedUrl = await saveAssetLocally(user.id, run.project_id, `scene_${runId}_retry${run.retry_count + 1}.png`, sceneBuffer)
 
         // Polish pass
         let outBuffer: Buffer
@@ -2009,10 +2189,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           outBuffer = sceneBuffer
         }
 
-        const storagePath = `${user.id}/${run.project_id}/final_${runId}_retry${run.retry_count + 1}.png`
-        await sb.storage.from('atelier-assets').upload(storagePath, outBuffer, { contentType: 'image/png', upsert: true })
-        const { data: urlData } = await sb.storage.from('atelier-assets').createSignedUrl(storagePath, 86400)
-        await sb.from('final_render_versions').update({ output_url: urlData?.signedUrl ?? packet.beauty_url, status: 'review' }).eq('id', frv.id)
+        const finalRetryUrl = await saveAssetLocally(user.id, run.project_id, `final_${runId}_retry${run.retry_count + 1}.png`, outBuffer)
+        await sb.from('final_render_versions').update({ output_url: finalRetryUrl, status: 'review' }).eq('id', frv.id)
         await sb.from('provider_runs').update({
           metadata: {
             basic_product_url: basicProductUrl ?? null,
@@ -2068,11 +2246,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         if (!glbUrl) throw new Error('Geen GLB ontvangen van TRELLIS 2.')
 
         const glbBuffer = Buffer.from(await (await fetch(glbUrl)).arrayBuffer())
-        const storagePath = `${user.id}/${run.project_id}/mesh_${runId}_retry${run.retry_count + 1}.glb`
-        await sb.storage.from('atelier-assets').upload(storagePath, glbBuffer, { contentType: 'model/gltf-binary', upsert: true })
-        const { data: meshUrlData } = await sb.storage.from('atelier-assets').createSignedUrl(storagePath, 86400)
-
-        await sb.from('reconstruction_versions').update({ glb_url: meshUrlData?.signedUrl ?? glbUrl, status: 'review' }).eq('id', recon.id)
+        const meshRetryUrl = await saveAssetLocally(user.id, run.project_id, `mesh_${runId}_retry${run.retry_count + 1}.glb`, glbBuffer)
+        await sb.from('reconstruction_versions').update({ glb_url: meshRetryUrl, status: 'review' }).eq('id', recon.id)
 
       } else {
         // reference-view: te veel variabelen (targetViews, prompts per hoek) — laat UI opnieuw dispatchen

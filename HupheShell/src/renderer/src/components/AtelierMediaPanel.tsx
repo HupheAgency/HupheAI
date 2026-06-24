@@ -550,7 +550,7 @@ export function AtelierMediaCreationPanel({
         />
       )}
       {/* Left vertical tool toolbar */}
-      <div className={['flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0f0f0f] py-3', mediaType ? 'flex w-14' : 'hidden'].join(' ')}>
+      <div className={['flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0f0f0f] py-3', mediaType && !productStudioOpen ? 'flex w-14' : 'hidden'].join(' ')}>
         {tools.map((tool) => (
           <LeftToolTooltip key={tool.id} label={tool.label}>
             <button
@@ -579,7 +579,7 @@ export function AtelierMediaCreationPanel({
                   {viewport}
                 </div>
               </section>
-              <div className="flex w-[340px] flex-shrink-0 flex-col border-l border-white/[0.06] bg-[#111] text-white overflow-y-auto">
+              <div className="flex w-[340px] flex-shrink-0 flex-col overflow-hidden border-l border-white/[0.06] bg-[#111] text-white">
                 {sidebar}
               </div>
             </>

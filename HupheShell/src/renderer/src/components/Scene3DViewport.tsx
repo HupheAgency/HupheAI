@@ -8,6 +8,9 @@ import SceneObject from './SceneObject'
 
 export interface RenderPasses {
   textured: string
+  calibration: string
+  mask: string
+  light: string
   depth: string
   normal: string
 }
@@ -55,9 +58,10 @@ export interface Scene3DRenderManifest {
 
 export interface Scene3DViewportHandle {
   captureScreenshot: () => string | null
-  captureCleanScreenshot: () => string | null
-  captureAllPasses: () => RenderPasses | null
+  captureCleanScreenshot: (fovScale?: number) => string | null
+  captureAllPasses: (fovScale?: number) => RenderPasses | null
   captureRenderManifest: () => Scene3DRenderManifest | null
+  getCanvasElement: () => HTMLCanvasElement | null
 }
 
 const EDITOR_ONLY_USER_DATA = { __editorOnly: true, __helper: true }
@@ -417,16 +421,24 @@ function hideEditorOnlyObjects(scene: THREE.Scene): THREE.Object3D[] {
   return hidden
 }
 
-function CleanScreenshotCapture({ captureRef }: { captureRef: React.MutableRefObject<(() => string | null) | null> }) {
+const RENDER_WIDTH = 1920
+const RENDER_HEIGHT = 1080
+
+function CleanScreenshotCapture({ captureRef }: { captureRef: React.MutableRefObject<((fovScale?: number) => string | null) | null> }) {
   const { gl, scene, camera } = useThree()
 
   useEffect(() => {
-    captureRef.current = () => {
+    captureRef.current = (fovScale?: number) => {
       const hidden = hideEditorOnlyObjects(scene)
-      gl.render(scene, camera)
-      const dataUrl = gl.domElement.toDataURL('image/png')
+      const rt = new THREE.WebGLRenderTarget(RENDER_WIDTH, RENDER_HEIGHT)
+      let dataUrl = ''
+
+      withOffscreenCamera(camera, fovScale, () => {
+        dataUrl = renderToDataUrl(gl, scene, camera, rt)
+      })
+
+      rt.dispose()
       hidden.forEach((obj) => { obj.visible = true })
-      gl.render(scene, camera)
       return dataUrl
     }
     return () => { captureRef.current = null }
@@ -435,43 +447,188 @@ function CleanScreenshotCapture({ captureRef }: { captureRef: React.MutableRefOb
   return null
 }
 
-function RenderPassCapture({ passRef }: { passRef: React.MutableRefObject<(() => RenderPasses | null) | null> }) {
+function createCalibrationTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = 512
+  canvas.height = 512
+  const ctx = canvas.getContext('2d')!
+
+  const cell = 32
+  for (let y = 0; y < canvas.height; y += cell) {
+    for (let x = 0; x < canvas.width; x += cell) {
+      ctx.fillStyle = ((x / cell + y / cell) % 2 === 0) ? '#f4f4f4' : '#8f8f8f'
+      ctx.fillRect(x, y, cell, cell)
+    }
+  }
+
+  ctx.lineWidth = 8
+  ctx.strokeStyle = '#111111'
+  for (let x = 0; x <= canvas.width; x += cell * 2) {
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, canvas.height)
+    ctx.stroke()
+  }
+  for (let y = 0; y <= canvas.height; y += cell * 2) {
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(canvas.width, y)
+    ctx.stroke()
+  }
+
+  ctx.lineWidth = 18
+  ctx.strokeStyle = '#ef4444'
+  ctx.beginPath()
+  ctx.moveTo(canvas.width / 2, 0)
+  ctx.lineTo(canvas.width / 2, canvas.height)
+  ctx.stroke()
+
+  ctx.strokeStyle = '#22c55e'
+  ctx.beginPath()
+  ctx.moveTo(0, canvas.height / 2)
+  ctx.lineTo(canvas.width, canvas.height / 2)
+  ctx.stroke()
+
+  ctx.fillStyle = '#2563eb'
+  ctx.beginPath()
+  ctx.arc(canvas.width / 2, canvas.height * 0.22, 42, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.lineWidth = 10
+  ctx.strokeStyle = '#ffffff'
+  ctx.stroke()
+
+  ctx.fillStyle = '#111111'
+  ctx.font = 'bold 46px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText('FRONT', canvas.width / 2, canvas.height * 0.84)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.wrapS = THREE.RepeatWrapping
+  texture.wrapT = THREE.RepeatWrapping
+  texture.needsUpdate = true
+  return texture
+}
+
+function applyCalibrationMaterial(scene: THREE.Scene): () => void {
+  const sceneObjects = scene.children.find((child) => child.type === 'Group' && child.userData.__sceneObjects)
+  const originals: Array<{ mesh: THREE.Mesh; material: THREE.Material | THREE.Material[] }> = []
+  const texture = createCalibrationTexture()
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    color: '#ffffff',
+    side: THREE.DoubleSide,
+  })
+
+  sceneObjects?.traverse((obj) => {
+    if (!(obj instanceof THREE.Mesh)) return
+    originals.push({ mesh: obj, material: obj.material })
+    obj.material = material
+  })
+
+  return () => {
+    originals.forEach(({ mesh, material }) => { mesh.material = material })
+    material.dispose()
+    texture.dispose()
+  }
+}
+
+const _offscreenCanvas = document.createElement('canvas')
+_offscreenCanvas.width = RENDER_WIDTH
+_offscreenCanvas.height = RENDER_HEIGHT
+
+function renderToDataUrl(gl: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera, rt: THREE.WebGLRenderTarget): string {
+  gl.setRenderTarget(rt)
+  gl.render(scene, camera)
+  const buf = new Uint8Array(RENDER_WIDTH * RENDER_HEIGHT * 4)
+  gl.readRenderTargetPixels(rt, 0, 0, RENDER_WIDTH, RENDER_HEIGHT, buf)
+  gl.setRenderTarget(null)
+
+  const ctx = _offscreenCanvas.getContext('2d')!
+  const imageData = ctx.createImageData(RENDER_WIDTH, RENDER_HEIGHT)
+  for (let y = 0; y < RENDER_HEIGHT; y++) {
+    const srcRow = (RENDER_HEIGHT - 1 - y) * RENDER_WIDTH * 4
+    const dstRow = y * RENDER_WIDTH * 4
+    imageData.data.set(buf.subarray(srcRow, srcRow + RENDER_WIDTH * 4), dstRow)
+  }
+  ctx.putImageData(imageData, 0, 0)
+  return _offscreenCanvas.toDataURL('image/png')
+}
+
+function withOffscreenCamera(camera: THREE.Camera, fovScale: number | undefined, fn: () => void) {
+  const origFov = (camera as any).fov as number | undefined
+  const origAspect = (camera as any).aspect as number | undefined
+
+  if ((camera as any).aspect !== undefined) {
+    ;(camera as any).aspect = RENDER_WIDTH / RENDER_HEIGHT
+    if (fovScale && fovScale > 0 && fovScale < 1 && origFov !== undefined) {
+      const halfRad = (origFov * Math.PI) / 360
+      const scaledHalfRad = Math.atan(Math.tan(halfRad) * fovScale)
+      ;(camera as any).fov = (scaledHalfRad * 360) / Math.PI
+    }
+    ;(camera as any).updateProjectionMatrix()
+  }
+
+  fn()
+
+  if ((camera as any).aspect !== undefined) {
+    ;(camera as any).aspect = origAspect
+    if (origFov !== undefined) (camera as any).fov = origFov
+    ;(camera as any).updateProjectionMatrix()
+  }
+}
+
+function RenderPassCapture({ passRef }: { passRef: React.MutableRefObject<((fovScale?: number) => RenderPasses | null) | null> }) {
   const { gl, scene, camera } = useThree()
 
   useEffect(() => {
-    passRef.current = () => {
+    passRef.current = (fovScale?: number) => {
       const originalOverride = scene.overrideMaterial
       const originalBg = scene.background
 
       const hidden = hideEditorOnlyObjects(scene)
+      const rt = new THREE.WebGLRenderTarget(RENDER_WIDTH, RENDER_HEIGHT)
 
-      // Textured (normal render)
-      gl.render(scene, camera)
-      const textured = gl.domElement.toDataURL('image/png')
+      let textured = '', calibration = '', mask = '', light = '', depth = '', normal = ''
 
-      // Depth pass
-      scene.overrideMaterial = new THREE.MeshDepthMaterial({
-        depthPacking: THREE.BasicDepthPacking,
+      withOffscreenCamera(camera, fovScale, () => {
+        textured = renderToDataUrl(gl, scene, camera, rt)
+
+        const restoreCalibration = applyCalibrationMaterial(scene)
+        scene.background = new THREE.Color(0x1a1a1a)
+        calibration = renderToDataUrl(gl, scene, camera, rt)
+        restoreCalibration()
+
+        scene.overrideMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff })
+        scene.background = new THREE.Color(0x000000)
+        mask = renderToDataUrl(gl, scene, camera, rt)
+
+        scene.overrideMaterial = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          roughness: 0.65,
+          metalness: 0,
+        })
+        scene.background = new THREE.Color(0x000000)
+        light = renderToDataUrl(gl, scene, camera, rt)
+
+        scene.overrideMaterial = new THREE.MeshDepthMaterial({
+          depthPacking: THREE.BasicDepthPacking,
+        })
+        scene.background = new THREE.Color(0xffffff)
+        depth = renderToDataUrl(gl, scene, camera, rt)
+
+        scene.overrideMaterial = new THREE.MeshNormalMaterial()
+        scene.background = new THREE.Color(0x8080ff)
+        normal = renderToDataUrl(gl, scene, camera, rt)
       })
-      scene.background = new THREE.Color(0xffffff)
-      gl.render(scene, camera)
-      const depth = gl.domElement.toDataURL('image/png')
 
-      // Normal pass
-      scene.overrideMaterial = new THREE.MeshNormalMaterial()
-      scene.background = new THREE.Color(0x8080ff)
-      gl.render(scene, camera)
-      const normal = gl.domElement.toDataURL('image/png')
-
-      // Restore
+      rt.dispose()
       scene.overrideMaterial = originalOverride
       scene.background = originalBg
       hidden.forEach((obj) => { obj.visible = true })
 
-      // Re-render to restore visual state
-      gl.render(scene, camera)
-
-      return { textured, depth, normal }
+      return { textured, calibration, mask, light, depth, normal }
     }
     return () => { passRef.current = null }
   }, [gl, scene, camera, passRef])
@@ -758,8 +915,8 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
 }>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const passRef = useRef<(() => RenderPasses | null) | null>(null)
-  const cleanScreenshotRef = useRef<(() => string | null) | null>(null)
+  const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
+  const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
   const manifestRef = useRef<(() => Scene3DRenderManifest | null) | null>(null)
 
   useImperativeHandle(ref, () => ({
@@ -767,14 +924,17 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
       if (!canvasRef.current) return null
       return canvasRef.current.toDataURL('image/png')
     },
-    captureCleanScreenshot() {
-      return cleanScreenshotRef.current?.() ?? null
+    captureCleanScreenshot(fovScale?: number) {
+      return cleanScreenshotRef.current?.(fovScale) ?? null
     },
-    captureAllPasses() {
-      return passRef.current?.() ?? null
+    captureAllPasses(fovScale?: number) {
+      return passRef.current?.(fovScale) ?? null
     },
     captureRenderManifest() {
       return manifestRef.current?.() ?? null
+    },
+    getCanvasElement() {
+      return canvasRef.current
     },
   }))
 

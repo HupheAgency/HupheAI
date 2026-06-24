@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useRef } from 'react'
+import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from 'react'
 import { useScene3D } from '../hooks/useScene3D'
 import Scene3DViewport, { type RenderPasses, type Scene3DRenderManifest, type Scene3DViewportHandle } from './Scene3DViewport'
 import Scene3DToolbar from './Scene3DToolbar'
@@ -15,6 +15,15 @@ export interface Scene3DEditorHandle {
   captureRenderPacketPreview: () => Promise<Scene3DRenderPacketPreview>
   getScene: () => Scene3DState
   addModelFromUrl: (url: string, name?: string) => void
+  getSceneControls: () => Scene3DSceneControls | null
+}
+
+export interface Scene3DSceneControls {
+  scene: Scene3DState
+  selectedObjectId: string | null
+  updateObject: (id: string, patch: Partial<Scene3DObject>) => void
+  updateLight: (id: string, patch: Partial<Scene3DLight>) => void
+  setEnvironment: (env: string | null) => void
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -30,9 +39,23 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   storageKey?: string
   className?: string
   onSceneDirty?: () => void
-}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty }, ref) {
+  hideProperties?: boolean
+  overlayImageSrc?: string | null
+}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc }, ref) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
+  const frameRef = useRef<HTMLDivElement>(null)
+  const [showFrame, setShowFrame] = useState(false)
+
+  function computeFovScale(): number | undefined {
+    const canvas = viewportRef.current?.getCanvasElement()
+    const frame = frameRef.current
+    if (!canvas || !frame) return undefined
+    const canvasH = canvas.clientHeight
+    const frameH = frame.clientHeight
+    if (canvasH <= 0 || frameH <= 0 || frameH >= canvasH) return undefined
+    return frameH / canvasH
+  }
   const {
     scene,
     selectedObjectId,
@@ -41,6 +64,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
     setTransformMode,
     addObject,
     clearNonGltfObjects,
+    clearAllGltfObjects,
     updateObject,
     deleteSelected,
     addLight,
@@ -106,9 +130,10 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
 
   useImperativeHandle(ref, () => ({
     async captureRenderPacketPreview() {
+      const fovScale = showFrame ? computeFovScale() : undefined
       return {
-        beauty: viewportRef.current?.captureCleanScreenshot() ?? null,
-        passes: viewportRef.current?.captureAllPasses() ?? null,
+        beauty: viewportRef.current?.captureCleanScreenshot(fovScale) ?? null,
+        passes: viewportRef.current?.captureAllPasses(fovScale) ?? null,
         manifest: viewportRef.current?.captureRenderManifest() ?? null,
       }
     },
@@ -116,21 +141,33 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
       return scene
     },
     addModelFromUrl(url: string, name = 'Product model') {
-      const existing = scene.objects.find((object) => object.type === 'gltf' && object.gltfUrl === url)
-      if (existing) {
-        setSelectedObjectId(existing.id)
+      const exactMatch = scene.objects.find((object) => object.type === 'gltf' && object.gltfUrl === url)
+      if (exactMatch) {
+        setSelectedObjectId(exactMatch.id)
         return
       }
+      const oldGltf = scene.objects.find((o) => o.type === 'gltf')
+      const keepPos = oldGltf?.position
+      clearAllGltfObjects()
       clearNonGltfObjects()
       markSceneDirty()
       addObject('gltf', {
         name,
         gltfUrl: url,
-        position: [0, 0.5, 0],
+        position: keepPos ?? [0, 0.5, 0],
         scale: [1, 1, 1],
       })
     },
-  }), [addObject, clearNonGltfObjects, markSceneDirty, scene, setSelectedObjectId])
+    getSceneControls() {
+      return {
+        scene,
+        selectedObjectId,
+        updateObject: updateDirtyObject,
+        updateLight: updateDirtyLight,
+        setEnvironment: setDirtyEnvironment,
+      }
+    },
+  }), [addObject, clearAllGltfObjects, clearNonGltfObjects, markSceneDirty, scene, selectedObjectId, setSelectedObjectId, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, showFrame])
 
   return (
     <div className={['flex h-full w-full overflow-hidden rounded-xl border border-white/[0.06] bg-[#141414]', className].join(' ')}>
@@ -144,16 +181,18 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           event.currentTarget.value = ''
         }}
       />
+      <Scene3DToolbar
+        transformMode={transformMode}
+        onTransformModeChange={setTransformMode}
+        showFrame={showFrame}
+        onToggleFrame={() => setShowFrame((value) => !value)}
+        onAddObject={addDirtyObject}
+        onImportModel={() => modelInputRef.current?.click()}
+        onAddLight={addDirtyLight}
+        onDelete={deleteDirtySelected}
+        hasSelection={!!selectedObjectId}
+      />
       <div className="relative flex-1">
-        <Scene3DToolbar
-          transformMode={transformMode}
-          onTransformModeChange={setTransformMode}
-          onAddObject={addDirtyObject}
-          onImportModel={() => modelInputRef.current?.click()}
-          onAddLight={addDirtyLight}
-          onDelete={deleteDirtySelected}
-          hasSelection={!!selectedObjectId}
-        />
         <Scene3DViewport
           ref={viewportRef}
           scene={scene}
@@ -169,14 +208,32 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           onViewChanged={markSceneDirty}
           orbitStateRef={{ current: null }}
         />
+        {showFrame && (
+          <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center">
+            <div
+              ref={frameRef}
+              className="relative w-full max-w-[min(92%,calc((100vh-180px)*16/9))] border border-white/85 shadow-[0_0_0_9999px_rgba(0,0,0,0.08),0_0_24px_rgba(255,255,255,0.12)]"
+              style={{ aspectRatio: '16 / 9' }}
+            >
+              {overlayImageSrc && (
+                <img src={overlayImageSrc} alt="" className="absolute inset-0 h-full w-full object-cover" />
+              )}
+              <div className="absolute -top-6 left-0 rounded-full border border-white/15 bg-black/55 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white/70">
+                1920x1080
+              </div>
+            </div>
+          </div>
+        )}
       </div>
-      <Scene3DPropertiesPanel
-        scene={scene}
-        selectedObjectId={selectedObjectId}
-        onUpdateObject={updateDirtyObject}
-        onUpdateLight={updateDirtyLight}
-        onEnvironmentChange={setDirtyEnvironment}
-      />
+      {!hideProperties && (
+        <Scene3DPropertiesPanel
+          scene={scene}
+          selectedObjectId={selectedObjectId}
+          onUpdateObject={updateDirtyObject}
+          onUpdateLight={updateDirtyLight}
+          onEnvironmentChange={setDirtyEnvironment}
+        />
+      )}
     </div>
   )
 })

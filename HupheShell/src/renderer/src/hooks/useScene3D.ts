@@ -61,6 +61,16 @@ export function useScene3D(options: { storageKey?: string; initialScene?: Scene3
     })
   }, [persist])
 
+  const clearAllGltfObjects = useCallback(() => {
+    setScene((prev) => {
+      const filtered = prev.objects.filter((o) => o.type !== 'gltf')
+      if (filtered.length === prev.objects.length) return prev
+      const next = { ...prev, objects: filtered }
+      persist(next)
+      return next
+    })
+  }, [persist])
+
   const addObject = useCallback((type: Scene3DObjectType, patch?: Partial<Scene3DObject>) => {
     let newId: string | null = null
     setScene((prev) => {
@@ -211,6 +221,7 @@ export function useScene3D(options: { storageKey?: string; initialScene?: Scene3
     setTransformMode,
     addObject,
     clearNonGltfObjects,
+    clearAllGltfObjects,
     updateObject,
     deleteObject,
     deleteSelected,

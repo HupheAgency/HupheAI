@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { notifyIfCreditsRequired } from '../lib/credits-required'
-import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview } from './Scene3DEditor'
+import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview, type Scene3DSceneControls } from './Scene3DEditor'
+import Scene3DPropertiesPanel from './Scene3DPropertiesPanel'
 import { AtelierPromptBar } from './AtelierPromptBar'
 import type {
   CanonicalReferenceSet,
@@ -114,11 +115,13 @@ type ProductStudioApi = {
   getTextureStatus: (reconstructionVersionId: string) => Promise<any>
   retryTextureWrap: (reconstructionVersionId: string) => Promise<any>
   saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) => Promise<any>
-  uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask'; dataUrl: string }) => Promise<any>
-  createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; sceneManifest?: Record<string, unknown> }) => Promise<any>
+  uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map'; dataUrl: string }) => Promise<any>
+  createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; calibrationUrl?: string; lightMapUrl?: string; sceneManifest?: Record<string, unknown> }) => Promise<any>
   listFinalRenders: (projectId: string) => Promise<any>
   updateFinalRenderStatus: (id: string, status: string) => Promise<any>
+  generateProductLayer: (args: { projectId: string; renderPacketId: string }) => Promise<any>
   generateFinalRender: (args: { projectId: string; renderPacketId: string; prompt: string; preservationPolicy?: 'strict' | 'balanced' | 'creative'; resolution?: '0.5K' | '1K' | '2K' | '4K' }) => Promise<any>
+  generateCleanPlate: (args: { projectId: string; finalRenderVersionId: string }) => Promise<any>
   retryProviderRun: (runId: string) => Promise<any>
   rollbackCanonicalSet: (args: { projectId: string; targetVersion: number }) => Promise<any>
   rollbackReconstruction: (args: { projectId: string; targetReconstructionId: string }) => Promise<any>
@@ -508,6 +511,18 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [compareSlider, setCompareSlider] = useState(50)
   const [renderPacketStale, setRenderPacketStale] = useState(false)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
+  const [rightTab, setRightTab] = useState<'editor' | 'studio'>('studio')
+  const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
+  const [viewportOverlay, setViewportOverlay] = useState<'calibration' | 'light' | 'productLayer' | 'composite' | null>(null)
+
+  useEffect(() => {
+    if (rightTab !== 'editor') return
+    const id = setInterval(() => {
+      setSceneControls(studioRef.current?.getSceneControls() ?? null)
+    }, 200)
+    setSceneControls(studioRef.current?.getSceneControls() ?? null)
+    return () => clearInterval(id)
+  }, [rightTab])
 
   const sourceReady = Boolean(project.sourceImage?.src)
   const basicProductUrl = project.basicProductAsset?.url
@@ -533,13 +548,19 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const objectMaskUrl = project.objectMaskUrl ?? project.objectMaskAsset?.url ?? project.renderPacketRecord?.object_mask_url
   const canonicalReference = project.references.find((view) => view.status === 'user-approved' || view.status === 'observed' || view.status === 'user-edited')
   const beautyPreviewUrl = project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured ?? project.renderPacketRecord?.beauty_url
+  const calibrationPreviewUrl = project.renderPacket?.passes?.calibration ?? (project.renderPacketRecord?.auxiliary_asset_urls?.calibration_url as string | undefined)
+  const lightMapPreviewUrl = project.renderPacket?.passes?.light ?? (project.renderPacketRecord?.auxiliary_asset_urls?.light_map_url as string | undefined)
   const depthPreviewUrl = project.renderPacket?.passes?.depth ?? project.renderPacketRecord?.depth_url
   const normalPreviewUrl = project.renderPacket?.passes?.normal ?? project.renderPacketRecord?.normal_url
   const scenePreviewUrl = project.finalRenderRecord?.scene_url
     ?? (project.finalRenderRecord?.metadata?.scene_url as string | undefined)
   const finalMetadata = project.finalRenderRecord?.metadata ?? {}
   const backgroundPlateUrl = project.finalRenderRecord?.background_plate_url ?? (finalMetadata.background_plate_url as string | undefined)
-  const productLayerUrl = project.finalRenderRecord?.product_layer_url ?? (finalMetadata.product_layer_url as string | undefined)
+  const renderPacketProductLayerUrl = (project.renderPacketRecord as any)?.product_layer_url as string | undefined
+  const finalRenderMatchesPacket = Boolean(project.finalRenderRecord?.render_packet_id && project.renderPacketRecord?.id && project.finalRenderRecord.render_packet_id === project.renderPacketRecord.id)
+  const productLayerUrl = renderPacketProductLayerUrl
+    ?? (finalRenderMatchesPacket ? project.finalRenderRecord?.product_layer_url : undefined)
+    ?? (finalRenderMatchesPacket ? finalMetadata.product_layer_url as string | undefined : undefined)
   const shadowLayerUrl = project.finalRenderRecord?.shadow_layer_url ?? (finalMetadata.shadow_layer_url as string | undefined)
   const finalCompositeUrl = project.finalRenderRecord?.composite_url
     ?? (finalMetadata.composite_url as string | undefined)
@@ -551,11 +572,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     ['Basic', basicProductUrl],
     ['Canonical', canonicalReference?.src],
     [beautyLayerLabel, beautyPreviewUrl],
+    ['Calibration', calibrationPreviewUrl],
+    ['Light map', lightMapPreviewUrl],
     ['Product layer', productLayerUrl],
     ...(scenePreviewUrl ? [['Scene', scenePreviewUrl] as [string, string | null | undefined]] : []),
+    ['Composite', finalCompositeUrl ?? project.finalRender?.src],
     ['Background', backgroundPlateUrl],
     ...(shadowLayerUrl ? [['Shadow', shadowLayerUrl] as [string, string | null | undefined]] : []),
-    ['Composite', finalCompositeUrl ?? project.finalRender?.src],
   ]
   const availableLightboxPreviews = finalLayerPreviews
     .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
@@ -581,6 +604,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     { label: 'Camera', ready: Boolean(renderManifest?.camera?.position?.length && renderManifest?.camera?.target?.length) },
     { label: 'Ground', ready: Boolean(renderManifest?.groundPlane?.screenLine) },
     { label: 'Product bbox', ready: Boolean(renderManifest?.product?.screenBbox) },
+    { label: 'Calibration', ready: Boolean(calibrationPreviewUrl) },
+    { label: 'Light map', ready: Boolean(lightMapPreviewUrl) },
     { label: 'Depth', ready: Boolean(depthPreviewUrl) },
     { label: 'Mask', ready: Boolean(objectMaskUrl) },
   ]
@@ -588,13 +613,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     { label: 'Beauty camera', ready: Boolean(beautyPreviewUrl) },
     { label: 'Depth', ready: Boolean(depthPreviewUrl) },
     { label: 'Normal', ready: Boolean(normalPreviewUrl) },
+    { label: 'Calibration', ready: Boolean(calibrationPreviewUrl) },
+    { label: 'Light map', ready: Boolean(lightMapPreviewUrl) },
     { label: 'Mask', ready: Boolean(objectMaskUrl) },
     { label: 'Source', ready: Boolean(project.sourceImage?.src) },
     { label: 'Basic shape', ready: basicShapeReady },
     { label: 'Textured mesh', ready: texturedMeshReady },
     { label: 'Canonical', ready: Boolean(canonicalReference?.src) },
   ]
-  const lockedCameraReady = Boolean(beautyPreviewUrl && depthPreviewUrl && normalPreviewUrl && renderManifest?.camera && renderManifest?.groundPlane && project.sourceImage?.src && canonicalReference?.src && !renderPacketStale)
+  const lockedCameraReady = Boolean(beautyPreviewUrl && calibrationPreviewUrl && lightMapPreviewUrl && depthPreviewUrl && normalPreviewUrl && renderManifest?.camera && renderManifest?.groundPlane && project.sourceImage?.src && canonicalReference?.src && !renderPacketStale)
   const activeRuns = providerStats?.runs.filter((run) => run.status === 'queued' || run.status === 'processing') ?? []
   const failedRuns = providerStats?.runs.filter((run) => run.status === 'failed') ?? []
   const approvedAngles = usableReferenceAngles
@@ -1084,8 +1111,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       activeStep: 'mesh',
       updatedAt: new Date().toISOString(),
     }))
-    if (reconstruction.mesh_url) {
-      studioRef.current?.addModelFromUrl(reconstruction.mesh_url, 'Reconstructed product')
+    const bestMeshUrl = reconstruction.textured_mesh_url ?? reconstruction.mesh_url
+    if (bestMeshUrl) {
+      studioRef.current?.addModelFromUrl(bestMeshUrl, reconstruction.textured_mesh_url ? 'Textured product' : 'Reconstructed product')
     }
     return { canonicalSet, reconstruction }
   }
@@ -1171,9 +1199,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setBusy(forceRetry ? 'Texture opnieuw starten...' : 'Product texture voorbereiden...')
     setError(null)
     try {
-      const result = forceRetry
-        ? await api.retryTextureWrap(reconstructionId)
-        : await api.createTexturedMesh({ projectId, reconstructionVersionId: reconstructionId, sourceViewIds })
+      const result = await api.createTexturedMesh({ projectId, reconstructionVersionId: reconstructionId, sourceViewIds })
       if (!result?.ok) throw new Error(result?.error || 'Texture wrapping starten mislukt.')
       setProject((prev) => ({
         ...prev,
@@ -1217,11 +1243,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
       const uploads = await Promise.all([
         packet.beauty ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'beauty', dataUrl: packet.beauty }) : Promise.resolve(null),
+        packet.passes?.calibration ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'calibration', dataUrl: packet.passes.calibration }) : Promise.resolve(null),
+        packet.passes?.mask ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'object-mask', dataUrl: packet.passes.mask }) : Promise.resolve(null),
+        packet.passes?.light ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'light-map', dataUrl: packet.passes.light }) : Promise.resolve(null),
         packet.passes?.depth ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'depth', dataUrl: packet.passes.depth }) : Promise.resolve(null),
         packet.passes?.normal ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'normal', dataUrl: packet.passes.normal }) : Promise.resolve(null),
       ])
-      const [beautyUpload, depthUpload, normalUpload] = uploads
+      const [beautyUpload, calibrationUpload, objectMaskUpload, lightMapUpload, depthUpload, normalUpload] = uploads
       if (beautyUpload && !beautyUpload.ok) throw new Error(beautyUpload.error || 'Beauty upload mislukt.')
+      if (calibrationUpload && !calibrationUpload.ok) throw new Error(calibrationUpload.error || 'Calibration upload mislukt.')
+      if (objectMaskUpload && !objectMaskUpload.ok) throw new Error(objectMaskUpload.error || 'Object-mask upload mislukt.')
+      if (lightMapUpload && !lightMapUpload.ok) throw new Error(lightMapUpload.error || 'Light-map upload mislukt.')
       if (depthUpload && !depthUpload.ok) throw new Error(depthUpload.error || 'Depth upload mislukt.')
       if (normalUpload && !normalUpload.ok) throw new Error(normalUpload.error || 'Normal upload mislukt.')
 
@@ -1252,9 +1284,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           reconstructionVersionId: reconstruction.id,
           studioSceneVersionId: studioScene.id,
           beautyUrl: beautyUpload?.url ?? packet.beauty ?? packet.passes?.textured,
-          objectMaskUrl,
+          objectMaskUrl: objectMaskUpload?.url ?? objectMaskUrl,
           depthUrl: depthUpload?.url,
           normalUrl: normalUpload?.url,
+          calibrationUrl: calibrationUpload?.url,
+          lightMapUrl: lightMapUpload?.url,
           sceneManifest: packet.manifest ?? undefined,
         }),
         'packet',
@@ -1271,6 +1305,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         updatedAt: new Date().toISOString(),
       }))
       setRenderPacketStale(false)
+
+      // Stap 1: product layer automatisch genereren na lock
+      setBusy('Product layer genereren...')
+      const plResult = await api.generateProductLayer({
+        projectId: project.backendProject.id,
+        renderPacketId: renderPacketRecord.id,
+      })
+      if (!plResult?.ok) {
+        setFinalError(plResult?.error || 'Product layer genereren mislukt.')
+      }
       await hydrateLatestState(project.backendProject.id, false)
     } catch (err: any) {
       if (!notifyIfCreditsRequired(err)) setFinalError(err?.message || 'Renderpacket opslaan mislukt.')
@@ -1771,10 +1815,38 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               <button
                 type="button"
                 onClick={() => void startTextureWrap(true)}
-                disabled={textureStatus !== 'failed' || Boolean(busy)}
+                disabled={!meshReady || Boolean(busy)}
                 className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
               >
                 Opnieuw texturen
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!project.backendProject || !project.reconstruction) return
+                  setBusy('UV debug grid toepassen...')
+                  try {
+                    const api = getProductStudioApi()
+                    if (!api) throw new Error('API niet beschikbaar.')
+                    const result = await (api as any).applyDebugTexture({
+                      projectId: project.backendProject.id,
+                      reconstructionVersionId: project.reconstruction.id,
+                    })
+                    if (!result?.ok) throw new Error(result?.error || 'Debug texture mislukt.')
+                    await hydrateLatestState(project.backendProject.id, false)
+                    if (result.texturedMeshUrl) {
+                      studioRef.current?.addModelFromUrl(result.texturedMeshUrl, 'Textured product')
+                    }
+                  } catch (err: any) {
+                    setError(err.message)
+                  } finally {
+                    setBusy(null)
+                  }
+                }}
+                disabled={!meshReady || Boolean(busy)}
+                className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+              >
+                UV Debug
               </button>
             </div>
             {!texturedMeshReady && meshReady && (
@@ -1868,10 +1940,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 )}
               </div>
             </div>
-            {(beautyPreviewUrl || depthPreviewUrl || normalPreviewUrl || objectMaskUrl) && (
+            {(beautyPreviewUrl || calibrationPreviewUrl || lightMapPreviewUrl || depthPreviewUrl || normalPreviewUrl || objectMaskUrl) && (
               <div className="mt-3 grid grid-cols-4 gap-2">
                 {[
                   [beautyLayerLabel, beautyPreviewUrl],
+                  ['Calibration', calibrationPreviewUrl],
+                  ['Light map', lightMapPreviewUrl],
                   ['Depth', depthPreviewUrl],
                   ['Normals', normalPreviewUrl],
                   ['Mask', objectMaskUrl],
@@ -1886,6 +1960,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             {project.renderPacketRecord && (
               <div className="mt-3 space-y-1 rounded-md border border-white/[0.06] bg-black/20 p-2 text-[10px] text-white/36">
                 <p className="truncate">Beauty: {project.renderPacketRecord.beauty_url}</p>
+                {project.renderPacketRecord.auxiliary_asset_urls?.calibration_url && <p className="truncate">Calibration: {project.renderPacketRecord.auxiliary_asset_urls.calibration_url}</p>}
+                {project.renderPacketRecord.auxiliary_asset_urls?.light_map_url && <p className="truncate">Light map: {project.renderPacketRecord.auxiliary_asset_urls.light_map_url}</p>}
                 {project.renderPacketRecord.depth_url && <p className="truncate">Depth: {project.renderPacketRecord.depth_url}</p>}
                 {project.renderPacketRecord.normal_url && <p className="truncate">Normals: {project.renderPacketRecord.normal_url}</p>}
                 {project.renderPacketRecord.object_mask_url && <p className="truncate">Mask: {project.renderPacketRecord.object_mask_url}</p>}
@@ -2133,14 +2209,114 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     </>
   )
 
+  const overlayPasses: { key: 'calibration' | 'light' | 'productLayer' | 'composite'; label: string; src: string | undefined; icon: string }[] = [
+    { key: 'calibration', label: 'Calibration', src: calibrationPreviewUrl, icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z' },
+    { key: 'light', label: 'Light map', src: lightMapPreviewUrl, icon: 'M12 2L2 7l10 5 10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
+    { key: 'productLayer', label: 'Product layer', src: productLayerUrl, icon: 'M12 2a10 10 0 100 20 10 10 0 000-20zM12 8v8M8 12h8' },
+    { key: 'composite', label: 'Composite', src: finalCompositeUrl ?? project.finalRender?.src, icon: 'M4 4h16v16H4zM9 9h6v6H9z' },
+  ]
+  const activeOverlaySrc = viewportOverlay ? overlayPasses.find((p) => p.key === viewportOverlay)?.src : undefined
+
   const viewportContent = (
-    <Scene3DEditor
-      ref={studioRef}
-      key={sceneStorageKey}
-      storageKey={sceneStorageKey}
-      className="h-full w-full rounded-lg"
-      onSceneDirty={markRenderPacketStale}
-    />
+    <div className="relative h-full w-full">
+      <Scene3DEditor
+        ref={studioRef}
+        key={sceneStorageKey}
+        storageKey={sceneStorageKey}
+        className="h-full w-full rounded-lg"
+        onSceneDirty={() => {
+          markRenderPacketStale()
+          setSceneControls(studioRef.current?.getSceneControls() ?? null)
+        }}
+        hideProperties
+        overlayImageSrc={activeOverlaySrc}
+      />
+      {sourceReady && (
+        <div className="absolute bottom-4 left-20 z-10 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={captureRenderPacket}
+            disabled={!!busy}
+            className="flex items-center gap-2 rounded-full bg-[#facc15] px-4 py-2 text-sm font-bold text-black shadow-lg transition-all hover:bg-[#fde047] active:scale-95 disabled:opacity-40 disabled:active:scale-100"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0">
+              <circle cx="8" cy="8.5" r="3" stroke="currentColor" strokeWidth="1.5" fill="none" />
+              <path d="M5.5 2.5h5l1 2h2a1 1 0 011 1v7a1 1 0 01-1 1h-11a1 1 0 01-1-1v-7a1 1 0 011-1h2l1-2z" stroke="currentColor" strokeWidth="1.5" fill="none" />
+            </svg>
+            {busy ? 'Bezig...' : 'Take picture'}
+          </button>
+          <div className="flex items-center gap-1 rounded-full border border-white/[0.10] bg-black/60 p-1 backdrop-blur-sm">
+            {overlayPasses.map((pass) => (
+              <button
+                key={pass.key}
+                type="button"
+                disabled={!pass.src}
+                onClick={() => setViewportOverlay((prev) => prev === pass.key ? null : pass.key)}
+                className={[
+                  'group relative flex h-8 w-8 items-center justify-center rounded-full transition-colors',
+                  !pass.src
+                    ? 'cursor-not-allowed text-white/15'
+                    : viewportOverlay === pass.key
+                      ? 'bg-white/20 text-white'
+                      : 'text-white/50 hover:bg-white/10 hover:text-white/80',
+                ].join(' ')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d={pass.icon} />
+                </svg>
+                <div className="pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+                  {pass.label}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+
+  const rightPanelContent = (
+    <>
+      <div className="flex shrink-0 border-b border-white/[0.08]">
+        {(['editor', 'studio'] as const).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setRightTab(tab)}
+            className={[
+              'flex-1 py-3 text-center text-sm font-semibold transition-colors',
+              rightTab === tab
+                ? 'border-b-2 border-[#facc15] text-white'
+                : 'text-white/40 hover:text-white/70',
+            ].join(' ')}
+          >
+            {tab === 'editor' ? 'Editor' : 'Product Studio'}
+          </button>
+        ))}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {rightTab === 'editor' && sceneControls && (
+          <div className="p-3">
+            <Scene3DPropertiesPanel
+              scene={sceneControls.scene}
+              selectedObjectId={sceneControls.selectedObjectId}
+              onUpdateObject={sceneControls.updateObject}
+              onUpdateLight={sceneControls.updateLight}
+              onEnvironmentChange={sceneControls.setEnvironment}
+              inline
+            />
+          </div>
+        )}
+        {rightTab === 'editor' && !sceneControls && (
+          <div className="flex h-32 items-center justify-center text-sm text-white/30">
+            Laad een model om te bewerken
+          </div>
+        )}
+        <div style={{ display: rightTab === 'studio' ? 'contents' : 'none' }}>
+          {sidebarContent}
+        </div>
+      </div>
+    </>
   )
 
   if (!sourceReady && !busy) {
@@ -2201,7 +2377,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   if (renderLayout) {
     return (
       <>
-        {renderLayout(sidebarContent, viewportContent)}
+        {renderLayout(rightPanelContent, viewportContent)}
         {lightboxImage && (
           <ImageLightbox
             image={{ label: lightboxImage[0], src: lightboxImage[1] }}
@@ -2218,12 +2394,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
   return (
     <div className="flex h-full min-h-0 w-full bg-[#0a0a0a] text-white">
-      <aside className="flex w-[360px] flex-shrink-0 flex-col border-r border-white/[0.08] bg-[#111]">
-        {sidebarContent}
-      </aside>
       <main className="min-w-0 flex-1 p-4">
         {viewportContent}
       </main>
+      <aside className="flex w-[360px] flex-shrink-0 flex-col border-l border-white/[0.08] bg-[#111]">
+        {rightPanelContent}
+      </aside>
       {lightboxImage && (
         <ImageLightbox
           image={{ label: lightboxImage[0], src: lightboxImage[1] }}

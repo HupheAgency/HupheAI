@@ -405,7 +405,7 @@ function buildRendererCsp(): string {
     "img-src 'self' data: blob: file: https: huphe: hupheai:",
     "media-src 'self' data: blob: file: https: huphe: hupheai:",
     "font-src 'self' data: file: https://fonts.gstatic.com https://use.typekit.net",
-    `connect-src ${connectSrc} blob:`,
+    `connect-src ${connectSrc} blob: huphe:`,
     "frame-src 'none'",
     "object-src 'none'",
     "base-uri 'self'",

@@ -666,7 +666,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
     resetPresentationCreationFlow()
     if (type === 'print') clearPrintPayload()
     setAtelierCreationResetKey((key) => key + 1)
-    setShellLevel(type && type !== 'presentation' ? 'funnel' : 'landing')
+    setShellLevel(type === 'scene3d' ? 'editor' : type && type !== 'presentation' ? 'funnel' : 'landing')
   }
 
   function handleAtelierCreationSelect(type: AtelierCreationType) {
@@ -5093,6 +5093,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
         onSelect={handleAtelierCreationSelect}
       />
     )
+    const showCreateSidebar = atelierCreationType !== 'scene3d'
 
     // Build type-specific sidebar project list
     const sidebarProjects: SidebarProject[] = (() => {
@@ -5348,7 +5349,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
             <div className={['relative z-10 h-full w-full transition-[padding-top] duration-300', atelierShellLevel === 'landing' ? 'pt-14' : 'pt-0'].join(' ')}>
               {inactiveCreationPanel}
             </div>
-            {!isEditor && !showsInlineCreationModeButtons && createSidebar}
+            {showCreateSidebar && !isEditor && !showsInlineCreationModeButtons && createSidebar}
           </div>
         )
       }
@@ -5359,7 +5360,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
           <main className="relative z-10 flex-1 flex overflow-hidden pl-6 transition-[padding] duration-300">
             {inactiveCreationPanel}
           </main>
-          {atelierShellLevel !== 'editor' && !showsInlineCreationModeButtons && createSidebar}
+          {showCreateSidebar && atelierShellLevel !== 'editor' && !showsInlineCreationModeButtons && createSidebar}
         </div>
       )
     }
@@ -5422,20 +5423,26 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
     if (embedded) {
       return (
         <div className="relative h-full overflow-hidden">
-          <div className="h-full overflow-y-auto flex items-start justify-center pl-6 py-10 transition-[padding] duration-300">
+          <div className={[
+            'h-full overflow-y-auto flex items-start justify-center py-10 transition-[padding] duration-300',
+            showCreateSidebar ? 'pl-6' : 'pl-0',
+          ].join(' ')}>
             {wizardInner}
           </div>
-          {createSidebar}
+          {showCreateSidebar && createSidebar}
         </div>
       )
     }
     return (
       <div className="relative h-screen bg-[#0a0a0a] flex flex-col overflow-hidden">
         {sharedHeader}
-        <main className="flex-1 overflow-y-auto flex items-start justify-center pl-6 py-10 transition-[padding] duration-300">
+        <main className={[
+          'flex-1 overflow-y-auto flex items-start justify-center py-10 transition-[padding] duration-300',
+          showCreateSidebar ? 'pl-6' : 'pl-0',
+        ].join(' ')}>
           {wizardInner}
         </main>
-        {createSidebar}
+        {showCreateSidebar && createSidebar}
       </div>
     )
   }

@@ -240,7 +240,7 @@ contextBridge.exposeInMainWorld('api', {
     updateReconstructionStatus: (id: string, status: string) => ipcRenderer.invoke('product-studio:update-reconstruction-status', id, status),
     saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) =>
       ipcRenderer.invoke('product-studio:save-scene', args),
-    createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; sceneManifest?: Record<string, unknown> }) =>
+    createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; calibrationUrl?: string; lightMapUrl?: string; sceneManifest?: Record<string, unknown> }) =>
       ipcRenderer.invoke('product-studio:create-render-packet', args),
     listFinalRenders: (projectId: string) => ipcRenderer.invoke('product-studio:list-final-renders', projectId),
     updateFinalRenderStatus: (id: string, status: string) => ipcRenderer.invoke('product-studio:update-final-render-status', id, status),
@@ -251,7 +251,7 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:upload-glb', args),
     downloadPng: (args: { imageUrl: string; suggestedName?: string }) =>
       ipcRenderer.invoke('product-studio:download-png', args),
-    uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask'; dataUrl: string }) =>
+    uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map'; dataUrl: string }) =>
       ipcRenderer.invoke('product-studio:upload-render-pass', args),
     generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) =>
       ipcRenderer.invoke('product-studio:generate-reference-views', args),
@@ -259,6 +259,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:start-reconstruction', args),
     createTexturedMesh: (args: { projectId: string; reconstructionVersionId: string; sourceViewIds?: string[] }) =>
       ipcRenderer.invoke('product-studio:create-textured-mesh', args),
+    applyDebugTexture: (args: { projectId: string; reconstructionVersionId: string }) =>
+      ipcRenderer.invoke('product-studio:apply-debug-texture', args),
     getTextureStatus: (reconstructionVersionId: string) =>
       ipcRenderer.invoke('product-studio:get-texture-status', reconstructionVersionId),
     retryTextureWrap: (reconstructionVersionId: string) =>
@@ -269,8 +271,12 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:get-latest-state', projectId),
     refreshSignedUrl: (args: { bucket?: string; storagePath: string; expiresIn?: number }) =>
       ipcRenderer.invoke('product-studio:refresh-signed-url', args),
+    generateProductLayer: (args: { projectId: string; renderPacketId: string }) =>
+      ipcRenderer.invoke('product-studio:generate-product-layer', args),
     generateFinalRender: (args: { projectId: string; renderPacketId: string; prompt: string; preservationPolicy?: 'strict' | 'balanced' | 'creative'; resolution?: '1k' | '2k' | '4k' }) =>
       ipcRenderer.invoke('product-studio:generate-final-render', args),
+    generateCleanPlate: (args: { projectId: string; finalRenderVersionId: string }) =>
+      ipcRenderer.invoke('product-studio:generate-clean-plate', args),
     retryProviderRun: (runId: string) =>
       ipcRenderer.invoke('product-studio:retry-provider-run', runId),
     rollbackCanonicalSet: (args: { projectId: string; targetVersion: number }) =>
