@@ -1,8 +1,39 @@
-import { Component, Suspense, useEffect, useRef, type ReactNode } from 'react'
+import { Component, Suspense, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import * as THREE from 'three'
 import { Clone, useGLTF } from '@react-three/drei'
 import type { Mesh, Group } from 'three'
 import type { Scene3DObject, ViewMode } from '../lib/scene3d-types'
+
+const RING_VERTEX = /* glsl */ `
+varying vec3 vWorldPos;
+varying vec3 vWorldNormal;
+void main() {
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  vWorldPos = wp.xyz;
+  vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`
+
+const RING_FRAGMENT = /* glsl */ `
+uniform float ringSpacing;
+uniform float ringWidth;
+uniform vec3 ringColor;
+uniform vec3 bgColor;
+varying vec3 vWorldPos;
+varying vec3 vWorldNormal;
+void main() {
+  float dy = abs(fract(vWorldPos.y / ringSpacing + 0.5) - 0.5) * ringSpacing;
+  float dx = abs(fract(vWorldPos.x / ringSpacing + 0.5) - 0.5) * ringSpacing;
+  float dz = abs(fract(vWorldPos.z / ringSpacing + 0.5) - 0.5) * ringSpacing;
+  float dVert = min(dx, dz);
+  float d = min(dy, dVert);
+  float ring = 1.0 - smoothstep(ringWidth * 0.5, ringWidth * 0.5 + 0.0005, d);
+  vec3 base = mix(bgColor, ringColor, ring);
+  float light = 0.55 + 0.45 * dot(vWorldNormal, normalize(vec3(0.3, 1.0, 0.5)));
+  gl_FragColor = vec4(base * light, 1.0);
+}
+`
 
 function ObjectMaterial({ color, metalness, roughness, viewMode }: { color: string; metalness: number; roughness: number; viewMode: ViewMode }) {
   switch (viewMode) {
@@ -62,15 +93,57 @@ function PersonMannequin({ color, metalness, roughness, viewMode, pivot }: { col
   )
 }
 
-function GltfModel({ url }: { url: string }) {
+function GltfModel({ url, debugRings }: { url: string; debugRings?: { spacing: number; width: number } }) {
   const gltf = useGLTF(url)
+  const groupRef = useRef<THREE.Group>(null)
+
+  const ringMaterial = useMemo(() => {
+    if (!debugRings) return null
+    return new THREE.ShaderMaterial({
+      vertexShader: RING_VERTEX,
+      fragmentShader: RING_FRAGMENT,
+      uniforms: {
+        ringSpacing: { value: debugRings.spacing },
+        ringWidth: { value: debugRings.width },
+        ringColor: { value: new THREE.Color('#facc15') },
+        bgColor: { value: new THREE.Color(0.12, 0.12, 0.12) },
+      },
+    })
+  }, [debugRings?.spacing, debugRings?.width, !!debugRings])
+
   useEffect(() => {
     if (!gltf.scene) return
     const box = new THREE.Box3().setFromObject(gltf.scene)
     const size = box.getSize(new THREE.Vector3())
     console.log('[GltfModel] loaded', url.slice(-40), 'size:', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2))
   }, [gltf.scene, url])
-  return <Clone object={gltf.scene} />
+
+  useEffect(() => {
+    const group = groupRef.current
+    if (!group) return
+    if (!ringMaterial) return
+    const originals = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>()
+    group.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh
+        originals.set(mesh, mesh.material)
+        mesh.userData.__originalMaterial = mesh.material
+        mesh.material = ringMaterial
+      }
+    })
+    return () => {
+      for (const [mesh, mat] of originals) {
+        mesh.material = mat
+        delete mesh.userData.__originalMaterial
+      }
+    }
+  }, [ringMaterial])
+
+  return (
+    <group ref={groupRef}>
+      <Clone object={gltf.scene} />
+    </group>
+  )
 }
 
 class GltfErrorBoundary extends Component<
@@ -114,11 +187,13 @@ export default function SceneObject({
   selected,
   onClick,
   viewMode = 'rendered',
+  debugRings,
 }: {
   obj: Scene3DObject
   selected: boolean
   onClick: () => void
   viewMode?: ViewMode
+  debugRings?: { spacing: number; width: number }
 }) {
   const meshRef = useRef<Mesh>(null)
   const groupRef = useRef<Group>(null)
@@ -156,7 +231,7 @@ export default function SceneObject({
         <group position={pivot}>
           <GltfErrorBoundary resetKey={obj.gltfUrl} fallback={<GltfFallback color={obj.material.color} viewMode={viewMode} />}>
             <Suspense fallback={<GltfFallback color={obj.material.color} viewMode={viewMode} />}>
-              <GltfModel key={obj.gltfUrl} url={obj.gltfUrl} />
+              <GltfModel key={obj.gltfUrl} url={obj.gltfUrl} debugRings={debugRings} />
             </Suspense>
           </GltfErrorBoundary>
         </group>

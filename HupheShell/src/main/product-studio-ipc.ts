@@ -369,6 +369,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     normalUrl?: string
     calibrationUrl?: string
     lightMapUrl?: string
+    perspectiveUrl?: string
     sceneManifest?: Record<string, unknown>
   }) => {
     const jwt = getJwt()
@@ -389,6 +390,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const auxiliaryAssetUrls: Record<string, unknown> = {}
     if (args.calibrationUrl) auxiliaryAssetUrls.calibration_url = args.calibrationUrl
     if (args.lightMapUrl) auxiliaryAssetUrls.light_map_url = args.lightMapUrl
+    if (args.perspectiveUrl) auxiliaryAssetUrls.perspective_url = args.perspectiveUrl
     if (Object.keys(auxiliaryAssetUrls).length > 0) insert.auxiliary_asset_urls = auxiliaryAssetUrls
 
     const { data, error } = await sb
@@ -718,7 +720,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
   ipcMain.handle('product-studio:upload-render-pass', async (_e, args: {
     projectId: string
-    passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map'
+    passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective'
     dataUrl: string
   }) => {
     const jwt = getJwt()
@@ -1067,14 +1069,16 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         {
           type: 'text',
           text: [
-            'Image 1 is calibration.png: keep this exact composition, camera angle, scale, crop, silhouette and product position.',
-            'Image 2 is beauty.png: same product pose with the real lighting and 3D shape.',
-            'Image 3 is canonical.png: use only its skin, texture, material, print and colors.',
-            'Output Image 1/Image 2 with the skin from Image 3. Do not change the pose, crop, size or angle.',
+            'You will receive three labeled images.',
+            'Output CALIBRATION with the skin/texture from CANONICAL applied. Keep the exact composition, camera angle, scale, crop, silhouette and product position from CALIBRATION. Use BEAUTY for lighting and 3D shape reference.',
+            'Do not change the pose, crop, size or angle.',
           ].join('\n'),
         },
+        { type: 'text', text: 'CALIBRATION — Keep this exact composition, camera angle, scale, crop, silhouette and product position:' },
         { type: 'image_url', image_url: { url: calibrationDataUrl } },
+        { type: 'text', text: 'BEAUTY — Same product pose with real lighting and 3D shape:' },
         { type: 'image_url', image_url: { url: beautyDataUrl } },
+        { type: 'text', text: 'CANONICAL — Use only its skin, texture, material, print and colors:' },
         { type: 'image_url', image_url: { url: canonicalDataUrl } },
       ]
 
@@ -1172,24 +1176,57 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         cameraDescription = `The product is photographed ${verticalDesc}, ${horizontalDesc} (elevation ~${elevationDeg}°, azimuth ~${azimuthDeg}°). The background MUST use exactly this same camera angle and perspective — the vanishing points, horizon line, and floor plane must match.`
       }
 
+      // Laad perspectief-referenties (calibration + depth + perspective grid)
+      const auxUrls = ((packet as any).auxiliary_asset_urls ?? {}) as Record<string, unknown>
+      const calibrationUrl = typeof auxUrls.calibration_url === 'string' ? auxUrls.calibration_url : null
+      const perspectiveUrl = typeof auxUrls.perspective_url === 'string' ? auxUrls.perspective_url : null
+      const depthUrl = (packet as any).depth_url as string | null
+      const calibrationBuffer = await h.loadImageBuffer(calibrationUrl, 'Calibration')
+      const depthBuffer = await h.loadImageBuffer(depthUrl, 'Depth')
+      const perspectiveBuffer = await h.loadImageBuffer(perspectiveUrl, 'Perspective')
+
       // Background genereren
       const backgroundParts: any[] = [
         {
           type: 'text',
           text: [
-            `Place the product from the image into a scene. Scene description: ${args.prompt}`,
+            `Place the product into a scene. Scene description: ${args.prompt}`,
             '', cameraDescription ? `CAMERA: ${cameraDescription}` : '', '',
+            'You will receive labeled reference images to help you match the exact camera perspective.',
+            '',
             'CRITICAL RULES:',
-            '- Keep the product EXACTLY as it appears in the image — same texture, same colors, same details, same position and size.',
+            '- Keep the product EXACTLY as it appears in PRODUCT_RENDER — same texture, same colors, same details, same position and size.',
             '- Do NOT alter, simplify, or re-interpret the product in any way.',
             '- Only generate the environment/background around and behind the product.',
+            '- Use CALIBRATION_3D to understand the exact 3D perspective, ground plane angle, and where the product sits in space.',
+            perspectiveBuffer ? '- Use PERSPECTIVE_GRID to match the floor vanishing point and perspective lines exactly.' : '',
+            depthBuffer ? '- Use DEPTH_MAP to understand the spatial depth and distance relationships.' : '',
             '- The background perspective and vanishing points MUST match the product\'s camera angle exactly.',
-            '- The surface/floor the product sits on must align with the product\'s ground plane.',
+            '- The surface/floor the product sits on must align with the product\'s ground plane — the product must look like it sits ON the surface, not floating.',
             '- Match the lighting direction of the environment to the product.',
           ].filter(Boolean).join('\n'),
         },
+        { type: 'text', text: 'PRODUCT_RENDER — The product to place in the scene:' },
         { type: 'image_url', image_url: { url: inputDataUrl } },
       ]
+      if (calibrationBuffer) {
+        backgroundParts.push(
+          { type: 'text', text: 'CALIBRATION_3D — Grey 3D mesh showing exact camera perspective, ground plane, and product position in 3D space:' },
+          { type: 'image_url', image_url: { url: await h.toDataUrl(calibrationBuffer) } },
+        )
+      }
+      if (perspectiveBuffer) {
+        backgroundParts.push(
+          { type: 'text', text: 'PERSPECTIVE_GRID — Green grid on the floor plane (y=0) showing exact vanishing point and perspective lines:' },
+          { type: 'image_url', image_url: { url: await h.toDataUrl(perspectiveBuffer) } },
+        )
+      }
+      if (depthBuffer) {
+        backgroundParts.push(
+          { type: 'text', text: 'DEPTH_MAP — Depth information showing spatial distance (darker = closer, lighter = farther):' },
+          { type: 'image_url', image_url: { url: await h.toDataUrl(depthBuffer) } },
+        )
+      }
 
       const backgroundJson = await h.callModel([{ role: 'user', content: backgroundParts }])
       const outBuffer = await h.extractImageFromResponse(backgroundJson)
@@ -1202,13 +1239,14 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           {
             type: 'text',
             text: [
-              'Remove the single main/central product from this image.',
+              'Remove the single main/central product from FINAL_RENDER.',
               'Fill the area where the product was with a natural, seamless continuation of the background.',
               'The result should look like the product was never there.',
               'Keep everything else in the scene exactly as it is — lighting, surfaces, other objects, shadows.',
               'Output the full image at the same resolution.',
             ].join('\n'),
           },
+          { type: 'text', text: 'FINAL_RENDER — The image with the product to remove:' },
           { type: 'image_url', image_url: { url: await h.toDataUrl(outBuffer) } },
         ]
         const cleanPlateJson = await h.callModel([{ role: 'user', content: cleanPlateParts }])
@@ -1248,6 +1286,289 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       await sb.from('product_projects').update({ status: 'render_pending' }).eq('id', args.projectId)
 
       return { ok: true, render, providerRunId: run.id, backgroundPlateUrl: bgSignedUrl, productLayerUrl }
+    } catch (err: any) {
+      await sb.from('provider_runs').update({
+        status: 'failed', error_message: err.message,
+        latency_ms: Date.now() - startTime, completed_at: new Date().toISOString(),
+      }).eq('id', run.id)
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // --- Generate Angle Variant (zelfde scene, andere camerahoek) ---
+
+  ipcMain.handle('product-studio:generate-angle-variant', async (_e, args: {
+    projectId: string
+    renderPacketId: string
+    originalFinalRenderVersionId: string
+    originalPrompt: string
+    originalManifest: any
+    newManifest: any
+    newBeautyDataUrl: string
+    newCalibrationDataUrl?: string
+    newPerspectiveDataUrl?: string
+    newDepthDataUrl?: string
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
+
+    const { data: originalRender } = await sb.from('final_render_versions').select('*').eq('id', args.originalFinalRenderVersionId).single()
+    if (!originalRender) return { ok: false, error: 'Originele render niet gevonden.' }
+
+    const { data: packet } = await sb.from('render_packets').select('*').eq('id', args.renderPacketId).single()
+
+    const { data: run, error: runError } = await sb.from('provider_runs').insert({
+      project_id: args.projectId,
+      provider_type: 'angle-variant',
+      provider_name: 'openrouter',
+      model_name: PRODUCT_STUDIO_FINAL_RENDER_MODEL,
+      status: 'processing',
+      idempotency_key: `angle-${args.originalFinalRenderVersionId}-${Date.now()}`,
+    }).select().single()
+    if (runError || !run) return { ok: false, error: runError?.message ?? 'Provider run aanmaken mislukt.' }
+
+    const startTime = Date.now()
+    try {
+      const h = createImageHelpers(jwt)
+      await h.init()
+
+      // Laad originele achtergrond (clean plate)
+      const bgPlateUrl = (originalRender as any).background_plate_url as string | null
+      const bgBuffer = await h.loadImageBuffer(bgPlateUrl, 'Background plate')
+      if (!bgBuffer) throw new Error('Clean background plate ontbreekt van de originele render.')
+
+      const bgDataUrl = await h.toDataUrl(bgBuffer)
+
+      function describeCameraAngle(manifest: any): string {
+        if (!manifest?.camera?.position || !manifest?.camera?.target) return ''
+        const [cx, cy, cz] = manifest.camera.position
+        const [tx, ty, tz] = manifest.camera.target
+        const dx = cx - tx, dy = cy - ty, dz = cz - tz
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+        const elevationDeg = Math.round(Math.asin(dy / (dist || 1)) * (180 / Math.PI))
+        const azimuthDeg = Math.round(Math.atan2(dx, dz) * (180 / Math.PI))
+        const verticalDesc = elevationDeg > 25 ? 'from above (bird\'s eye)' : elevationDeg > 10 ? 'slightly from above' : elevationDeg < -10 ? 'from below (low angle)' : 'at eye level'
+        const horizontalDesc = Math.abs(azimuthDeg) < 15 ? 'front view' : Math.abs(azimuthDeg) > 165 ? 'rear view' : Math.abs(azimuthDeg) > 75 ? 'side view' : azimuthDeg > 0 ? 'three-quarter view from the right' : 'three-quarter view from the left'
+        const fov = manifest.camera.fov ?? null
+        const fovDesc = fov ? ` at FOV ${Math.round(fov)}° (${fov < 30 ? 'telephoto' : fov < 60 ? 'normal lens' : 'wide angle'})` : ''
+        return `${verticalDesc}, ${horizontalDesc} (elevation ~${elevationDeg}°, azimuth ~${azimuthDeg}°${fovDesc})`
+      }
+
+      const origAngle = describeCameraAngle(args.originalManifest)
+      const newAngle = describeCameraAngle(args.newManifest)
+
+      // --- Stap 1: AI genereert de lege achtergrond vanuit de nieuwe hoek ---
+      console.log('[angle-variant] Stap 1: Achtergrond genereren vanuit nieuwe hoek')
+      const bgContent: any[] = [
+        {
+          type: 'text',
+          text: [
+            'ORIGINAL_BACKGROUND is a clean photograph of a room/scene with NO product in it.',
+            '',
+            `This background was shot ${origAngle}.`,
+            `Generate this EXACT SAME room/scene from a different camera angle: ${newAngle}.`,
+            '',
+            `Scene description: ${args.originalPrompt}`,
+            '',
+            'RULES:',
+            '- Output ONLY the empty room/scene — do NOT add any product or object.',
+            '- Keep the same room layout, furniture, walls, floor, lighting, and color palette.',
+            '- Adjust the perspective naturally for the new camera angle.',
+            '- The floor vanishing point and horizon line must match the new elevation and azimuth.',
+            '- Output one image at the same resolution as the input.',
+          ].join('\n'),
+        },
+        { type: 'text', text: 'ORIGINAL_BACKGROUND — The empty room/scene from the original angle:' },
+        { type: 'image_url', image_url: { url: bgDataUrl } },
+      ]
+
+      const bgResultJson = await h.callModel([{ role: 'user', content: bgContent }])
+      const newBgBuffer = await h.extractImageFromResponse(bgResultJson)
+      const newBgPlateUrl = await saveAssetLocally(user.id, args.projectId, `clean_plate_angle_${run.id}.png`, newBgBuffer)
+
+      // --- Stap 2: AI genereert product layer (zelfde als Route A) ---
+      console.log('[angle-variant] Stap 2: Product layer genereren vanuit nieuwe hoek')
+
+      // Canonical reference ophalen
+      let canonicalReferenceUrls: string[] = []
+      if (packet?.canonical_reference_set_id) {
+        const { data: canonicalSet } = await sb.from('canonical_reference_sets').select('view_ids').eq('id', packet.canonical_reference_set_id).maybeSingle()
+        const viewIds = Array.isArray(canonicalSet?.view_ids) ? canonicalSet.view_ids : []
+        if (viewIds.length > 0) {
+          const { data: canonicalViews } = await sb.from('reference_views').select('id, asset_url').in('id', viewIds).neq('status', 'rejected')
+          const canonicalById = new Map((canonicalViews ?? []).map((view) => [view.id, view.asset_url] as const))
+          canonicalReferenceUrls = viewIds.map((id) => canonicalById.get(id)).filter((url): url is string => typeof url === 'string' && url.length > 0).slice(0, 4)
+        }
+      }
+      // Fallback: originele bron-afbeelding
+      let sourceUrl: string | null = null
+      if (canonicalReferenceUrls.length === 0) {
+        const { data: sourceAssets } = await sb.from('source_assets').select('type, url').eq('project_id', args.projectId).in('type', ['original-image'])
+        sourceUrl = sourceAssets?.find((sa) => sa.type === 'original-image')?.url ?? null
+      }
+      const primaryCanonicalUrl = canonicalReferenceUrls[0] ?? sourceUrl
+      const primaryCanonicalBuffer = await h.loadImageBuffer(primaryCanonicalUrl, 'Canonical')
+      if (!primaryCanonicalBuffer) throw new Error('Geen canonical referentie beschikbaar.')
+
+      const canonicalDataUrl = await h.toDataUrl(primaryCanonicalBuffer)
+      const beautyDataUrl = await h.toDataUrl(Buffer.from(args.newBeautyDataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64'))
+
+      let calibrationDataUrl: string
+      if (args.newCalibrationDataUrl) {
+        calibrationDataUrl = await h.toDataUrl(Buffer.from(args.newCalibrationDataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64'))
+      } else {
+        calibrationDataUrl = beautyDataUrl
+      }
+
+      const productParts: any[] = [
+        {
+          type: 'text',
+          text: [
+            'You will receive three labeled images.',
+            'Output CALIBRATION with the skin/texture from CANONICAL applied. Keep the exact composition, camera angle, scale, crop, silhouette and product position from CALIBRATION. Use BEAUTY for lighting and 3D shape reference.',
+            'Do not change the pose, crop, size or angle.',
+          ].join('\n'),
+        },
+        { type: 'text', text: 'CALIBRATION — Keep this exact composition, camera angle, scale, crop, silhouette and product position:' },
+        { type: 'image_url', image_url: { url: calibrationDataUrl } },
+        { type: 'text', text: 'BEAUTY — Same product pose with real lighting and 3D shape:' },
+        { type: 'image_url', image_url: { url: beautyDataUrl } },
+        { type: 'text', text: 'CANONICAL — Use only its skin, texture, material, print and colors:' },
+        { type: 'image_url', image_url: { url: canonicalDataUrl } },
+      ]
+
+      const productJson = await h.callModel([{ role: 'user', content: productParts }], 'google/gemini-3.1-flash-image-preview')
+      const productLayerBuffer = await h.extractImageFromResponse(productJson)
+      const productLayerUrl = await saveAssetLocally(user.id, args.projectId, `product_layer_angle_${run.id}.png`, productLayerBuffer)
+      const productLayerDataUrl = await h.toDataUrl(productLayerBuffer)
+
+      // --- Stap 3: AI plaatst product in de achtergrond (zelfde als Route A final render) ---
+      console.log('[angle-variant] Stap 3: Product in achtergrond plaatsen')
+
+      let cameraDescription = ''
+      if (args.newManifest?.camera?.position && args.newManifest?.camera?.target) {
+        const [cx, cy, cz] = args.newManifest.camera.position as [number, number, number]
+        const [tx, ty, tz] = args.newManifest.camera.target as [number, number, number]
+        const dx = cx - tx, dy = cy - ty, dz = cz - tz
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+        const elevationDeg = Math.round(Math.asin(dy / (dist || 1)) * (180 / Math.PI))
+        const azimuthDeg = Math.round(Math.atan2(dx, dz) * (180 / Math.PI))
+        const verticalDesc = elevationDeg > 25 ? 'from above (bird\'s eye)' : elevationDeg > 10 ? 'slightly from above' : elevationDeg < -10 ? 'from below (low angle)' : 'at eye level'
+        const horizontalDesc = Math.abs(azimuthDeg) < 15 ? 'front view' : Math.abs(azimuthDeg) > 165 ? 'rear view' : Math.abs(azimuthDeg) > 75 ? 'side view' : azimuthDeg > 0 ? 'three-quarter view from the right' : 'three-quarter view from the left'
+        cameraDescription = `The product is photographed ${verticalDesc}, ${horizontalDesc} (elevation ~${elevationDeg}°, azimuth ~${azimuthDeg}°). The background MUST use exactly this same camera angle and perspective — the vanishing points, horizon line, and floor plane must match.`
+      }
+
+      // Originele eindbeeld laden als schaalreferentie
+      const originalFinalUrl = (originalRender as any).output_url as string | null
+      const originalFinalBuffer = await h.loadImageBuffer(originalFinalUrl, 'Original final render')
+      let originalFinalDataUrl: string | null = null
+      if (originalFinalBuffer) {
+        originalFinalDataUrl = await h.toDataUrl(originalFinalBuffer)
+      }
+
+      // Perspective referenties voorbereiden
+      let perspectiveDataUrl: string | null = null
+      let depthDataUrl: string | null = null
+      if (args.newPerspectiveDataUrl) {
+        perspectiveDataUrl = await h.toDataUrl(Buffer.from(args.newPerspectiveDataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64'))
+      }
+      if (args.newDepthDataUrl) {
+        depthDataUrl = await h.toDataUrl(Buffer.from(args.newDepthDataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64'))
+      }
+
+      const finalParts: any[] = [
+        {
+          type: 'text',
+          text: [
+            'Generate a new camera angle of the same product in the same room.',
+            '',
+            'You will receive labeled reference images.',
+            '', cameraDescription ? `CAMERA: ${cameraDescription}` : '', '',
+            'ORIGINAL_SCENE shows the product in the room from the original angle. Use it to understand:',
+            '- The REAL SIZE of the product relative to the furniture (counter, shelves, etc.)',
+            '- How the product sits on the surface',
+            '- The room layout and style',
+            '',
+            'CRITICAL SIZE RULE:',
+            '- The product must be the SAME REAL-WORLD SIZE as in ORIGINAL_SCENE.',
+            '- If the product sits on a counter in ORIGINAL_SCENE, it must sit on that same counter from the new angle too.',
+            '- CALIBRATION_3D shows the exact camera angle and product placement for the new view.',
+            '',
+            'OTHER RULES:',
+            '- Apply the texture/appearance from PRODUCT_RENDER.',
+            '- Use BACKGROUND_SCENE as the environment from the new angle.',
+            perspectiveDataUrl ? '- Use PERSPECTIVE_GRID to match the floor vanishing point and perspective lines exactly.' : '',
+            depthDataUrl ? '- Use DEPTH_MAP to understand the spatial depth and distance relationships.' : '',
+            '- The product must look like it sits ON the surface, not floating.',
+            '- Match the lighting direction of the environment to the product.',
+            '- Output one final photorealistic image.',
+          ].filter(Boolean).join('\n'),
+        },
+      ]
+      if (originalFinalDataUrl) {
+        finalParts.push(
+          { type: 'text', text: 'ORIGINAL_SCENE — The product in the room from the original angle. Use this to understand the REAL SIZE of the product relative to the furniture:' },
+          { type: 'image_url', image_url: { url: originalFinalDataUrl } },
+        )
+      }
+      finalParts.push(
+        { type: 'text', text: 'CALIBRATION_3D — Grey 3D mesh showing the exact camera angle and product placement for the new view:' },
+        { type: 'image_url', image_url: { url: calibrationDataUrl } },
+        { type: 'text', text: 'PRODUCT_RENDER — The product texture/appearance to apply:' },
+        { type: 'image_url', image_url: { url: productLayerDataUrl } },
+        { type: 'text', text: 'BACKGROUND_SCENE — The empty room/scene from the new angle:' },
+        { type: 'image_url', image_url: { url: await h.toDataUrl(newBgBuffer) } },
+      )
+      if (perspectiveDataUrl) {
+        finalParts.push(
+          { type: 'text', text: 'PERSPECTIVE_GRID — Green grid on the floor plane (y=0) showing exact vanishing point and perspective lines:' },
+          { type: 'image_url', image_url: { url: perspectiveDataUrl } },
+        )
+      }
+      if (depthDataUrl) {
+        finalParts.push(
+          { type: 'text', text: 'DEPTH_MAP — Depth information showing spatial distance (darker = closer, lighter = farther):' },
+          { type: 'image_url', image_url: { url: depthDataUrl } },
+        )
+      }
+
+      const finalJson = await h.callModel([{ role: 'user', content: finalParts }])
+      const finalBuffer = await h.extractImageFromResponse(finalJson)
+      const finalUrl = await saveAssetLocally(user.id, args.projectId, `angle_${run.id}.png`, finalBuffer)
+
+      const { data: render, error: renderError } = await sb.from('final_render_versions').insert({
+        project_id: args.projectId,
+        render_packet_id: args.renderPacketId,
+        provider_run_id: run.id,
+        output_url: finalUrl,
+        background_plate_url: newBgPlateUrl,
+        product_layer_url: productLayerUrl,
+        composite_url: finalUrl,
+        preservation_policy: (originalRender as any).preservation_policy ?? 'balanced',
+        prompt: args.originalPrompt,
+        resolution: (originalRender as any).resolution ?? '2K',
+        status: 'review',
+        layer_metadata: {
+          route: 'angle-variant',
+          original_final_render_id: args.originalFinalRenderVersionId,
+          original_angle: origAngle,
+          new_angle: newAngle,
+          has_background_plate: true,
+          has_product_layer: true,
+        },
+      }).select().single()
+      if (renderError) throw new Error(renderError.message)
+
+      await sb.from('provider_runs').update({
+        status: 'completed',
+        latency_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      }).eq('id', run.id)
+
+      return { ok: true, render, providerRunId: run.id, backgroundPlateUrl: newBgPlateUrl }
     } catch (err: any) {
       await sb.from('provider_runs').update({
         status: 'failed', error_message: err.message,

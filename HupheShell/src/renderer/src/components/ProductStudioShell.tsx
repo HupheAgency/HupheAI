@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { notifyIfCreditsRequired } from '../lib/credits-required'
 import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview, type Scene3DSceneControls } from './Scene3DEditor'
 import Scene3DPropertiesPanel from './Scene3DPropertiesPanel'
+import Scene3DEditorInline from './Scene3DEditorInline'
 import { AtelierPromptBar } from './AtelierPromptBar'
 import type {
   CanonicalReferenceSet,
@@ -115,7 +116,7 @@ type ProductStudioApi = {
   getTextureStatus: (reconstructionVersionId: string) => Promise<any>
   retryTextureWrap: (reconstructionVersionId: string) => Promise<any>
   saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) => Promise<any>
-  uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map'; dataUrl: string }) => Promise<any>
+  uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective'; dataUrl: string }) => Promise<any>
   createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; calibrationUrl?: string; lightMapUrl?: string; sceneManifest?: Record<string, unknown> }) => Promise<any>
   listFinalRenders: (projectId: string) => Promise<any>
   updateFinalRenderStatus: (id: string, status: string) => Promise<any>
@@ -511,12 +512,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [compareSlider, setCompareSlider] = useState(50)
   const [renderPacketStale, setRenderPacketStale] = useState(false)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
-  const [rightTab, setRightTab] = useState<'editor' | 'studio'>('studio')
+  const [rightTab, setRightTab] = useState<'properties' | 'editor' | 'studio' | 'archive'>('studio')
+  const [archivePreviewIndex, setArchivePreviewIndex] = useState<number | null>(null)
   const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
   const [viewportOverlay, setViewportOverlay] = useState<'calibration' | 'light' | 'productLayer' | 'composite' | null>(null)
+  const [debugRings, setDebugRings] = useState<{ spacing: number; width: number } | undefined>({ spacing: 0.04, width: 0.002 })
+  const [viewMode, setViewMode] = useState<'wireframe' | 'solid' | 'material' | 'rendered'>('material')
+  const textureDeletedRef = useRef(false)
 
   useEffect(() => {
-    if (rightTab !== 'editor') return
+    if (rightTab !== 'properties' && rightTab !== 'editor') return
     const id = setInterval(() => {
       setSceneControls(studioRef.current?.getSceneControls() ?? null)
     }, 200)
@@ -682,11 +687,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     void hydrateLatestState(projectId, false)
   }, [project.backendProject?.id, project.id])
 
+  const activeStudioMeshBase = activeStudioMeshUrl?.split('?')[0] ?? null
   useEffect(() => {
     if (!activeStudioMeshUrl) return
+    if (textureDeletedRef.current && texturedMeshReady) return
     studioRef.current?.addModelFromUrl(activeStudioMeshUrl, texturedMeshReady ? 'Textured product' : 'Reconstructed product')
     if (texturedMeshReady) setRenderPacketStale(true)
-  }, [activeStudioMeshUrl, texturedMeshReady])
+  }, [activeStudioMeshBase, texturedMeshReady])
 
   useEffect(() => {
     const projectId = getStoredProjectId(project)
@@ -1104,6 +1111,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       )
     }
 
+    const hadReconstruction = !!project.reconstruction
     setProject((prev) => ({
       ...prev,
       canonicalSet,
@@ -1111,9 +1119,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       activeStep: 'mesh',
       updatedAt: new Date().toISOString(),
     }))
-    const bestMeshUrl = reconstruction.textured_mesh_url ?? reconstruction.mesh_url
-    if (bestMeshUrl) {
-      studioRef.current?.addModelFromUrl(bestMeshUrl, reconstruction.textured_mesh_url ? 'Textured product' : 'Reconstructed product')
+    if (!hadReconstruction) {
+      const bestMeshUrl = reconstruction.textured_mesh_url ?? reconstruction.mesh_url
+      if (bestMeshUrl) {
+        studioRef.current?.addModelFromUrl(bestMeshUrl, reconstruction.textured_mesh_url ? 'Textured product' : 'Reconstructed product')
+      }
     }
     return { canonicalSet, reconstruction }
   }
@@ -1182,6 +1192,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }
 
   async function startTextureWrap(forceRetry = false) {
+    textureDeletedRef.current = false
     const projectId = getStoredProjectId(project)
     const reconstructionId = project.reconstruction?.id
     if (!projectId || !reconstructionId) {
@@ -1248,14 +1259,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         packet.passes?.light ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'light-map', dataUrl: packet.passes.light }) : Promise.resolve(null),
         packet.passes?.depth ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'depth', dataUrl: packet.passes.depth }) : Promise.resolve(null),
         packet.passes?.normal ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'normal', dataUrl: packet.passes.normal }) : Promise.resolve(null),
+        packet.passes?.perspective ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'perspective', dataUrl: packet.passes.perspective }) : Promise.resolve(null),
       ])
-      const [beautyUpload, calibrationUpload, objectMaskUpload, lightMapUpload, depthUpload, normalUpload] = uploads
+      const [beautyUpload, calibrationUpload, objectMaskUpload, lightMapUpload, depthUpload, normalUpload, perspectiveUpload] = uploads
       if (beautyUpload && !beautyUpload.ok) throw new Error(beautyUpload.error || 'Beauty upload mislukt.')
       if (calibrationUpload && !calibrationUpload.ok) throw new Error(calibrationUpload.error || 'Calibration upload mislukt.')
       if (objectMaskUpload && !objectMaskUpload.ok) throw new Error(objectMaskUpload.error || 'Object-mask upload mislukt.')
       if (lightMapUpload && !lightMapUpload.ok) throw new Error(lightMapUpload.error || 'Light-map upload mislukt.')
       if (depthUpload && !depthUpload.ok) throw new Error(depthUpload.error || 'Depth upload mislukt.')
       if (normalUpload && !normalUpload.ok) throw new Error(normalUpload.error || 'Normal upload mislukt.')
+      if (perspectiveUpload && !perspectiveUpload.ok) throw new Error(perspectiveUpload.error || 'Perspective upload mislukt.')
 
       const scene = studioRef.current?.getScene()
       if (!scene) throw new Error('Kan de 3D scene niet lezen.')
@@ -1289,6 +1302,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           normalUrl: normalUpload?.url,
           calibrationUrl: calibrationUpload?.url,
           lightMapUrl: lightMapUpload?.url,
+          perspectiveUrl: perspectiveUpload?.url,
           sceneManifest: packet.manifest ?? undefined,
         }),
         'packet',
@@ -1755,18 +1769,44 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                           : 'Maak eerst een mesh voordat texture wrapping mogelijk is.'}
                 </p>
               </div>
-              <span className={[
-                'rounded-full border px-2 py-1 text-[10px]',
-                texturedMeshReady
-                  ? 'border-green-400/20 bg-green-500/8 text-green-300'
-                  : textureStatus === 'failed' || textureOutputMissing
-                    ? 'border-red-400/20 bg-red-500/8 text-red-200'
-                    : textureInProgress
-                      ? 'border-[#facc15]/20 bg-[#facc15]/8 text-[#facc15]'
-                      : 'border-white/[0.08] text-white/38',
-              ].join(' ')}>
-                {textureOutputMissing ? 'mesh ontbreekt' : textureStatus === 'none' ? 'geen texture' : textureStatus}
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className={[
+                  'rounded-full border px-2 py-1 text-[10px]',
+                  texturedMeshReady
+                    ? 'border-green-400/20 bg-green-500/8 text-green-300'
+                    : textureStatus === 'failed' || textureOutputMissing
+                      ? 'border-red-400/20 bg-red-500/8 text-red-200'
+                      : textureInProgress
+                        ? 'border-[#facc15]/20 bg-[#facc15]/8 text-[#facc15]'
+                        : 'border-white/[0.08] text-white/38',
+                ].join(' ')}>
+                  {textureOutputMissing ? 'mesh ontbreekt' : textureStatus === 'none' ? 'geen texture' : textureStatus}
+                </span>
+                {textureStatus !== 'none' && (
+                  <button
+                    type="button"
+                    title="Texture verwijderen"
+                    onClick={() => {
+                      textureDeletedRef.current = true
+                      setProject((prev) => ({
+                        ...prev,
+                        reconstruction: prev.reconstruction
+                          ? { ...prev.reconstruction, texture_status: 'none' as any, textured_mesh_url: undefined, texture_atlas_url: undefined, texture_error: undefined }
+                          : undefined,
+                      }))
+                      const meshUrl = project.reconstruction?.mesh_url
+                      if (meshUrl) {
+                        studioRef.current?.addModelFromUrl(meshUrl, 'Reconstructed product')
+                      }
+                    }}
+                    className="flex h-5 w-5 items-center justify-center rounded-full text-white/25 hover:bg-white/[0.08] hover:text-white/60"
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2">
               <div className="rounded-md border border-white/[0.06] bg-black/20 p-2">
@@ -2060,9 +2100,58 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </div>
                 <div className="flex items-center justify-between gap-3 px-3 py-2">
                   <p className="min-w-0 truncate text-xs text-white/48">{project.finalRender.prompt}</p>
-                  <button type="button" onClick={downloadFinalRender} disabled={downloadStatus === 'Downloaden...'} className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/65 hover:bg-white/[0.06] disabled:text-white/24">
-                    {downloadStatus ?? 'Download'}
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    {backgroundPlateUrl && project.finalRenderRecord && project.renderPacketRecord && (
+                      <button
+                        type="button"
+                        disabled={!!busy || finalLoading}
+                        onClick={async () => {
+                          setBusy('Nieuwe hoek genereren...')
+                          setFinalError(null)
+                          try {
+                            const prevViewMode = viewMode
+                            const prevRings = debugRings
+                            setDebugRings(undefined)
+                            setViewMode('material')
+                            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+                            const packet = await studioRef.current?.captureRenderPacketPreview()
+                            setViewMode(prevViewMode)
+                            setDebugRings(prevRings)
+                            if (!packet?.beauty) throw new Error('Kan geen screenshot maken vanuit de huidige hoek.')
+                            const newManifest = studioRef.current?.getScene()
+                              ? (studioRef.current as any).captureRenderManifest?.() ?? packet.manifest
+                              : packet.manifest
+                            const api = getProductStudioApi()
+                            if (!api) throw new Error('API niet beschikbaar.')
+                            const result = await (api as any).generateAngleVariant({
+                              projectId: project.backendProject!.id,
+                              renderPacketId: project.renderPacketRecord!.id,
+                              originalFinalRenderVersionId: project.finalRenderRecord!.id,
+                              originalPrompt: project.finalRender?.prompt ?? '',
+                              originalManifest: project.renderPacketRecord!.scene_manifest,
+                              newManifest: newManifest ?? packet.manifest,
+                              newBeautyDataUrl: packet.beauty,
+                              newCalibrationDataUrl: packet.passes?.calibration,
+                              newPerspectiveDataUrl: packet.passes?.perspective,
+                              newDepthDataUrl: packet.passes?.depth,
+                            })
+                            if (!result?.ok) throw new Error(result?.error || 'Angle variant genereren mislukt.')
+                            await hydrateLatestState(project.backendProject!.id, false)
+                          } catch (err: any) {
+                            setFinalError(err.message)
+                          } finally {
+                            setBusy(null)
+                          }
+                        }}
+                        className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/65 hover:bg-white/[0.06] disabled:text-white/24"
+                      >
+                        Nieuwe hoek
+                      </button>
+                    )}
+                    <button type="button" onClick={downloadFinalRender} disabled={downloadStatus === 'Downloaden...'} className="rounded-full border border-white/[0.08] px-3 py-1 text-xs text-white/65 hover:bg-white/[0.06] disabled:text-white/24">
+                      {downloadStatus ?? 'Download'}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -2230,6 +2319,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         }}
         hideProperties
         overlayImageSrc={activeOverlaySrc}
+        debugRings={debugRings}
+        viewMode={viewMode}
       />
       {sourceReady && (
         <div className="absolute bottom-4 left-20 z-10 flex items-center gap-2">
@@ -2245,7 +2336,60 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             </svg>
             {busy ? 'Bezig...' : 'Take picture'}
           </button>
+          {viewportOverlay === 'composite' && project.finalRender?.prompt && (
+            <button
+              type="button"
+              onClick={() => void handleFinalPrompt(project.finalRender!.prompt)}
+              disabled={!!busy || finalLoading}
+              title="Regenereer achtergrond met dezelfde prompt"
+              className="flex items-center justify-center rounded-full bg-white/[0.12] p-2.5 text-white/70 shadow-lg backdrop-blur-sm transition-all hover:bg-white/[0.2] hover:text-white active:scale-95 disabled:opacity-40"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 2v6h-6" />
+                <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+                <path d="M3 22v-6h6" />
+                <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+              </svg>
+            </button>
+          )}
           <div className="flex items-center gap-1 rounded-full border border-white/[0.10] bg-black/60 p-1 backdrop-blur-sm">
+            {([
+              { mode: 'rings' as const, label: 'Rings', icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z' },
+              { mode: 'solid' as const, label: 'Solid', icon: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
+              { mode: 'material' as const, label: 'Material', icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 4a6 6 0 1 1 0 12 6 6 0 0 0 0-12z' },
+              { mode: 'rendered' as const, label: 'Rendered', icon: 'M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83' },
+            ]).map((v) => {
+              const active = v.mode === 'rings' ? !!debugRings : (!debugRings && viewMode === v.mode)
+              return (
+              <button
+                key={v.mode}
+                type="button"
+                onClick={() => {
+                  if (v.mode === 'rings') {
+                    setDebugRings({ spacing: 0.04, width: 0.002 })
+                    setViewMode('material')
+                  } else {
+                    setDebugRings(undefined)
+                    setViewMode(v.mode)
+                  }
+                }}
+                className={[
+                  'group relative flex h-8 w-8 items-center justify-center rounded-full transition-colors',
+                  active
+                    ? 'bg-white/20 text-white'
+                    : 'text-white/50 hover:bg-white/10 hover:text-white/80',
+                ].join(' ')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d={v.icon} />
+                </svg>
+                <div className="pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+                  {v.label}
+                </div>
+              </button>
+              )
+            })}
+            <div className="mx-0.5 h-5 w-px bg-white/15" />
             {overlayPasses.map((pass) => (
               <button
                 key={pass.key}
@@ -2278,7 +2422,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const rightPanelContent = (
     <>
       <div className="flex shrink-0 border-b border-white/[0.08]">
-        {(['editor', 'studio'] as const).map((tab) => (
+        {(['properties', 'editor', 'studio', 'archive'] as const).map((tab) => (
           <button
             key={tab}
             type="button"
@@ -2290,12 +2434,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 : 'text-white/40 hover:text-white/70',
             ].join(' ')}
           >
-            {tab === 'editor' ? 'Editor' : 'Product Studio'}
+            {tab === 'properties' ? 'Properties' : tab === 'editor' ? 'Editor' : tab === 'archive' ? 'Archive' : 'Studio'}
           </button>
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {rightTab === 'editor' && sceneControls && (
+        {rightTab === 'properties' && sceneControls && (
           <div className="p-3">
             <Scene3DPropertiesPanel
               scene={sceneControls.scene}
@@ -2307,6 +2451,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             />
           </div>
         )}
+        {rightTab === 'properties' && !sceneControls && (
+          <div className="flex h-32 items-center justify-center text-sm text-white/30">
+            Laad een model om te bewerken
+          </div>
+        )}
+        {rightTab === 'editor' && sceneControls && (
+          <Scene3DEditorInline externalControls={sceneControls} />
+        )}
         {rightTab === 'editor' && !sceneControls && (
           <div className="flex h-32 items-center justify-center text-sm text-white/30">
             Laad een model om te bewerken
@@ -2315,7 +2467,72 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         <div style={{ display: rightTab === 'studio' ? 'contents' : 'none' }}>
           {sidebarContent}
         </div>
+        {rightTab === 'archive' && (
+          <div className="p-2">
+            {finalRenderVersions.length === 0 ? (
+              <div className="flex h-32 items-center justify-center text-sm text-white/30">
+                Nog geen renders
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                {finalRenderVersions.map((version) => (
+                  <button
+                    key={version.id}
+                    type="button"
+                    onClick={() => setArchivePreviewIndex(finalRenderVersions.indexOf(version))}
+                    className="group relative overflow-hidden rounded-lg border border-white/[0.06] bg-black/30 transition-colors hover:border-white/[0.15]"
+                  >
+                    {version.output_url ? (
+                      <img src={version.output_url} alt="" className="w-full" loading="lazy" />
+                    ) : (
+                      <div className="flex aspect-video items-center justify-center text-xs text-white/20">Geen preview</div>
+                    )}
+                    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1.5">
+                      <span className="text-[10px] text-white/60">
+                        {new Date(version.created_at).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                        {version.layer_metadata?.route === 'angle-variant' ? ' · Hoekvariant' : ''}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
+      {archivePreviewIndex !== null && finalRenderVersions[archivePreviewIndex] && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 backdrop-blur-sm"
+          onClick={() => setArchivePreviewIndex(null)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowLeft' && archivePreviewIndex > 0) setArchivePreviewIndex(archivePreviewIndex - 1)
+            if (e.key === 'ArrowRight' && archivePreviewIndex < finalRenderVersions.length - 1) setArchivePreviewIndex(archivePreviewIndex + 1)
+            if (e.key === 'Escape') setArchivePreviewIndex(null)
+          }}
+          tabIndex={0}
+          ref={(el) => el?.focus()}
+        >
+          <img
+            src={finalRenderVersions[archivePreviewIndex].output_url ?? ''}
+            alt=""
+            className="max-h-[90vh] max-w-[90vw] rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+          {archivePreviewIndex > 0 && (
+            <button type="button" onClick={(e) => { e.stopPropagation(); setArchivePreviewIndex(archivePreviewIndex - 1) }} className="absolute left-4 rounded-full bg-black/50 p-2 text-white/70 hover:text-white">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+            </button>
+          )}
+          {archivePreviewIndex < finalRenderVersions.length - 1 && (
+            <button type="button" onClick={(e) => { e.stopPropagation(); setArchivePreviewIndex(archivePreviewIndex + 1) }} className="absolute right-4 rounded-full bg-black/50 p-2 text-white/70 hover:text-white">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+            </button>
+          )}
+          <div className="absolute bottom-6 text-center text-sm text-white/50">
+            {archivePreviewIndex + 1} / {finalRenderVersions.length}
+          </div>
+        </div>
+      )}
     </>
   )
 

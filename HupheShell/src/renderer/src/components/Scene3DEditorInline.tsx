@@ -2,7 +2,7 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useScene3D } from '../hooks/useScene3D'
 import Scene3DViewport, { type Scene3DViewportHandle } from './Scene3DViewport'
-import type { Scene3DObjectType, Scene3DLightType, TransformMode, ViewMode, Scene3DObject, Scene3DLight, Scene3DCamera } from '../lib/scene3d-types'
+import type { Scene3DObjectType, Scene3DLightType, TransformMode, ViewMode, Scene3DObject, Scene3DLight, Scene3DCamera, Scene3DState, Scene3DBackground } from '../lib/scene3d-types'
 
 const VIEW_MODES: { mode: ViewMode; label: string; icon: string }[] = [
   { mode: 'wireframe', label: 'Wireframe', icon: 'M3 3h18v18H3zM3 3l18 18M21 3L3 21' },
@@ -283,9 +283,34 @@ function CameraItem({ cam, active, onActivate, onUpdate, onDelete }: {
   )
 }
 
-export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
+export default function Scene3DEditorInline({ onResult, currentImageSrc, externalControls }: {
   onResult?: (imageUrl: string) => void
   currentImageSrc?: string
+  externalControls?: {
+    scene: Scene3DState
+    selectedObjectId: string | null
+    setSelectedObjectId: (id: string | null) => void
+    transformMode: TransformMode
+    setTransformMode: (mode: TransformMode) => void
+    addObject: (type: Scene3DObjectType, patch?: Partial<Scene3DObject>) => void
+    updateObject: (id: string, patch: Partial<Scene3DObject>) => void
+    deleteObject: (id: string) => void
+    deleteSelected: () => void
+    addLight: (type: Scene3DLightType) => void
+    updateLight: (id: string, patch: Partial<Scene3DLight>) => void
+    deleteLight: (id: string) => void
+    addCamera: (position: [number, number, number], target: [number, number, number], fov: number) => void
+    updateCamera: (id: string, patch: Partial<Scene3DCamera>) => void
+    deleteCamera: (id: string) => void
+    setActiveCameraId: (id: string | null) => void
+    setEnvironment: (env: string | null) => void
+    updateBackground: (patch: Partial<Scene3DBackground>) => void
+    onObjectTransformed: (id: string, position: [number, number, number], rotation: [number, number, number], scale: [number, number, number]) => void
+    resetScene: () => void
+    getOrbitState?: () => { position: [number, number, number]; target: [number, number, number] } | null
+    selectedLightId: string | null
+    setSelectedLightId: (id: string | null) => void
+  }
 }) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const fullscreenViewportRef = useRef<Scene3DViewportHandle>(null)
@@ -298,11 +323,15 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('solid')
-  const [selectedLightId, setSelectedLightId] = useState<string | null>(null)
+  const [localSelectedLightId, setLocalSelectedLightId] = useState<string | null>(null)
+  const selectedLightId = externalControls?.selectedLightId ?? localSelectedLightId
+  const setSelectedLightId = externalControls?.setSelectedLightId ?? setLocalSelectedLightId
   const [generatePrompt, setGeneratePrompt] = useState('')
   const [generating, setGenerating] = useState(false)
   const [generatedImage, setGeneratedImage] = useState<string | null>(null)
   const [generateError, setGenerateError] = useState<string | null>(null)
+
+  const localScene = useScene3D()
 
   const {
     scene, selectedObjectId, transformMode,
@@ -311,13 +340,13 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
     addLight, updateLight, deleteLight,
     addCamera, updateCamera, deleteCamera, setActiveCameraId,
     setEnvironment, updateBackground, onObjectTransformed, resetScene,
-  } = useScene3D()
+  } = externalControls ?? localScene
 
   const handleSaveCurrentView = useCallback(() => {
-    const state = orbitStateRef.current
+    const state = externalControls?.getOrbitState?.() ?? orbitStateRef.current
     if (!state) return
     addCamera(state.position, state.target, scene.cameras[0]?.fov ?? 50)
-  }, [addCamera, scene.cameras])
+  }, [addCamera, scene.cameras, externalControls])
 
   const handleActivateCamera = useCallback((id: string) => {
     setActiveCameraId(scene.activeCameraId === id ? null : id)
@@ -633,7 +662,8 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
   // ── Inline layout (sidebar panel) ──
   return (
     <div className="flex h-full flex-col overflow-y-auto">
-      {/* 3D Viewport */}
+      {/* 3D Viewport — only when using local scene */}
+      {!externalControls && (
       <div className="flex-shrink-0 border-b border-white/[0.06]">
         <SectionHeader title="Viewport" open={viewportOpen} onToggle={() => setViewportOpen(!viewportOpen)} />
         {viewportOpen && (
@@ -658,6 +688,7 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc }: {
           </>
         )}
       </div>
+      )}
 
       {controlsPanel}
     </div>

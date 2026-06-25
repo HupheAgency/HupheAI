@@ -13,6 +13,7 @@ export interface RenderPasses {
   light: string
   depth: string
   normal: string
+  perspective: string
 }
 
 export interface Scene3DRenderManifest {
@@ -431,14 +432,28 @@ function CleanScreenshotCapture({ captureRef }: { captureRef: React.MutableRefOb
     captureRef.current = (fovScale?: number) => {
       const hidden = hideEditorOnlyObjects(scene)
       const rt = new THREE.WebGLRenderTarget(RENDER_WIDTH, RENDER_HEIGHT)
-      let dataUrl = ''
 
+      // Strip ring shader for clean capture
+      const ringSwapped = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>()
+      const sceneGroup = scene.children.find((c) => c.type === 'Group' && c.userData.__sceneObjects)
+      ;(sceneGroup ?? scene).traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          const mesh = obj as THREE.Mesh
+          if (mesh.userData.__originalMaterial) {
+            ringSwapped.set(mesh, mesh.material)
+            mesh.material = mesh.userData.__originalMaterial
+          }
+        }
+      })
+
+      let dataUrl = ''
       withOffscreenCamera(camera, fovScale, () => {
         dataUrl = renderToDataUrl(gl, scene, camera, rt)
       })
 
       rt.dispose()
       hidden.forEach((obj) => { obj.visible = true })
+      for (const [mesh, ringMat] of ringSwapped) { mesh.material = ringMat }
       return dataUrl
     }
     return () => { captureRef.current = null }
@@ -584,13 +599,42 @@ function RenderPassCapture({ passRef }: { passRef: React.MutableRefObject<((fovS
 
   useEffect(() => {
     passRef.current = (fovScale?: number) => {
-      const originalOverride = scene.overrideMaterial
       const originalBg = scene.background
 
       const hidden = hideEditorOnlyObjects(scene)
       const rt = new THREE.WebGLRenderTarget(RENDER_WIDTH, RENDER_HEIGHT)
 
-      let textured = '', calibration = '', mask = '', light = '', depth = '', normal = ''
+      const originals = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>()
+      function collectMeshes() {
+        originals.clear()
+        const sceneGroup = scene.children.find((c) => c.type === 'Group' && c.userData.__sceneObjects)
+        const root = sceneGroup ?? scene
+        root.traverse((obj) => {
+          if ((obj as THREE.Mesh).isMesh) {
+            const mesh = obj as THREE.Mesh
+            originals.set(mesh, mesh.material)
+          }
+        })
+      }
+      function swapMaterials(mat: THREE.Material) {
+        for (const [mesh] of originals) { mesh.material = mat }
+      }
+      function restoreMaterials() {
+        for (const [mesh, mat] of originals) { mesh.material = mat }
+      }
+
+      collectMeshes()
+
+      // Restore original GLTF materials for textured pass (strips ring shader if active)
+      const ringSwapped = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>()
+      for (const [mesh] of originals) {
+        if (mesh.userData.__originalMaterial) {
+          ringSwapped.set(mesh, mesh.material)
+          mesh.material = mesh.userData.__originalMaterial
+        }
+      }
+
+      let textured = '', calibration = '', mask = '', light = '', depth = '', normal = '', perspective = ''
 
       withOffscreenCamera(camera, fovScale, () => {
         textured = renderToDataUrl(gl, scene, camera, rt)
@@ -600,35 +644,60 @@ function RenderPassCapture({ passRef }: { passRef: React.MutableRefObject<((fovS
         calibration = renderToDataUrl(gl, scene, camera, rt)
         restoreCalibration()
 
-        scene.overrideMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff })
+        swapMaterials(new THREE.MeshBasicMaterial({ color: 0xffffff }))
         scene.background = new THREE.Color(0x000000)
         mask = renderToDataUrl(gl, scene, camera, rt)
 
-        scene.overrideMaterial = new THREE.MeshStandardMaterial({
-          color: 0xffffff,
-          roughness: 0.65,
-          metalness: 0,
-        })
+        swapMaterials(new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.65, metalness: 0 }))
         scene.background = new THREE.Color(0x000000)
         light = renderToDataUrl(gl, scene, camera, rt)
 
-        scene.overrideMaterial = new THREE.MeshDepthMaterial({
-          depthPacking: THREE.BasicDepthPacking,
-        })
+        swapMaterials(new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking }))
         scene.background = new THREE.Color(0xffffff)
         depth = renderToDataUrl(gl, scene, camera, rt)
 
-        scene.overrideMaterial = new THREE.MeshNormalMaterial()
+        swapMaterials(new THREE.MeshNormalMaterial())
         scene.background = new THREE.Color(0x8080ff)
         normal = renderToDataUrl(gl, scene, camera, rt)
+
+        restoreMaterials()
+
+        // Perspective grid: floor grid + product silhouette for spatial reference
+        for (const [mesh] of originals) { mesh.visible = false }
+        const gridGroup = new THREE.Group()
+        const gridMat = new THREE.LineBasicMaterial({ color: 0x00ff00 })
+        const gridSize = 10
+        const gridStep = 0.5
+        for (let i = -gridSize; i <= gridSize; i += gridStep) {
+          const pts1 = [new THREE.Vector3(i, 0, -gridSize), new THREE.Vector3(i, 0, gridSize)]
+          gridGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts1), gridMat))
+          const pts2 = [new THREE.Vector3(-gridSize, 0, i), new THREE.Vector3(gridSize, 0, i)]
+          gridGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts2), gridMat))
+        }
+        // Thicker lines at axes
+        const axisMat = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 })
+        gridGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-gridSize, 0, 0), new THREE.Vector3(gridSize, 0, 0)]), axisMat))
+        gridGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, -gridSize), new THREE.Vector3(0, 0, gridSize)]), axisMat))
+        scene.add(gridGroup)
+        scene.background = new THREE.Color(0x000000)
+        perspective = renderToDataUrl(gl, scene, camera, rt)
+        scene.remove(gridGroup)
+        gridGroup.traverse((c) => { if ((c as any).geometry) (c as any).geometry.dispose() })
+        gridMat.dispose()
+        axisMat.dispose()
+        for (const [mesh] of originals) { mesh.visible = true }
       })
 
       rt.dispose()
-      scene.overrideMaterial = originalOverride
       scene.background = originalBg
       hidden.forEach((obj) => { obj.visible = true })
 
-      return { textured, calibration, mask, light, depth, normal }
+      // Restore ring shader materials if they were active
+      for (const [mesh, ringMat] of ringSwapped) {
+        mesh.material = ringMat
+      }
+
+      return { textured, calibration, mask, light, depth, normal, perspective }
     }
     return () => { passRef.current = null }
   }, [gl, scene, camera, passRef])
@@ -765,6 +834,7 @@ function SceneContent({
   onDeactivateCamera,
   onViewChanged,
   orbitStateRef,
+  debugRings,
 }: {
   scene: Scene3DState
   selectedObjectId: string | null
@@ -778,6 +848,7 @@ function SceneContent({
   onDeactivateCamera: () => void
   onViewChanged?: () => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
+  debugRings?: { spacing: number; width: number }
 }) {
   const orbitRef = useRef<OrbitControlsImpl>(null)
   const { camera: threeCamera } = useThree()
@@ -874,6 +945,7 @@ function SceneContent({
               selected={obj.id === selectedObjectId}
               onClick={() => onSelectObject(obj.id)}
               viewMode={viewMode}
+              debugRings={debugRings}
             />
           ))}
         </Suspense>
@@ -913,7 +985,8 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   onDeactivateCamera: () => void
   onViewChanged?: () => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
-}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef }, ref) {
+  debugRings?: { spacing: number; width: number }
+}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef, debugRings }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
@@ -949,6 +1022,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
         camera={{ position: initialPos, fov: initialFov, near: 0.1, far: 1000 }}
         shadows
         style={{ background: viewMode === 'rendered' ? '#000000' : '#1a1a1a' }}
+        onPointerMissed={() => onDeselectAll()}
       >
         <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
         <RenderPassCapture passRef={passRef} />
@@ -966,6 +1040,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           onDeactivateCamera={onDeactivateCamera}
           onViewChanged={onViewChanged}
           orbitStateRef={orbitStateRef}
+          debugRings={debugRings}
         />
       </Canvas>
     </div>

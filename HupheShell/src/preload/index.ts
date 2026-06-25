@@ -240,7 +240,7 @@ contextBridge.exposeInMainWorld('api', {
     updateReconstructionStatus: (id: string, status: string) => ipcRenderer.invoke('product-studio:update-reconstruction-status', id, status),
     saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) =>
       ipcRenderer.invoke('product-studio:save-scene', args),
-    createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; calibrationUrl?: string; lightMapUrl?: string; sceneManifest?: Record<string, unknown> }) =>
+    createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; calibrationUrl?: string; lightMapUrl?: string; perspectiveUrl?: string; sceneManifest?: Record<string, unknown> }) =>
       ipcRenderer.invoke('product-studio:create-render-packet', args),
     listFinalRenders: (projectId: string) => ipcRenderer.invoke('product-studio:list-final-renders', projectId),
     updateFinalRenderStatus: (id: string, status: string) => ipcRenderer.invoke('product-studio:update-final-render-status', id, status),
@@ -251,7 +251,7 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:upload-glb', args),
     downloadPng: (args: { imageUrl: string; suggestedName?: string }) =>
       ipcRenderer.invoke('product-studio:download-png', args),
-    uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map'; dataUrl: string }) =>
+    uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective'; dataUrl: string }) =>
       ipcRenderer.invoke('product-studio:upload-render-pass', args),
     generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) =>
       ipcRenderer.invoke('product-studio:generate-reference-views', args),
@@ -277,6 +277,12 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:generate-final-render', args),
     generateCleanPlate: (args: { projectId: string; finalRenderVersionId: string }) =>
       ipcRenderer.invoke('product-studio:generate-clean-plate', args),
+    generateAngleVariant: (args: {
+      projectId: string; renderPacketId: string; originalFinalRenderVersionId: string;
+      originalPrompt: string; originalManifest: any; newManifest: any;
+      newBeautyDataUrl: string; newCalibrationDataUrl?: string;
+      newPerspectiveDataUrl?: string; newDepthDataUrl?: string;
+    }) => ipcRenderer.invoke('product-studio:generate-angle-variant', args),
     retryProviderRun: (runId: string) =>
       ipcRenderer.invoke('product-studio:retry-provider-run', runId),
     rollbackCanonicalSet: (args: { projectId: string; targetVersion: number }) =>

@@ -3,7 +3,7 @@ import { useScene3D } from '../hooks/useScene3D'
 import Scene3DViewport, { type RenderPasses, type Scene3DRenderManifest, type Scene3DViewportHandle } from './Scene3DViewport'
 import Scene3DToolbar from './Scene3DToolbar'
 import Scene3DPropertiesPanel from './Scene3DPropertiesPanel'
-import type { Scene3DLight, Scene3DObject, Scene3DObjectType, Scene3DState } from '../lib/scene3d-types'
+import type { Scene3DBackground, Scene3DCamera, Scene3DLight, Scene3DObject, Scene3DObjectType, Scene3DState, TransformMode, ViewMode } from '../lib/scene3d-types'
 
 export interface Scene3DRenderPacketPreview {
   beauty: string | null
@@ -21,9 +21,27 @@ export interface Scene3DEditorHandle {
 export interface Scene3DSceneControls {
   scene: Scene3DState
   selectedObjectId: string | null
+  setSelectedObjectId: (id: string | null) => void
+  transformMode: TransformMode
+  setTransformMode: (mode: TransformMode) => void
+  addObject: (type: Scene3DObjectType, patch?: Partial<Scene3DObject>) => void
   updateObject: (id: string, patch: Partial<Scene3DObject>) => void
+  deleteObject: (id: string) => void
+  deleteSelected: () => void
+  addLight: (type: Scene3DLight['type']) => void
   updateLight: (id: string, patch: Partial<Scene3DLight>) => void
+  deleteLight: (id: string) => void
+  addCamera: (position: [number, number, number], target: [number, number, number], fov: number) => void
+  updateCamera: (id: string, patch: Partial<Scene3DCamera>) => void
+  deleteCamera: (id: string) => void
+  setActiveCameraId: (id: string | null) => void
   setEnvironment: (env: string | null) => void
+  updateBackground: (patch: Partial<Scene3DBackground>) => void
+  onObjectTransformed: (id: string, position: [number, number, number], rotation: [number, number, number], scale: [number, number, number]) => void
+  resetScene: () => void
+  getOrbitState: () => { position: [number, number, number]; target: [number, number, number] } | null
+  selectedLightId: string | null
+  setSelectedLightId: (id: string | null) => void
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -41,11 +59,15 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   onSceneDirty?: () => void
   hideProperties?: boolean
   overlayImageSrc?: string | null
-}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc }, ref) {
+  debugRings?: { spacing: number; width: number }
+  viewMode?: ViewMode
+}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, debugRings, viewMode: viewModeProp }, ref) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
+  const orbitStateRef = useRef<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
   const [showFrame, setShowFrame] = useState(false)
+  const [selectedLightId, setSelectedLightId] = useState<string | null>(null)
 
   function computeFovScale(): number | undefined {
     const canvas = viewportRef.current?.getCanvasElement()
@@ -66,11 +88,19 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
     clearNonGltfObjects,
     clearAllGltfObjects,
     updateObject,
+    deleteObject,
     deleteSelected,
     addLight,
     updateLight,
+    deleteLight,
+    addCamera,
+    updateCamera,
+    deleteCamera,
+    setActiveCameraId,
     setEnvironment,
+    updateBackground,
     onObjectTransformed,
+    resetScene,
   } = useScene3D({ storageKey })
 
   const markSceneDirty = useCallback(() => {
@@ -141,9 +171,10 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
       return scene
     },
     addModelFromUrl(url: string, name = 'Product model') {
-      const exactMatch = scene.objects.find((object) => object.type === 'gltf' && object.gltfUrl === url)
-      if (exactMatch) {
-        setSelectedObjectId(exactMatch.id)
+      const stripQuery = (u: string) => u.split('?')[0]
+      const match = scene.objects.find((object) => object.type === 'gltf' && object.gltfUrl && stripQuery(object.gltfUrl) === stripQuery(url))
+      if (match) {
+        setSelectedObjectId(match.id)
         return
       }
       const oldGltf = scene.objects.find((o) => o.type === 'gltf')
@@ -162,12 +193,30 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
       return {
         scene,
         selectedObjectId,
+        setSelectedObjectId,
+        transformMode,
+        setTransformMode,
+        addObject: addDirtyObject,
         updateObject: updateDirtyObject,
+        deleteObject: (id: string) => { markSceneDirty(); deleteObject(id) },
+        deleteSelected: deleteDirtySelected,
+        addLight: addDirtyLight,
         updateLight: updateDirtyLight,
+        deleteLight: (id: string) => { markSceneDirty(); deleteLight(id) },
+        addCamera: (position: [number, number, number], target: [number, number, number], fov: number) => { markSceneDirty(); addCamera(position, target, fov) },
+        updateCamera: (id: string, patch: Partial<Scene3DCamera>) => { markSceneDirty(); updateCamera(id, patch) },
+        deleteCamera: (id: string) => { markSceneDirty(); deleteCamera(id) },
+        setActiveCameraId,
         setEnvironment: setDirtyEnvironment,
+        updateBackground: (patch: Partial<Scene3DBackground>) => { markSceneDirty(); updateBackground(patch) },
+        onObjectTransformed: transformDirtyObject,
+        resetScene: () => { markSceneDirty(); resetScene() },
+        getOrbitState: () => orbitStateRef.current,
+        selectedLightId,
+        setSelectedLightId,
       }
     },
-  }), [addObject, clearAllGltfObjects, clearNonGltfObjects, markSceneDirty, scene, selectedObjectId, setSelectedObjectId, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, showFrame])
+  }), [addDirtyObject, addDirtyLight, addCamera, clearAllGltfObjects, clearNonGltfObjects, deleteObject, deleteLight, deleteDirtySelected, markSceneDirty, resetScene, scene, selectedObjectId, selectedLightId, setSelectedObjectId, setSelectedLightId, setActiveCameraId, transformMode, setTransformMode, updateBackground, updateCamera, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, transformDirtyObject, showFrame])
 
   return (
     <div className={['flex h-full w-full overflow-hidden rounded-xl border border-white/[0.06] bg-[#141414]', className].join(' ')}>
@@ -197,16 +246,17 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           ref={viewportRef}
           scene={scene}
           selectedObjectId={selectedObjectId}
-          selectedLightId={null}
+          selectedLightId={selectedLightId}
           transformMode={transformMode}
-          viewMode="material"
+          viewMode={viewModeProp ?? 'material'}
           onSelectObject={setSelectedObjectId}
-          onDeselectAll={() => setSelectedObjectId(null)}
+          onDeselectAll={() => { setSelectedObjectId(null); setSelectedLightId(null) }}
           onObjectTransformed={transformDirtyObject}
-          onActivateCamera={() => {}}
-          onDeactivateCamera={() => {}}
+          onActivateCamera={(id) => { markSceneDirty(); setActiveCameraId(scene.activeCameraId === id ? null : id) }}
+          onDeactivateCamera={() => { if (scene.activeCameraId) { markSceneDirty(); setActiveCameraId(null) } }}
           onViewChanged={markSceneDirty}
-          orbitStateRef={{ current: null }}
+          orbitStateRef={orbitStateRef}
+          debugRings={debugRings}
         />
         {showFrame && (
           <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center">
