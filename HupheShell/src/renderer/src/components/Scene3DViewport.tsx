@@ -1,10 +1,31 @@
 import { Suspense, useRef, useCallback, useImperativeHandle, forwardRef, useEffect, useMemo } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
-import { OrbitControls, TransformControls, GizmoHelper, GizmoViewport, Grid, Environment } from '@react-three/drei'
+import { OrbitControls, TransformControls, GizmoHelper, GizmoViewport, Grid, Environment, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { Scene3DState, TransformMode, ViewMode, Scene3DBackground } from '../lib/scene3d-types'
 import SceneObject from './SceneObject'
+
+function EnvironmentMesh({ url }: { url: string }) {
+  const gltf = useGLTF(url)
+  const mat = useMemo(() => new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.35,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  }), [])
+
+  useEffect(() => {
+    gltf.scene.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        (child as THREE.Mesh).material = mat
+      }
+    })
+  }, [gltf.scene, mat])
+
+  return <primitive object={gltf.scene.clone()} userData={{ __editorOnly: true, __envMesh: true }} />
+}
 
 export interface RenderPasses {
   textured: string
@@ -835,6 +856,7 @@ function SceneContent({
   onViewChanged,
   orbitStateRef,
   debugRings,
+  environmentMeshUrls,
 }: {
   scene: Scene3DState
   selectedObjectId: string | null
@@ -849,6 +871,7 @@ function SceneContent({
   onViewChanged?: () => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
   debugRings?: { spacing: number; width: number }
+  environmentMeshUrls?: string[]
 }) {
   const orbitRef = useRef<OrbitControlsImpl>(null)
   const { camera: threeCamera } = useThree()
@@ -951,6 +974,14 @@ function SceneContent({
         </Suspense>
       </group>
 
+      {environmentMeshUrls && environmentMeshUrls.length > 0 && (
+        <Suspense fallback={null}>
+          {environmentMeshUrls.map((url) => (
+            <EnvironmentMesh key={url} url={url} />
+          ))}
+        </Suspense>
+      )}
+
       {selectedObjectId && (
         <SelectedObjectTransform
           scene={scene}
@@ -986,7 +1017,8 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   onViewChanged?: () => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
   debugRings?: { spacing: number; width: number }
-}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef, debugRings }, ref) {
+  environmentMeshUrls?: string[]
+}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef, debugRings, environmentMeshUrls }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
@@ -1041,6 +1073,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           onViewChanged={onViewChanged}
           orbitStateRef={orbitStateRef}
           debugRings={debugRings}
+          environmentMeshUrls={environmentMeshUrls}
         />
       </Canvas>
     </div>

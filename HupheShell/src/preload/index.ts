@@ -283,6 +283,10 @@ contextBridge.exposeInMainWorld('api', {
       newBeautyDataUrl: string; newCalibrationDataUrl?: string;
       newPerspectiveDataUrl?: string; newDepthDataUrl?: string;
     }) => ipcRenderer.invoke('product-studio:generate-angle-variant', args),
+    extractDepth: (args: {
+      imageUrl?: string; imageDataUrl?: string; projectId?: string;
+      cameraParams?: { projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number }
+    }) => ipcRenderer.invoke('product-studio:extract-depth', args),
     retryProviderRun: (runId: string) =>
       ipcRenderer.invoke('product-studio:retry-provider-run', runId),
     rollbackCanonicalSet: (args: { projectId: string; targetVersion: number }) =>

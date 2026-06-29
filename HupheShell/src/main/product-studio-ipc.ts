@@ -3,6 +3,8 @@ import { createClient } from '@supabase/supabase-js'
 import { createHash } from 'crypto'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { join } from 'path'
+import { extractDepthMap } from './lib/depth-extractor'
+import { depthMapToGlb } from './lib/depth-to-mesh'
 
 const meta = (import.meta as any).env ?? {}
 const SUPABASE_URL = (meta.MAIN_VITE_SUPABASE_URL as string) || ''
@@ -1574,6 +1576,74 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         status: 'failed', error_message: err.message,
         latency_ms: Date.now() - startTime, completed_at: new Date().toISOString(),
       }).eq('id', run.id)
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // --- Extract Depth Map (Depth Anything V2, lokaal ONNX) ---
+
+  ipcMain.handle('product-studio:extract-depth', async (_e, args: {
+    imageUrl?: string
+    imageDataUrl?: string
+    projectId?: string
+    cameraParams?: {
+      projectionMatrix: number[]
+      viewMatrix: number[]
+      near: number
+      far: number
+      width: number
+      height: number
+    }
+  }) => {
+    try {
+      let buf: Buffer
+      if (args.imageUrl) {
+        const filePath = decodeURIComponent(args.imageUrl.replace(/^huphe:\/\/file\//, '').replace(/\?.*$/, ''))
+        buf = await readFile(filePath)
+      } else if (args.imageDataUrl) {
+        buf = Buffer.from(args.imageDataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64')
+      } else {
+        return { ok: false, error: 'Geen afbeelding meegegeven.' }
+      }
+
+      console.log('[depth] Extracting depth map...')
+      const depthBuffer = await extractDepthMap(buf)
+      console.log('[depth] Done.')
+
+      let depthUrl: string | undefined
+      let meshUrl: string | undefined
+
+      if (args.projectId) {
+        const jwt = getJwt()
+        if (jwt) {
+          const sb = getUserClient(jwt)
+          const { data: { user } } = await sb.auth.getUser()
+          if (user) {
+            const ts = Date.now()
+            depthUrl = await saveAssetLocally(user.id, args.projectId, `depth_ai_${ts}.png`, depthBuffer)
+
+            if (args.cameraParams) {
+              try {
+                console.log('[depth] Generating environment mesh...')
+                const glbBuffer = await depthMapToGlb(depthBuffer, args.cameraParams)
+                meshUrl = await saveAssetLocally(user.id, args.projectId, `env_mesh_${ts}.glb`, glbBuffer)
+                console.log('[depth] Environment mesh saved.')
+              } catch (meshErr: any) {
+                console.error('[depth] Mesh generation failed:', meshErr.message)
+              }
+            }
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        depthDataUrl: `data:image/png;base64,${depthBuffer.toString('base64')}`,
+        depthUrl,
+        meshUrl,
+      }
+    } catch (err: any) {
+      console.error('[depth] Error:', err.message)
       return { ok: false, error: err.message }
     }
   })

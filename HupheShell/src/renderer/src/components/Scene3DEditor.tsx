@@ -61,7 +61,8 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   overlayImageSrc?: string | null
   debugRings?: { spacing: number; width: number }
   viewMode?: ViewMode
-}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, debugRings, viewMode: viewModeProp }, ref) {
+  environmentMeshUrls?: string[]
+}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, debugRings, viewMode: viewModeProp, environmentMeshUrls }, ref) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
@@ -257,6 +258,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           onViewChanged={markSceneDirty}
           orbitStateRef={orbitStateRef}
           debugRings={debugRings}
+          environmentMeshUrls={environmentMeshUrls}
         />
         {showFrame && (
           <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center">

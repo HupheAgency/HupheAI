@@ -514,8 +514,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [rightTab, setRightTab] = useState<'properties' | 'editor' | 'studio' | 'archive'>('studio')
   const [archivePreviewIndex, setArchivePreviewIndex] = useState<number | null>(null)
+  const [aiDepthUrl, setAiDepthUrl] = useState<string | null>(null)
+  const [envMeshUrls, setEnvMeshUrls] = useState<string[]>([])
+  const [envMappingEnabled, setEnvMappingEnabled] = useState(false)
+  const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number } | null>(null)
   const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
-  const [viewportOverlay, setViewportOverlay] = useState<'calibration' | 'light' | 'productLayer' | 'composite' | null>(null)
+  const [viewportOverlay, setViewportOverlay] = useState<'calibration' | 'light' | 'productLayer' | 'composite' | '__depth' | null>(null)
   const [debugRings, setDebugRings] = useState<{ spacing: number; width: number } | undefined>({ spacing: 0.04, width: 0.002 })
   const [viewMode, setViewMode] = useState<'wireframe' | 'solid' | 'material' | 'rendered'>('material')
   const textureDeletedRef = useRef(false)
@@ -1270,6 +1274,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       if (normalUpload && !normalUpload.ok) throw new Error(normalUpload.error || 'Normal upload mislukt.')
       if (perspectiveUpload && !perspectiveUpload.ok) throw new Error(perspectiveUpload.error || 'Perspective upload mislukt.')
 
+      if (packet.manifest?.camera) {
+        lastCameraParamsRef.current = {
+          projectionMatrix: packet.manifest.camera.projectionMatrix,
+          viewMatrix: packet.manifest.camera.viewMatrix,
+          near: packet.manifest.camera.near,
+          far: packet.manifest.camera.far,
+          width: packet.manifest.viewport.width,
+          height: packet.manifest.viewport.height,
+        }
+      }
+
       const scene = studioRef.current?.getScene()
       if (!scene) throw new Error('Kan de 3D scene niet lezen.')
       const scenePayload = buildSceneSavePayload(scene)
@@ -1337,6 +1352,27 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
   }
 
+  function triggerAiDepthExtraction(imageUrl: string) {
+    const api = getProductStudioApi()
+    if (!api || !(api as any).extractDepth) return
+    setAiDepthUrl(null)
+    ;(api as any).extractDepth({
+      imageUrl,
+      projectId: project.backendProject?.id,
+      cameraParams: envMappingEnabled ? lastCameraParamsRef.current : undefined,
+    }).then((result: any) => {
+      if (result?.ok && result.depthDataUrl) {
+        setAiDepthUrl(result.depthDataUrl)
+        console.log('[depth] AI depth map ready')
+      }
+      if (result?.ok && result.meshUrl) {
+        setEnvMeshUrls((prev) => [...prev, result.meshUrl])
+        console.log('[depth] Environment mesh added:', result.meshUrl)
+      }
+      if (!result?.ok) console.error('[depth] extraction failed:', result?.error)
+    }).catch((err: any) => console.error('[depth] extraction failed:', err))
+  }
+
   async function handleFinalPrompt(prompt: string) {
     if (renderPacketStale) {
       setFinalError('De studio preview is verouderd. Klik eerst op Update preview zodat de huidige camera en productpositie worden gebruikt.')
@@ -1375,6 +1411,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           activeStep: 'final',
           updatedAt: new Date().toISOString(),
         }))
+        triggerAiDepthExtraction(render.output_url)
         await hydrateLatestState(project.backendProject.id, false)
         return
       }
@@ -2136,6 +2173,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                               newDepthDataUrl: packet.passes?.depth,
                             })
                             if (!result?.ok) throw new Error(result?.error || 'Angle variant genereren mislukt.')
+                            if (result.render?.output_url) triggerAiDepthExtraction(result.render.output_url)
                             await hydrateLatestState(project.backendProject!.id, false)
                           } catch (err: any) {
                             setFinalError(err.message)
@@ -2304,7 +2342,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     { key: 'productLayer', label: 'Product layer', src: productLayerUrl, icon: 'M12 2a10 10 0 100 20 10 10 0 000-20zM12 8v8M8 12h8' },
     { key: 'composite', label: 'Composite', src: finalCompositeUrl ?? project.finalRender?.src, icon: 'M4 4h16v16H4zM9 9h6v6H9z' },
   ]
-  const activeOverlaySrc = viewportOverlay ? overlayPasses.find((p) => p.key === viewportOverlay)?.src : undefined
+  const activeOverlaySrc = viewportOverlay === '__depth'
+    ? (aiDepthUrl ?? depthPreviewUrl)
+    : viewportOverlay ? overlayPasses.find((p) => p.key === viewportOverlay)?.src : undefined
 
   const viewportContent = (
     <div className="relative h-full w-full">
@@ -2321,6 +2361,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         overlayImageSrc={activeOverlaySrc}
         debugRings={debugRings}
         viewMode={viewMode}
+        environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
       />
       {sourceReady && (
         <div className="absolute bottom-4 left-20 z-10 flex items-center gap-2">
@@ -2358,17 +2399,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               { mode: 'solid' as const, label: 'Solid', icon: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
               { mode: 'material' as const, label: 'Material', icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 4a6 6 0 1 1 0 12 6 6 0 0 0 0-12z' },
               { mode: 'rendered' as const, label: 'Rendered', icon: 'M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83' },
+              { mode: 'depth' as const, label: 'Depth map', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3a7 7 0 0 1 7 7H5a7 7 0 0 1 7-7z' },
             ]).map((v) => {
-              const active = v.mode === 'rings' ? !!debugRings : (!debugRings && viewMode === v.mode)
+              const active = v.mode === 'depth'
+                ? viewportOverlay === '__depth'
+                : v.mode === 'rings' ? !!debugRings : (!debugRings && viewMode === v.mode && viewportOverlay !== '__depth')
               return (
               <button
                 key={v.mode}
                 type="button"
                 onClick={() => {
-                  if (v.mode === 'rings') {
+                  if (v.mode === 'depth') {
+                    setViewportOverlay((prev) => prev === '__depth' ? null : '__depth' as any)
+                  } else if (v.mode === 'rings') {
+                    setViewportOverlay(null)
                     setDebugRings({ spacing: 0.04, width: 0.002 })
                     setViewMode('material')
                   } else {
+                    setViewportOverlay(null)
                     setDebugRings(undefined)
                     setViewMode(v.mode)
                   }
@@ -2389,6 +2437,27 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               </button>
               )
             })}
+            <div className="mx-0.5 h-5 w-px bg-white/15" />
+            <button
+              type="button"
+              onClick={() => setEnvMappingEnabled((v) => !v)}
+              className={[
+                'group relative flex h-8 items-center gap-1 rounded-full px-2 transition-colors',
+                envMappingEnabled
+                  ? 'bg-[#facc15]/20 text-[#facc15]'
+                  : 'text-white/50 hover:bg-white/10 hover:text-white/80',
+              ].join(' ')}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                <circle cx="12" cy="10" r="3" />
+              </svg>
+              <span className="text-[10px] font-semibold">Env</span>
+              <div className="pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+                {envMappingEnabled ? 'Environment mapping aan' : 'Environment mapping uit'}
+                {envMeshUrls.length > 0 && ` (${envMeshUrls.length} meshes)`}
+              </div>
+            </button>
             <div className="mx-0.5 h-5 w-px bg-white/15" />
             {overlayPasses.map((pass) => (
               <button
