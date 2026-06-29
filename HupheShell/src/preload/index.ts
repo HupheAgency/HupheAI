@@ -285,8 +285,22 @@ contextBridge.exposeInMainWorld('api', {
     }) => ipcRenderer.invoke('product-studio:generate-angle-variant', args),
     extractDepth: (args: {
       imageUrl?: string; imageDataUrl?: string; projectId?: string;
-      cameraParams?: { projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number }
+      cameraParams?: { projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number; fovScale?: number }
     }) => ipcRenderer.invoke('product-studio:extract-depth', args),
+    reconstructEnvironment: (args: {
+      backgroundPlateUrl: string; projectId: string
+    }) => ipcRenderer.invoke('product-studio:reconstruct-environment', args),
+    restoreRenderState: (args: { renderPacketId: string }) =>
+      ipcRenderer.invoke('product-studio:restore-render-state', args),
+    composeLockedView: (args: {
+      projectId: string; renderPacketId: string; backgroundPlateUrl: string; productLayerUrl: string; prompt: string
+    }) => ipcRenderer.invoke('product-studio:compose-locked-view', args),
+    updateFinalRenderMetadata: (args: {
+      versionId: string; layerMetadata: Record<string, unknown>
+    }) => ipcRenderer.invoke('product-studio:update-final-render-metadata', args),
+    getEnvViews: (args: {
+      projectId: string; backgroundPlateUrl: string
+    }) => ipcRenderer.invoke('product-studio:get-env-views', args),
     retryProviderRun: (runId: string) =>
       ipcRenderer.invoke('product-studio:retry-provider-run', runId),
     rollbackCanonicalSet: (args: { projectId: string; targetVersion: number }) =>

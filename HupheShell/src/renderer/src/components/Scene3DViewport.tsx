@@ -8,23 +8,47 @@ import SceneObject from './SceneObject'
 
 function EnvironmentMesh({ url }: { url: string }) {
   const gltf = useGLTF(url)
-  const mat = useMemo(() => new THREE.MeshBasicMaterial({
-    vertexColors: true,
+  const groupRef = useRef<THREE.Group>(null)
+  const solidMat = useMemo(() => new THREE.MeshBasicMaterial({
     transparent: true,
-    opacity: 0.35,
-    side: THREE.DoubleSide,
+    opacity: 0.45,
     depthWrite: false,
+    vertexColors: true,
+    side: THREE.DoubleSide,
   }), [])
+  const wireMat = useMemo(() => new THREE.MeshBasicMaterial({
+    wireframe: true,
+    transparent: true,
+    opacity: 0.08,
+    depthWrite: false,
+    color: 0x000000,
+  }), [])
+  const clonedScene = useMemo(() => gltf.scene.clone(), [gltf.scene])
 
   useEffect(() => {
-    gltf.scene.traverse((child) => {
+    const group = groupRef.current
+    if (!group) return
+    group.traverse((child) => {
+      child.userData.__editorOnly = true
+      child.userData.__envMesh = true
       if ((child as THREE.Mesh).isMesh) {
-        (child as THREE.Mesh).material = mat
+        const mesh = child as THREE.Mesh
+        mesh.material = [solidMat, wireMat]
+        if (mesh.geometry) {
+          const count = mesh.geometry.index ? mesh.geometry.index.count : Infinity
+          mesh.geometry.clearGroups()
+          mesh.geometry.addGroup(0, count, 0)
+          mesh.geometry.addGroup(0, count, 1)
+        }
       }
     })
-  }, [gltf.scene, mat])
+  }, [clonedScene, solidMat, wireMat])
 
-  return <primitive object={gltf.scene.clone()} userData={{ __editorOnly: true, __envMesh: true }} />
+  return (
+    <group ref={groupRef} userData={{ __editorOnly: true, __envMesh: true }}>
+      <primitive object={clonedScene} />
+    </group>
+  )
 }
 
 export interface RenderPasses {
@@ -44,6 +68,7 @@ export interface Scene3DRenderManifest {
     width: number
     height: number
     aspect: number
+    fovScale?: number
   }
   camera: {
     position: [number, number, number]
@@ -84,6 +109,7 @@ export interface Scene3DViewportHandle {
   captureAllPasses: (fovScale?: number) => RenderPasses | null
   captureRenderManifest: () => Scene3DRenderManifest | null
   getCanvasElement: () => HTMLCanvasElement | null
+  setCameraOrbit: (position: [number, number, number], target: [number, number, number]) => void
 }
 
 const EDITOR_ONLY_USER_DATA = { __editorOnly: true, __helper: true }
@@ -855,6 +881,7 @@ function SceneContent({
   onDeactivateCamera,
   onViewChanged,
   orbitStateRef,
+  setCameraOrbitRef,
   debugRings,
   environmentMeshUrls,
 }: {
@@ -870,6 +897,7 @@ function SceneContent({
   onDeactivateCamera: () => void
   onViewChanged?: () => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
+  setCameraOrbitRef: React.MutableRefObject<((pos: [number, number, number], tgt: [number, number, number]) => void) | null>
   debugRings?: { spacing: number; width: number }
   environmentMeshUrls?: string[]
 }) {
@@ -888,6 +916,17 @@ function SceneContent({
       orbitRef.current.update()
     }
   }, [])
+
+  // Expose setCameraOrbit to parent via ref
+  useEffect(() => {
+    setCameraOrbitRef.current = (pos: [number, number, number], tgt: [number, number, number]) => {
+      if (!orbitRef.current) return
+      threeCamera.position.set(pos[0], pos[1], pos[2])
+      orbitRef.current.target.set(tgt[0], tgt[1], tgt[2])
+      orbitRef.current.update()
+    }
+    return () => { setCameraOrbitRef.current = null }
+  }, [threeCamera, setCameraOrbitRef])
 
   // Save orbit state on every change + clear active camera when user orbits manually
   useEffect(() => {
@@ -1023,6 +1062,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
   const manifestRef = useRef<(() => Scene3DRenderManifest | null) | null>(null)
+  const setCameraOrbitRef = useRef<((pos: [number, number, number], tgt: [number, number, number]) => void) | null>(null)
 
   useImperativeHandle(ref, () => ({
     captureScreenshot() {
@@ -1040,6 +1080,10 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     },
     getCanvasElement() {
       return canvasRef.current
+    },
+    setCameraOrbit(position: [number, number, number], target: [number, number, number]) {
+      orbitStateRef.current = { position, target }
+      setCameraOrbitRef.current?.(position, target)
     },
   }))
 
@@ -1072,6 +1116,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           onDeactivateCamera={onDeactivateCamera}
           onViewChanged={onViewChanged}
           orbitStateRef={orbitStateRef}
+          setCameraOrbitRef={setCameraOrbitRef}
           debugRings={debugRings}
           environmentMeshUrls={environmentMeshUrls}
         />

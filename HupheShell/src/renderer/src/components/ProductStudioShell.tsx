@@ -4,7 +4,8 @@ import { notifyIfCreditsRequired } from '../lib/credits-required'
 import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview, type Scene3DSceneControls } from './Scene3DEditor'
 import Scene3DPropertiesPanel from './Scene3DPropertiesPanel'
 import Scene3DEditorInline from './Scene3DEditorInline'
-import { AtelierPromptBar } from './AtelierPromptBar'
+import { AtelierPromptBar, type AtelierPromptBarHandle } from './AtelierPromptBar'
+import { ReconstructingOverlay } from './ReconstructingOverlay'
 import type {
   CanonicalReferenceSet,
   FinalRenderVersion,
@@ -500,6 +501,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const contactSheetInputRef = useRef<HTMLInputElement>(null)
   const objectMaskInputRef = useRef<HTMLInputElement>(null)
   const studioRef = useRef<Scene3DEditorHandle>(null)
+  const promptBarRef = useRef<AtelierPromptBarHandle>(null)
+  const [backgroundLocked, setBackgroundLocked] = useState(false)
+  const [envReconstructing, setEnvReconstructing] = useState(false)
   const hydratedProjectIdRef = useRef<string | null>(null)
   const [project, setProject] = useState<ProductStudioProject>(loadProject)
   const [error, setError] = useState<string | null>(null)
@@ -516,8 +520,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [archivePreviewIndex, setArchivePreviewIndex] = useState<number | null>(null)
   const [aiDepthUrl, setAiDepthUrl] = useState<string | null>(null)
   const [envMeshUrls, setEnvMeshUrls] = useState<string[]>([])
+  const [envViewUrls, setEnvViewUrls] = useState<string[]>([])
   const [envMappingEnabled, setEnvMappingEnabled] = useState(false)
-  const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number } | null>(null)
+  const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number; fovScale?: number } | null>(null)
   const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
   const [viewportOverlay, setViewportOverlay] = useState<'calibration' | 'light' | 'productLayer' | 'composite' | '__depth' | null>(null)
   const [debugRings, setDebugRings] = useState<{ spacing: number; width: number } | undefined>({ spacing: 0.04, width: 0.002 })
@@ -554,6 +559,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const renderPacketReady = Boolean(project.renderPacketRecord || project.renderPacket)
   const finalRenderRequiresTexture = meshReady && !texturedMeshReady
   const finalRenderBlocked = !renderPacketReady || renderPacketStale || finalRenderRequiresTexture
+  const hasPhoto = Boolean(project.finalRender?.src)
+  const promptBarMode: import('./AtelierPromptBar').PromptBarMode =
+    backgroundLocked ? 'locked'
+    : hasPhoto && !renderPacketStale ? 'retry'
+    : 'capture'
   const objectMaskUrl = project.objectMaskUrl ?? project.objectMaskAsset?.url ?? project.renderPacketRecord?.object_mask_url
   const canonicalReference = project.references.find((view) => view.status === 'user-approved' || view.status === 'observed' || view.status === 'user-edited')
   const beautyPreviewUrl = project.renderPacket?.beauty ?? project.renderPacket?.passes?.textured ?? project.renderPacketRecord?.beauty_url
@@ -588,6 +598,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     ['Composite', finalCompositeUrl ?? project.finalRender?.src],
     ['Background', backgroundPlateUrl],
     ...(shadowLayerUrl ? [['Shadow', shadowLayerUrl] as [string, string | null | undefined]] : []),
+    ...envViewUrls.map((url, i) => [['Front', 'Rechts', 'Achter', 'Links', 'Boven'][i], url] as [string, string | null | undefined]),
   ]
   const availableLightboxPreviews = finalLayerPreviews
     .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
@@ -1242,7 +1253,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setFinalError(null)
   }
 
-  async function captureRenderPacket() {
+  async function captureRenderPacket(promptOverride?: string) {
     const packet = await studioRef.current?.captureRenderPacketPreview()
     if (!packet?.beauty && !packet?.passes) {
       setFinalError('Kan nog geen preview uit de studio maken.')
@@ -1282,6 +1293,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           far: packet.manifest.camera.far,
           width: packet.manifest.viewport.width,
           height: packet.manifest.viewport.height,
+          fovScale: packet.manifest.viewport.fovScale,
         }
       }
 
@@ -1335,7 +1347,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       }))
       setRenderPacketStale(false)
 
-      // Stap 1: product layer automatisch genereren na lock
+      // Stap 1: product layer genereren
       setBusy('Product layer genereren...')
       const plResult = await api.generateProductLayer({
         projectId: project.backendProject.id,
@@ -1343,12 +1355,161 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       })
       if (!plResult?.ok) {
         setFinalError(plResult?.error || 'Product layer genereren mislukt.')
+        await hydrateLatestState(project.backendProject.id, false)
+        return
+      }
+
+      if (backgroundLocked && project.finalRenderRecord?.background_plate_url) {
+        // Locked modus: hergebruik bestaande achtergrond, composiet maken met nieuwe product layer
+        setBusy('Composiet maken...')
+        const existingBgUrl = project.finalRenderRecord.background_plate_url as string
+        const newPlUrl = (plResult as any).productLayerUrl as string | undefined
+        if (newPlUrl && (api as any).composeLockedView) {
+          const composeResult = await (api as any).composeLockedView({
+            projectId: project.backendProject.id,
+            renderPacketId: renderPacketRecord.id,
+            backgroundPlateUrl: existingBgUrl,
+            productLayerUrl: newPlUrl,
+            prompt: project.finalRender?.prompt ?? '',
+          })
+          if (composeResult?.ok && composeResult.version) {
+            const v = composeResult.version as FinalRenderVersion
+            setProject((prev) => ({
+              ...prev,
+              finalRenderRecord: v,
+              finalRender: { prompt: v.prompt ?? prev.finalRender?.prompt ?? '', src: composeResult.compositeUrl, createdAt: v.created_at },
+              activeStep: 'final',
+              updatedAt: new Date().toISOString(),
+            }))
+            setFinalRenderVersions((prev) => [v, ...prev])
+          }
+        }
+        triggerAiDepthExtraction(existingBgUrl)
+        setViewportOverlay('composite')
+        await hydrateLatestState(project.backendProject.id, false)
+      } else {
+        // Open modus: genereer nieuwe achtergrond
+        const prompt = promptOverride || promptBarRef.current?.getValue() || project.finalRender?.prompt || ''
+        if (!prompt) {
+          setFinalError('Voer een prompt in voor de achtergrond.')
+          await hydrateLatestState(project.backendProject.id, false)
+          return
+        }
+        if (!promptOverride) promptBarRef.current?.clearValue()
+        setBusy('Achtergrond genereren...')
+        setFinalLoading(true)
+        const finalResult = await api.generateFinalRender({
+          projectId: project.backendProject.id,
+          renderPacketId: renderPacketRecord.id,
+          prompt,
+          preservationPolicy: project.preservationPolicy,
+          resolution: '2K',
+        })
+        const render = assertOk<FinalRenderVersion>(finalResult, 'render')
+        const renderWithScene: FinalRenderVersion = finalResult.sceneUrl
+          ? { ...render, scene_url: finalResult.sceneUrl, metadata: { ...(render.metadata ?? {}), scene_url: finalResult.sceneUrl } }
+          : render
+        if (!render.output_url) throw new Error('Final render is opgeslagen zonder output URL.')
+        setProject((prev) => ({
+          ...prev,
+          finalRenderRecord: renderWithScene,
+          finalRender: { prompt: render.prompt ?? prompt, src: render.output_url as string, createdAt: render.created_at },
+          activeStep: 'final',
+          updatedAt: new Date().toISOString(),
+        }))
+        const depthSource = (finalResult.backgroundPlateUrl ?? render.background_plate_url ?? render.output_url) as string
+        triggerAiDepthExtraction(depthSource)
+        setFinalLoading(false)
+        setViewportOverlay('composite')
       }
       await hydrateLatestState(project.backendProject.id, false)
     } catch (err: any) {
       if (!notifyIfCreditsRequired(err)) setFinalError(err?.message || 'Renderpacket opslaan mislukt.')
     } finally {
       setBusy(null)
+      setFinalLoading(false)
+    }
+  }
+
+  async function restoreRenderState(version: FinalRenderVersion) {
+    const api = getProductStudioApi()
+    if (!api || !(api as any).restoreRenderState) return
+
+    try {
+      const result = await (api as any).restoreRenderState({ renderPacketId: version.render_packet_id })
+      if (!result?.ok) return
+
+      const packet = result.packet as RenderPacket
+      const scene = result.scene as StudioSceneVersion | null
+      const manifest = packet.scene_manifest as any
+
+      // Restore camera orbit position
+      if (manifest?.camera?.position && manifest?.camera?.target) {
+        studioRef.current?.setCameraOrbit(manifest.camera.position, manifest.camera.target)
+      }
+
+      // Restore product transform
+      if (scene?.product_transform && studioRef.current) {
+        const controls = studioRef.current.getSceneControls()
+        if (controls) {
+          const productObj = controls.scene.objects.find((o) => o.type === 'gltf')
+          if (productObj) {
+            const pt = scene.product_transform as { position?: [number, number, number]; rotation?: [number, number, number]; scale?: [number, number, number] }
+            if (pt.position) controls.onObjectTransformed(productObj.id, pt.position, pt.rotation ?? productObj.rotation, pt.scale ?? productObj.scale)
+          }
+        }
+      }
+
+      // Set this version as active and switch to composite view
+      setProject((prev) => ({
+        ...prev,
+        finalRenderRecord: version,
+        finalRender: { prompt: version.prompt ?? '', src: version.output_url as string, createdAt: version.created_at },
+        renderPacketRecord: packet,
+        activeStep: 'final',
+        updatedAt: new Date().toISOString(),
+      }))
+      setViewportOverlay('composite')
+      setRightTab('studio')
+      setRenderPacketStale(false)
+
+      // Restore lock state based on version metadata
+      const meta = (version.layer_metadata ?? {}) as Record<string, unknown>
+      const shouldLock = Boolean(meta.env_views_ready || meta.locked_view)
+      setBackgroundLocked(shouldLock)
+
+      // If locked, restore the env mesh and load env views
+      if (shouldLock) {
+        let meshUrl = meta.env_mesh_url as string | undefined
+        if (!meshUrl) {
+          const bgUrl = version.background_plate_url ?? meta.env_source_background
+          const sibling = finalRenderVersions.find((v) => {
+            const m = (v.layer_metadata ?? {}) as Record<string, unknown>
+            return m.env_mesh_url && (m.env_source_background === bgUrl || v.background_plate_url === bgUrl)
+          })
+          meshUrl = (sibling?.layer_metadata as any)?.env_mesh_url
+        }
+        if (meshUrl) {
+          setEnvMeshUrls((prev) => prev.includes(meshUrl!) ? prev : [...prev, meshUrl!])
+        }
+        // Load env view thumbnails
+        const bgUrl = (meta.env_source_background ?? version.background_plate_url) as string
+        if (bgUrl && project.backendProject) {
+          const envApi = getProductStudioApi()
+          if (envApi && (envApi as any).getEnvViews) {
+            ;(envApi as any).getEnvViews({ projectId: project.backendProject.id, backgroundPlateUrl: bgUrl })
+              .then((r: any) => { if (r?.ok && r.viewUrls) setEnvViewUrls(r.viewUrls) })
+          }
+        }
+      } else {
+        setEnvViewUrls([])
+      }
+
+      // Trigger depth extraction for env mesh
+      const depthSource = (version.background_plate_url ?? version.output_url) as string
+      if (depthSource) triggerAiDepthExtraction(depthSource)
+    } catch (err: any) {
+      console.error('[restore] Failed:', err.message)
     }
   }
 
@@ -1356,10 +1517,28 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const api = getProductStudioApi()
     if (!api || !(api as any).extractDepth) return
     setAiDepthUrl(null)
+
+    let camParams = lastCameraParamsRef.current
+    if (!camParams) {
+      const manifest = project.renderPacket?.manifest ?? project.renderPacketRecord?.scene_manifest
+      if (manifest?.camera && manifest?.viewport) {
+        camParams = {
+          projectionMatrix: manifest.camera.projectionMatrix,
+          viewMatrix: manifest.camera.viewMatrix,
+          near: manifest.camera.near,
+          far: manifest.camera.far,
+          width: manifest.viewport.width,
+          height: manifest.viewport.height,
+          fovScale: manifest.viewport.fovScale,
+        }
+      }
+    }
+
+    console.log('[depth] triggerAiDepthExtraction camParams:', !!camParams, camParams ? `proj length=${camParams.projectionMatrix?.length} w=${camParams.width}` : 'null')
     ;(api as any).extractDepth({
       imageUrl,
       projectId: project.backendProject?.id,
-      cameraParams: envMappingEnabled ? lastCameraParamsRef.current : undefined,
+      cameraParams: camParams ?? undefined,
     }).then((result: any) => {
       if (result?.ok && result.depthDataUrl) {
         setAiDepthUrl(result.depthDataUrl)
@@ -1411,7 +1590,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           activeStep: 'final',
           updatedAt: new Date().toISOString(),
         }))
-        triggerAiDepthExtraction(render.output_url)
+        const depthSource = (result.backgroundPlateUrl ?? render.background_plate_url ?? render.output_url) as string
+        triggerAiDepthExtraction(depthSource)
+        setViewportOverlay('composite')
         await hydrateLatestState(project.backendProject.id, false)
         return
       }
@@ -1933,6 +2114,37 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             )}
           </section>
 
+          {envViewUrls.length > 0 && (
+            <section className="mt-6">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-white/85">Multiview omgeving</h3>
+                <span className="text-xs text-white/32">{envViewUrls.length}/5 aanzichten</span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                {envViewUrls.map((url, i) => {
+                  const label = ['Front', 'Rechts', 'Achter', 'Links', 'Boven'][i]
+                  return (
+                    <div
+                      key={i}
+                      className="group relative overflow-hidden rounded-lg border border-white/[0.06] bg-black/30 transition-colors hover:border-white/[0.15]"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => openLightbox(label, url)}
+                        className="w-full"
+                      >
+                        <img src={url} alt={label} className="aspect-video w-full object-cover" />
+                      </button>
+                      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1.5">
+                        <span className="text-[10px] font-medium text-white/60">{label}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          )}
+
           <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -2099,15 +2311,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 Wacht met Final render tot `Texture product` klaar is en je daarna `Update preview` hebt geklikt.
               </p>
             )}
-            <div className="mt-3">
-              <AtelierPromptBar
-                placeholder="Beschrijf de commercial productfoto..."
-                busyPlaceholder="Final render wordt gemaakt..."
-                loading={finalLoading}
-                disabled={finalRenderBlocked}
-                onSubmit={handleFinalPrompt}
-              />
-            </div>
             {renderPacketStale && (
               <p className="mt-2 text-xs text-red-300">Update eerst de preview; anders gebruikt de backend de vorige camera en Beauty snapshot.</p>
             )}
@@ -2173,7 +2376,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                               newDepthDataUrl: packet.passes?.depth,
                             })
                             if (!result?.ok) throw new Error(result?.error || 'Angle variant genereren mislukt.')
-                            if (result.render?.output_url) triggerAiDepthExtraction(result.render.output_url)
+                            if (result.render?.output_url) triggerAiDepthExtraction(result.backgroundPlateUrl ?? result.render.background_plate_url ?? result.render.output_url)
                             await hydrateLatestState(project.backendProject!.id, false)
                           } catch (err: any) {
                             setFinalError(err.message)
@@ -2333,6 +2536,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             Open studio
           </button>
         </div>
+
     </>
   )
 
@@ -2348,6 +2552,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
   const viewportContent = (
     <div className="relative h-full w-full">
+      {backgroundLocked && viewportOverlay === 'composite' && (
+        <div className="pointer-events-none absolute left-3 top-3 z-40 flex items-center gap-1.5 rounded-full bg-black/50 px-2.5 py-1 backdrop-blur-sm">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-[#facc15]">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0110 0v4" />
+          </svg>
+          <span className="text-[11px] font-medium text-white/70">Achtergrond vergrendeld</span>
+        </div>
+      )}
+      <ReconstructingOverlay visible={envReconstructing} label="Reconstructing environment" />
+      <ReconstructingOverlay visible={finalLoading || !!busy} label={busy || 'Composing image'} />
       <Scene3DEditor
         ref={studioRef}
         key={sceneStorageKey}
@@ -2364,36 +2579,70 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
       />
       {sourceReady && (
-        <div className="absolute bottom-4 left-20 z-10 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={captureRenderPacket}
-            disabled={!!busy}
-            className="flex items-center gap-2 rounded-full bg-[#facc15] px-4 py-2 text-sm font-bold text-black shadow-lg transition-all hover:bg-[#fde047] active:scale-95 disabled:opacity-40 disabled:active:scale-100"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0">
-              <circle cx="8" cy="8.5" r="3" stroke="currentColor" strokeWidth="1.5" fill="none" />
-              <path d="M5.5 2.5h5l1 2h2a1 1 0 011 1v7a1 1 0 01-1 1h-11a1 1 0 01-1-1v-7a1 1 0 011-1h2l1-2z" stroke="currentColor" strokeWidth="1.5" fill="none" />
-            </svg>
-            {busy ? 'Bezig...' : 'Take picture'}
-          </button>
-          {viewportOverlay === 'composite' && project.finalRender?.prompt && (
-            <button
-              type="button"
-              onClick={() => void handleFinalPrompt(project.finalRender!.prompt)}
-              disabled={!!busy || finalLoading}
-              title="Regenereer achtergrond met dezelfde prompt"
-              className="flex items-center justify-center rounded-full bg-white/[0.12] p-2.5 text-white/70 shadow-lg backdrop-blur-sm transition-all hover:bg-white/[0.2] hover:text-white active:scale-95 disabled:opacity-40"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 2v6h-6" />
-                <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
-                <path d="M3 22v-6h6" />
-                <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
-              </svg>
-            </button>
+        <div className="pointer-events-none absolute inset-0 z-20">
+          <div className="pointer-events-auto absolute bottom-8 left-1/2 flex w-[clamp(360px,40%,640px)] -translate-x-1/2 items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <AtelierPromptBar
+                ref={promptBarRef}
+                placeholder="Beschrijf de commercial productfoto..."
+                busyPlaceholder="Foto wordt gemaakt..."
+                loading={finalLoading || !!busy}
+                disabled={false}
+                onSubmit={(prompt) => {
+                  if (promptBarMode === 'retry' && !prompt) {
+                    void handleFinalPrompt(project.finalRender!.prompt)
+                  } else {
+                    void captureRenderPacket(prompt || undefined)
+                  }
+                }}
+                mode={promptBarMode}
+                onToggleLock={() => {
+                  const willLock = !backgroundLocked
+                  setBackgroundLocked(willLock)
+                  if (willLock && project.finalRenderRecord?.background_plate_url && project.backendProject) {
+                    const bgUrl = project.finalRenderRecord.background_plate_url as string
+                    const projectId = project.backendProject.id
+                    setEnvReconstructing(true)
+                    const api = getProductStudioApi()
+                    if (api && (api as any).reconstructEnvironment) {
+                      ;(api as any).reconstructEnvironment({ backgroundPlateUrl: bgUrl, projectId })
+                        .then((result: any) => {
+                          if (result?.ok && result.meshUrl) {
+                            setEnvMeshUrls((prev) => [...prev, result.meshUrl])
+                            if (result.viewUrls) setEnvViewUrls(result.viewUrls)
+                            console.log('[env-reconstruct] Multi-view mesh ready:', result.meshUrl)
+                            // Persist env mesh info on the source version
+                            if (project.finalRenderRecord) {
+                              const versionId = project.finalRenderRecord.id
+                              const updatedMeta = { ...(project.finalRenderRecord.layer_metadata ?? {}), env_mesh_url: result.meshUrl, env_views_ready: true, env_source_background: result.backgroundPlateUrl ?? bgUrl }
+                              setProject((prev) => ({
+                                ...prev,
+                                finalRenderRecord: prev.finalRenderRecord ? { ...prev.finalRenderRecord, layer_metadata: updatedMeta } : prev.finalRenderRecord,
+                              }))
+                              setFinalRenderVersions((prev) => prev.map((v) => v.id === versionId ? { ...v, layer_metadata: updatedMeta } : v))
+                              // Update in database
+                              ;(api as any).updateFinalRenderMetadata?.({ versionId, layerMetadata: updatedMeta })
+                            }
+                          }
+                          if (!result?.ok) console.error('[env-reconstruct] Failed:', result?.error)
+                        })
+                        .catch((err: any) => console.error('[env-reconstruct] Failed:', err))
+                        .finally(() => setEnvReconstructing(false))
+                    } else {
+                      setEnvReconstructing(false)
+                    }
+                  }
+                }}
+              />
+            </div>
+          </div>
+          {finalError && (
+            <p className="pointer-events-auto absolute bottom-24 left-1/2 w-[clamp(360px,40%,640px)] -translate-x-1/2 rounded-xl border border-red-400/20 bg-black/75 px-3 py-2 text-xs text-red-200 shadow-xl backdrop-blur">
+              {finalError}
+            </p>
           )}
-          <div className="flex items-center gap-1 rounded-full border border-white/[0.10] bg-black/60 p-1 backdrop-blur-sm">
+          <div className="group pointer-events-auto absolute right-4 top-4 flex items-center justify-end gap-2">
+          <div className="flex max-w-0 translate-x-2 items-center gap-1 overflow-hidden rounded-full border border-white/[0.10] bg-black/70 p-1 opacity-0 shadow-2xl backdrop-blur-xl transition-all duration-200 group-hover:max-w-[720px] group-hover:translate-x-0 group-hover:opacity-100">
             {([
               { mode: 'rings' as const, label: 'Rings', icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z' },
               { mode: 'solid' as const, label: 'Solid', icon: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
@@ -2431,7 +2680,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d={v.icon} />
                 </svg>
-                <div className="pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+                <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
                   {v.label}
                 </div>
               </button>
@@ -2453,7 +2702,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <circle cx="12" cy="10" r="3" />
               </svg>
               <span className="text-[10px] font-semibold">Env</span>
-              <div className="pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+              <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
                 {envMappingEnabled ? 'Environment mapping aan' : 'Environment mapping uit'}
                 {envMeshUrls.length > 0 && ` (${envMeshUrls.length} meshes)`}
               </div>
@@ -2477,11 +2726,23 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d={pass.icon} />
                 </svg>
-                <div className="pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+                <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
                   {pass.label}
                 </div>
               </button>
             ))}
+          </div>
+          <button
+            type="button"
+            aria-label="Views tonen"
+            title="Views"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-white/[0.10] bg-black/70 text-white/80 shadow-2xl backdrop-blur-xl transition-colors group-hover:bg-white group-hover:text-black"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
           </div>
         </div>
       )}
@@ -2545,24 +2806,53 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             ) : (
               <div className="flex flex-col gap-1.5">
                 {finalRenderVersions.map((version) => (
-                  <button
+                  <div
                     key={version.id}
-                    type="button"
-                    onClick={() => setArchivePreviewIndex(finalRenderVersions.indexOf(version))}
                     className="group relative overflow-hidden rounded-lg border border-white/[0.06] bg-black/30 transition-colors hover:border-white/[0.15]"
                   >
-                    {version.output_url ? (
-                      <img src={version.output_url} alt="" className="w-full" loading="lazy" />
-                    ) : (
-                      <div className="flex aspect-video items-center justify-center text-xs text-white/20">Geen preview</div>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => setArchivePreviewIndex(finalRenderVersions.indexOf(version))}
+                      className="w-full"
+                    >
+                      {version.output_url ? (
+                        <img src={version.output_url} alt="" className="w-full" loading="lazy" />
+                      ) : (
+                        <div className="flex aspect-video items-center justify-center text-xs text-white/20">Geen preview</div>
+                      )}
+                    </button>
+                    <div className="absolute right-1.5 top-1.5 flex items-center gap-1">
+                      {version.layer_metadata?.env_views_ready && (
+                        <div
+                          title="3D omgeving beschikbaar"
+                          className="flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white/50 backdrop-blur-sm"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                            <path d="M2 17l10 5 10-5" />
+                            <path d="M2 12l10 5 10-5" />
+                          </svg>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void restoreRenderState(version)}
+                        title="Herstel camera en positie van dit moment"
+                        className="flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white/50 backdrop-blur-sm transition-colors hover:bg-black/80 hover:text-white"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="10" />
+                          <polyline points="12 6 12 12 16 14" />
+                        </svg>
+                      </button>
+                    </div>
                     <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1.5">
                       <span className="text-[10px] text-white/60">
                         {new Date(version.created_at).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
                         {version.layer_metadata?.route === 'angle-variant' ? ' · Hoekvariant' : ''}
                       </span>
                     </div>
-                  </button>
+                  </div>
                 ))}
               </div>
             )}

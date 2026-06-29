@@ -16,6 +16,7 @@ export interface Scene3DEditorHandle {
   getScene: () => Scene3DState
   addModelFromUrl: (url: string, name?: string) => void
   getSceneControls: () => Scene3DSceneControls | null
+  setCameraOrbit: (position: [number, number, number], target: [number, number, number]) => void
 }
 
 export interface Scene3DSceneControls {
@@ -162,10 +163,14 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   useImperativeHandle(ref, () => ({
     async captureRenderPacketPreview() {
       const fovScale = showFrame ? computeFovScale() : undefined
+      const manifest = viewportRef.current?.captureRenderManifest() ?? null
+      if (manifest && fovScale !== undefined) {
+        manifest.viewport.fovScale = fovScale
+      }
       return {
         beauty: viewportRef.current?.captureCleanScreenshot(fovScale) ?? null,
         passes: viewportRef.current?.captureAllPasses(fovScale) ?? null,
-        manifest: viewportRef.current?.captureRenderManifest() ?? null,
+        manifest,
       }
     },
     getScene() {
@@ -216,6 +221,9 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
         selectedLightId,
         setSelectedLightId,
       }
+    },
+    setCameraOrbit(position: [number, number, number], target: [number, number, number]) {
+      viewportRef.current?.setCameraOrbit(position, target)
     },
   }), [addDirtyObject, addDirtyLight, addCamera, clearAllGltfObjects, clearNonGltfObjects, deleteObject, deleteLight, deleteDirtySelected, markSceneDirty, resetScene, scene, selectedObjectId, selectedLightId, setSelectedObjectId, setSelectedLightId, setActiveCameraId, transformMode, setTransformMode, updateBackground, updateCamera, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, transformDirtyObject, showFrame])
 

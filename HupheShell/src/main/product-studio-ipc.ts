@@ -5,6 +5,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { extractDepthMap } from './lib/depth-extractor'
 import { depthMapToGlb } from './lib/depth-to-mesh'
+import { buildMultiViewMesh } from './lib/multiview-mesh'
 
 const meta = (import.meta as any).env ?? {}
 const SUPABASE_URL = (meta.MAIN_VITE_SUPABASE_URL as string) || ''
@@ -411,7 +412,6 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const jwt = getJwt()
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
     const sb = getUserClient(jwt)
-
     const { data, error } = await sb
       .from('final_render_versions')
       .select('*')
@@ -419,7 +419,81 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       .order('created_at', { ascending: false })
 
     if (error) return { ok: false, error: error.message }
+
+    if (data) {
+      const { data: { user: authUser } } = await sb.auth.getUser()
+      const userId = authUser?.id
+
+      // Migrate legacy env views: old generic env_view_*.png files need to be
+      // linked to the version whose background_plate was used to generate them.
+      // We find the version created just before the env views and link it.
+      if (userId) {
+        const { existsSync, statSync } = await import('fs')
+        const envDir = join(app.getPath('userData'), 'product-studio', userId, projectId)
+        const legacyEnvRight = join(envDir, 'env_view_right.png')
+        const hasLegacyEnvViews = existsSync(legacyEnvRight)
+          && existsSync(join(envDir, 'env_view_back.png'))
+          && existsSync(join(envDir, 'env_view_left.png'))
+          && existsSync(join(envDir, 'env_view_top.png'))
+
+        if (hasLegacyEnvViews) {
+          const envTimestamp = statSync(legacyEnvRight).mtimeMs
+          // Find the most recent multiview mesh
+          const { readdirSync } = await import('fs')
+          const allFiles = readdirSync(envDir)
+          const multiviewFiles = allFiles.filter((f: string) => f.startsWith('env_multiview_') && f.endsWith('.glb')).sort().reverse()
+          const latestMeshFile = multiviewFiles[0]
+          const latestMeshUrl = latestMeshFile ? `huphe://file/${encodeURIComponent(join(envDir, latestMeshFile))}` : undefined
+
+          // Find the version created just before the env views (the one that was locked)
+          const sortedByTime = [...data].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          const sourceVersion = sortedByTime.find((v) => {
+            const meta = (v.layer_metadata ?? {}) as Record<string, unknown>
+            if (meta.env_views_ready) return false // already migrated
+            if (!v.background_plate_url) return false
+            return new Date(v.created_at).getTime() < envTimestamp
+          })
+
+          if (sourceVersion) {
+            const meta = (sourceVersion.layer_metadata ?? {}) as Record<string, unknown>
+            if (!meta.env_views_ready) {
+              const bgUrl = sourceVersion.background_plate_url as string
+              meta.env_views_ready = true
+              meta.env_source_background = bgUrl
+              if (latestMeshUrl) meta.env_mesh_url = latestMeshUrl
+              sourceVersion.layer_metadata = meta
+              await sb.from('final_render_versions').update({ layer_metadata: meta }).eq('id', sourceVersion.id)
+              console.log(`[list-final-renders] Migrated legacy env views → version ${sourceVersion.id}`)
+            }
+          }
+        }
+      }
+
+      // Cleanup: verwijder env_views_ready die niet hoort (gezet door eerdere bug)
+      for (const v of data) {
+        const meta = (v.layer_metadata ?? {}) as Record<string, unknown>
+        if (meta.env_views_ready && !meta.locked_view && !meta.env_mesh_url && !meta.env_source_background) {
+          delete meta.env_views_ready
+          v.layer_metadata = Object.keys(meta).length > 0 ? meta : null
+          await sb.from('final_render_versions').update({ layer_metadata: v.layer_metadata }).eq('id', v.id)
+        }
+      }
+    }
+
     return { ok: true, renders: data }
+  })
+
+  ipcMain.handle('product-studio:restore-render-state', async (_e, args: { renderPacketId: string }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+
+    const { data: packet } = await sb.from('render_packets').select('*').eq('id', args.renderPacketId).single()
+    if (!packet) return { ok: false, error: 'Render packet niet gevonden.' }
+
+    const { data: scene } = await sb.from('studio_scene_versions').select('*').eq('id', packet.studio_scene_version_id).single()
+
+    return { ok: true, packet, scene }
   })
 
   ipcMain.handle('product-studio:update-final-render-status', async (_e, id: string, status: string) => {
@@ -1196,16 +1270,16 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
             '', cameraDescription ? `CAMERA: ${cameraDescription}` : '', '',
             'You will receive labeled reference images to help you match the exact camera perspective.',
             '',
-            'CRITICAL RULES:',
-            '- Keep the product EXACTLY as it appears in PRODUCT_RENDER — same texture, same colors, same details, same position and size.',
-            '- Do NOT alter, simplify, or re-interpret the product in any way.',
-            '- Only generate the environment/background around and behind the product.',
-            '- Use CALIBRATION_3D to understand the exact 3D perspective, ground plane angle, and where the product sits in space.',
-            perspectiveBuffer ? '- Use PERSPECTIVE_GRID to match the floor vanishing point and perspective lines exactly.' : '',
-            depthBuffer ? '- Use DEPTH_MAP to understand the spatial depth and distance relationships.' : '',
-            '- The background perspective and vanishing points MUST match the product\'s camera angle exactly.',
-            '- The surface/floor the product sits on must align with the product\'s ground plane — the product must look like it sits ON the surface, not floating.',
-            '- Match the lighting direction of the environment to the product.',
+            'CRITICAL RULES (in priority order):',
+            '1. PRODUCT_RENDER is the ABSOLUTE authority for product position, size, shape, texture, and silhouette. The product in your output MUST match PRODUCT_RENDER pixel-for-pixel in position and scale.',
+            '2. Do NOT move, resize, crop, or re-interpret the product. It must appear at EXACTLY the same position and size as in PRODUCT_RENDER.',
+            '3. Only generate the environment/background around and behind the product.',
+            '4. The background perspective and vanishing points MUST match the product\'s camera angle.',
+            '5. The surface/floor the product sits on must align with the product\'s ground plane — the product must look like it sits ON the surface, not floating.',
+            calibrationBuffer ? '6. Use CALIBRATION_3D ONLY for background perspective reference (vanishing points, horizon line). Do NOT use it to reposition or resize the product.' : '',
+            perspectiveBuffer ? '7. Use PERSPECTIVE_GRID ONLY for floor/surface perspective direction. Do NOT use it to change the product position.' : '',
+            depthBuffer ? '8. Use DEPTH_MAP ONLY for spatial depth context of the background.' : '',
+            '9. Match the lighting direction of the environment to the product.',
           ].filter(Boolean).join('\n'),
         },
         { type: 'text', text: 'PRODUCT_RENDER — The product to place in the scene:' },
@@ -1593,6 +1667,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       far: number
       width: number
       height: number
+      fovScale?: number
     }
   }) => {
     try {
@@ -1644,6 +1719,154 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
     } catch (err: any) {
       console.error('[depth] Error:', err.message)
+      return { ok: false, error: err.message }
+    }
+  })
+
+  // --- Reconstruct Environment (multi-view) ---
+
+  ipcMain.handle('product-studio:reconstruct-environment', async (_e, args: {
+    backgroundPlateUrl: string
+    projectId: string
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false, error: 'Gebruiker niet gevonden.' }
+
+    try {
+      const h = createImageHelpers(jwt)
+      await h.init()
+
+      // Load the front view (existing background plate)
+      let frontBuf: Buffer
+      if (args.backgroundPlateUrl.startsWith('huphe://file/')) {
+        const filePath = decodeURIComponent(args.backgroundPlateUrl.replace(/^huphe:\/\/file\//, '').replace(/\?.*$/, ''))
+        frontBuf = await readFile(filePath)
+      } else {
+        const loaded = await h.loadImageBuffer(args.backgroundPlateUrl, 'Background plate', true)
+        if (!loaded) throw new Error('Background plate niet beschikbaar.')
+        frontBuf = loaded
+      }
+
+      const frontDataUrl = await h.toDataUrl(frontBuf)
+      const bgHash = createHash('md5').update(args.backgroundPlateUrl).digest('hex').slice(0, 8)
+
+      // Step 1: Generate a seamless 360° panorama from the front view
+      console.log('[env-reconstruct] Generating 360° panorama...')
+      const panoramaParts: any[] = [
+        {
+          type: 'text',
+          text: [
+            `You are given a photo of a scene/environment. Generate a full 360° equirectangular panorama of this EXACT same space.`,
+            ``,
+            `CRITICAL RULES:`,
+            `- The input photo shows the FRONT of the scene. Place it in the center of the panorama.`,
+            `- Extend the scene seamlessly in all directions: left, right, behind the camera, above and below.`,
+            `- This is ONE continuous physical space. All surfaces, materials, lighting, and objects must be spatially consistent.`,
+            `- The left and right edges of the panorama MUST connect seamlessly (it wraps around 360°).`,
+            `- Maintain the exact same color palette, lighting conditions, atmosphere, and level of detail throughout.`,
+            `- Do NOT add unrelated objects. Extend what is logically there: walls continue, shelves wrap around, floor and ceiling extend naturally.`,
+            `- Output as a wide equirectangular image with aspect ratio 2:1 (width = 2× height).`,
+            `- The panorama should look like a real 360° photo taken with a panoramic camera in this exact location.`,
+          ].join('\n'),
+        },
+        { type: 'text', text: 'FRONT VIEW — The scene as seen from the front:' },
+        { type: 'image_url', image_url: { url: frontDataUrl } },
+      ]
+
+      const panoramaJson = await h.callModel([{ role: 'user', content: panoramaParts }])
+      const panoramaBuf = await h.extractImageFromResponse(panoramaJson)
+      await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_panorama.png`, panoramaBuf)
+      console.log('[env-reconstruct] Panorama generated, splitting into views...')
+
+      // Step 2: Split panorama into 4 segments (front, right, back, left)
+      const sharp = (await import('sharp')).default
+      const panoMeta = await sharp(panoramaBuf).metadata()
+      const panoW = panoMeta.width ?? 4096
+      const panoH = panoMeta.height ?? 2048
+      const segW = Math.floor(panoW / 4)
+
+      // Front is centered in the panorama, so segments are offset by half a segment
+      // Panorama layout: [left-edge ... front-center ... right-edge] wraps to [left-edge]
+      // Center of panorama = front, so: front=center, right=center+1/4, back=center+2/4, left=center-1/4
+      const frontStart = Math.floor(panoW / 2 - segW / 2)
+      const segmentOffsets = [
+        frontStart,                                    // front
+        (frontStart + segW) % panoW,                   // right (90°)
+        (frontStart + segW * 2) % panoW,               // back (180°)
+        (frontStart + segW * 3) % panoW,               // left (270°)
+      ]
+
+      const viewLabels = ['front', 'right', 'back', 'left']
+      const viewBuffers: Buffer[] = []
+
+      for (let i = 0; i < 4; i++) {
+        const x = segmentOffsets[i]
+        let segBuf: Buffer
+        if (x + segW <= panoW) {
+          segBuf = await sharp(panoramaBuf).extract({ left: x, top: 0, width: segW, height: panoH }).toBuffer()
+        } else {
+          // Wraps around the edge — stitch two parts
+          const rightPart = panoW - x
+          const leftPart = segW - rightPart
+          const right = await sharp(panoramaBuf).extract({ left: x, top: 0, width: rightPart, height: panoH }).toBuffer()
+          const left = await sharp(panoramaBuf).extract({ left: 0, top: 0, width: leftPart, height: panoH }).toBuffer()
+          segBuf = await sharp({
+            create: { width: segW, height: panoH, channels: 3, background: { r: 0, g: 0, b: 0 } },
+          }).composite([
+            { input: right, left: 0, top: 0 },
+            { input: left, left: rightPart, top: 0 },
+          ]).jpeg({ quality: 92 }).toBuffer()
+        }
+        viewBuffers.push(segBuf)
+        await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_${viewLabels[i]}.png`, segBuf)
+        console.log(`[env-reconstruct] Saved ${viewLabels[i]} segment`)
+      }
+
+      // Step 3: Generate top-down view separately
+      console.log('[env-reconstruct] Generating top-down view...')
+      const topParts: any[] = [
+        {
+          type: 'text',
+          text: [
+            `You are given a 360° panorama of a scene. Generate what this space looks like from directly above — a bird's eye / top-down view.`,
+            `RULES:`,
+            `- Show the floor layout as seen from the ceiling looking straight down.`,
+            `- Same materials, objects, and spatial arrangement as the panorama.`,
+            `- Match the color palette and lighting exactly.`,
+            `- Output a square image.`,
+          ].join('\n'),
+        },
+        { type: 'text', text: 'PANORAMA — Full 360° view of the scene:' },
+        { type: 'image_url', image_url: { url: await h.toDataUrl(panoramaBuf) } },
+      ]
+      const topJson = await h.callModel([{ role: 'user', content: topParts }])
+      const topBuf = await h.extractImageFromResponse(topJson)
+      viewBuffers.push(topBuf)
+      await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_top.png`, topBuf)
+      console.log('[env-reconstruct] Top-down view saved')
+
+      // Build unified multi-view mesh
+      console.log('[env-reconstruct] Building multi-view mesh...')
+      const glbBuffer = await buildMultiViewMesh(viewBuffers, (step) => {
+        console.log(`[env-reconstruct] ${step}`)
+      })
+
+      const meshUrl = await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_multiview.glb`, glbBuffer)
+      console.log('[env-reconstruct] Multi-view mesh saved:', meshUrl)
+
+      // Collect all view URLs
+      const allLabels = ['front', 'right', 'back', 'left', 'top']
+      const viewUrls: string[] = allLabels.map((label) => {
+        const viewPath = join(app.getPath('userData'), 'product-studio', user.id, args.projectId, `env_views/${bgHash}_${label}.png`)
+        return `huphe://file/${encodeURIComponent(viewPath)}?v=${Date.now()}`
+      })
+
+      return { ok: true, meshUrl, backgroundPlateUrl: args.backgroundPlateUrl, viewUrls }
+    } catch (err: any) {
+      console.error('[env-reconstruct] Error:', err.message)
       return { ok: false, error: err.message }
     }
   })
@@ -2873,5 +3096,117 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
 
     return { ok: true, runs, summary }
+  })
+
+  // --- Get env view URLs for a background plate ---
+  ipcMain.handle('product-studio:get-env-views', async (_e, args: {
+    projectId: string
+    backgroundPlateUrl: string
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false }
+    const sb = getUserClient(jwt)
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false }
+
+    const { existsSync } = await import('fs')
+    const bgHash = createHash('md5').update(args.backgroundPlateUrl).digest('hex').slice(0, 8)
+    const envDir = join(app.getPath('userData'), 'product-studio', user.id, args.projectId)
+    const labels = ['front', 'right', 'back', 'left', 'top']
+    const viewUrls: string[] = []
+
+    // Front view = background plate itself
+    viewUrls.push(args.backgroundPlateUrl)
+
+    // Check new-style (bgHash-prefixed) files first, then legacy
+    for (const label of labels.slice(1)) {
+      const newPath = join(envDir, `env_views/${bgHash}_${label}.png`)
+      const legacyPath = join(envDir, `env_view_${label}.png`)
+      if (existsSync(newPath)) {
+        viewUrls.push(`huphe://file/${encodeURIComponent(newPath)}`)
+      } else if (existsSync(legacyPath)) {
+        viewUrls.push(`huphe://file/${encodeURIComponent(legacyPath)}`)
+      }
+    }
+
+    return { ok: viewUrls.length === 5, viewUrls: viewUrls.length === 5 ? viewUrls : [] }
+  })
+
+  // --- Update layer_metadata on a final_render_version ---
+  ipcMain.handle('product-studio:update-final-render-metadata', async (_e, args: {
+    versionId: string
+    layerMetadata: Record<string, unknown>
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false }
+    const sb = getUserClient(jwt)
+    await sb.from('final_render_versions').update({ layer_metadata: args.layerMetadata }).eq('id', args.versionId)
+    return { ok: true }
+  })
+
+  // --- Compose locked view: background plate + product layer → new version ---
+  ipcMain.handle('product-studio:compose-locked-view', async (_event, args: {
+    projectId: string
+    renderPacketId: string
+    backgroundPlateUrl: string
+    productLayerUrl: string
+    prompt: string
+  }) => {
+    try {
+      const jwt = getJwt()
+      if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+      const sharp = (await import('sharp')).default
+      const sb = getUserClient(jwt)
+      const { data: { user } } = await sb.auth.getUser()
+      if (!user) return { ok: false, error: 'Niet ingelogd.' }
+
+      async function loadBuffer(url: string): Promise<Buffer> {
+        if (url.startsWith('huphe://file/')) {
+          const raw = decodeURIComponent(url.split('?')[0].slice('huphe://file/'.length))
+          return readFile(raw)
+        }
+        const res = await fetch(url)
+        if (!res.ok) throw new Error(`Fetch failed: ${res.status}`)
+        return Buffer.from(await res.arrayBuffer())
+      }
+
+      const bgBuffer = await loadBuffer(args.backgroundPlateUrl)
+      const plBuffer = await loadBuffer(args.productLayerUrl)
+
+      const bgMeta = await sharp(bgBuffer).metadata()
+      const bgW = bgMeta.width ?? 1920
+      const bgH = bgMeta.height ?? 1080
+
+      const compositeBuffer = await sharp(bgBuffer)
+        .composite([{ input: await sharp(plBuffer).resize(bgW, bgH, { fit: 'fill' }).toBuffer(), blend: 'over' }])
+        .png({ compressionLevel: 6 })
+        .toBuffer()
+
+      const ts = Date.now()
+      const compositeUrl = await saveAssetLocally(user.id, args.projectId, `locked_view_${ts}.png`, compositeBuffer)
+
+      const { data: version, error: insertError } = await sb.from('final_render_versions').insert({
+        project_id: args.projectId,
+        render_packet_id: args.renderPacketId,
+        output_url: compositeUrl,
+        composite_url: compositeUrl,
+        background_plate_url: args.backgroundPlateUrl,
+        product_layer_url: args.productLayerUrl,
+        prompt: args.prompt,
+        status: 'review',
+        layer_metadata: {
+          route: 'locked-background-recomposite',
+          locked_view: true,
+          env_views_ready: true,
+          env_source_background: args.backgroundPlateUrl,
+        },
+      }).select().single()
+      if (insertError) throw insertError
+
+      return { ok: true, version, compositeUrl }
+    } catch (err: any) {
+      console.error('[compose-locked-view]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Composiet maken mislukt.' }
+    }
   })
 }
