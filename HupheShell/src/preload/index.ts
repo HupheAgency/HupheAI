@@ -301,6 +301,43 @@ contextBridge.exposeInMainWorld('api', {
     getEnvViews: (args: {
       projectId: string; backgroundPlateUrl: string
     }) => ipcRenderer.invoke('product-studio:get-env-views', args),
+    deleteEnvViews: (args: {
+      projectId: string; backgroundPlateUrl: string
+    }) => ipcRenderer.invoke('product-studio:delete-env-views', args),
+    buildSeedMesh: (args: {
+      projectId: string
+      frontPhotoUrl: string
+      depthKnownDataUrl: string
+      maskHoleDataUrl: string
+      manifest: {
+        camera: { near: number; far: number; projectionMatrix: number[]; viewMatrix: number[] }
+        viewport: { width: number; height: number; fovScale?: number }
+      }
+    }) => ipcRenderer.invoke('product-studio:build-seed-mesh', args),
+    clearBakeCache: (args: { projectId: string }) =>
+      ipcRenderer.invoke('product-studio:clear-bake-cache', args),
+    bakeKeyframe: (args: {
+      projectId: string
+      keyframeIndex: number
+      rgbPartialDataUrl: string
+      maskHoleDataUrl: string
+      depthKnownDataUrl: string
+      manifest: {
+        camera: { near: number; far: number; projectionMatrix: number[]; viewMatrix: number[] }
+        viewport: { width: number; height: number; fovScale?: number }
+        prompt?: string
+      }
+    }) => ipcRenderer.invoke('product-studio:bake-keyframe', args),
+    finalizeBake: (args: {
+      projectId: string
+    }) => ipcRenderer.invoke('product-studio:finalize-bake', args),
+    testOrbitSplat: (args: {
+      projectId: string
+      imageUrl: string
+      arcDegrees?: number
+    }) => ipcRenderer.invoke('product-studio:test-orbit-splat', args),
+    renameProject: (args: { projectId: string; name: string }) => ipcRenderer.invoke('product-studio:rename-project', args),
+    deleteProject: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:delete-project', args),
     retryProviderRun: (runId: string) =>
       ipcRenderer.invoke('product-studio:retry-provider-run', runId),
     rollbackCanonicalSet: (args: { projectId: string; targetVersion: number }) =>
@@ -525,6 +562,7 @@ contextBridge.exposeInMainWorld('api', {
   // -------------------------------------------------------------------------
   //  Vision — lokaal visionmodel via Ollama
   // -------------------------------------------------------------------------
+  restartApp: (): Promise<void> => ipcRenderer.invoke('app:restart'),
   setFullScreen: (flag: boolean): Promise<void> => ipcRenderer.invoke('window:set-fullscreen', flag),
   importDocument: (): Promise<{ ok: boolean; html?: string; title?: string; canceled?: boolean; error?: string }> =>
     ipcRenderer.invoke('document:import-file'),

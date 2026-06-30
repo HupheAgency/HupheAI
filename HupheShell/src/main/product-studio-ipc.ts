@@ -27,6 +27,23 @@ async function saveAssetLocally(userId: string, projectId: string, filename: str
   return `huphe://file/${encodeURIComponent(filePath)}?v=${Date.now()}`
 }
 
+function dataUrlToBuffer(dataUrl: string): Buffer {
+  const base64 = dataUrl.replace(/^data:[^;]+;base64,/, '')
+  return Buffer.from(base64, 'base64')
+}
+
+async function saveBakeDebug(projectId: string, folder: string, filename: string, content: Buffer | string): Promise<void> {
+  const safeProjectId = projectId.replace(/[^a-zA-Z0-9_-]/g, '_')
+  const safeFolder = folder.replace(/[^a-zA-Z0-9_.-]/g, '_')
+  const dir = join(app.getPath('desktop'), '3d_generaties', safeProjectId, safeFolder)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, filename), content)
+}
+
+function pngBufferToDataUrl(buffer: Buffer): string {
+  return `data:image/png;base64,${buffer.toString('base64')}`
+}
+
 async function migrateSupabaseUrlToLocal(sb: any, userId: string, projectId: string, url: string, filename: string): Promise<string> {
   if (!url.includes('supabase.co/storage/') && !url.includes('fal.media/')) return url
   try {
@@ -37,7 +54,13 @@ async function migrateSupabaseUrlToLocal(sb: any, userId: string, projectId: str
   } catch { return url }
 }
 
+// Accumulated environment mesh per project (grows per bake step)
+const bakeAccumulated = new Map<string, Buffer>()
+
+let _ipcRegistered = false
 export function registerProductStudioIPC(getJwt: () => string | null): void {
+  if (_ipcRegistered) return
+  _ipcRegistered = true
   // --- Project CRUD ---
 
   ipcMain.handle('product-studio:create-project', async (_e, args: {
@@ -84,6 +107,30 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
     if (error) return { ok: false, error: error.message }
     return { ok: true, projects: data }
+  })
+
+  ipcMain.handle('product-studio:delete-project', async (_e, args: { projectId: string }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+    const { error } = await sb
+      .from('product_projects')
+      .update({ status: 'archived', updated_at: new Date().toISOString() })
+      .eq('id', args.projectId)
+    if (error) return { ok: false, error: error.message }
+    return { ok: true }
+  })
+
+  ipcMain.handle('product-studio:rename-project', async (_e, args: { projectId: string; name: string }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+    const sb = getUserClient(jwt)
+    const { error } = await sb
+      .from('product_projects')
+      .update({ name: args.name, product_name: args.name, updated_at: new Date().toISOString() })
+      .eq('id', args.projectId)
+    if (error) return { ok: false, error: error.message }
+    return { ok: true }
   })
 
   ipcMain.handle('product-studio:get-project', async (_e, projectId: string) => {
@@ -1750,100 +1797,158 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         frontBuf = loaded
       }
 
-      const frontDataUrl = await h.toDataUrl(frontBuf)
-      const bgHash = createHash('md5').update(args.backgroundPlateUrl).digest('hex').slice(0, 8)
-
-      // Step 1: Generate a seamless 360° panorama from the front view
-      console.log('[env-reconstruct] Generating 360° panorama...')
-      const panoramaParts: any[] = [
-        {
-          type: 'text',
-          text: [
-            `You are given a photo of a scene/environment. Generate a full 360° equirectangular panorama of this EXACT same space.`,
-            ``,
-            `CRITICAL RULES:`,
-            `- The input photo shows the FRONT of the scene. Place it in the center of the panorama.`,
-            `- Extend the scene seamlessly in all directions: left, right, behind the camera, above and below.`,
-            `- This is ONE continuous physical space. All surfaces, materials, lighting, and objects must be spatially consistent.`,
-            `- The left and right edges of the panorama MUST connect seamlessly (it wraps around 360°).`,
-            `- Maintain the exact same color palette, lighting conditions, atmosphere, and level of detail throughout.`,
-            `- Do NOT add unrelated objects. Extend what is logically there: walls continue, shelves wrap around, floor and ceiling extend naturally.`,
-            `- Output as a wide equirectangular image with aspect ratio 2:1 (width = 2× height).`,
-            `- The panorama should look like a real 360° photo taken with a panoramic camera in this exact location.`,
-          ].join('\n'),
-        },
-        { type: 'text', text: 'FRONT VIEW — The scene as seen from the front:' },
-        { type: 'image_url', image_url: { url: frontDataUrl } },
-      ]
-
-      const panoramaJson = await h.callModel([{ role: 'user', content: panoramaParts }])
-      const panoramaBuf = await h.extractImageFromResponse(panoramaJson)
-      await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_panorama.png`, panoramaBuf)
-      console.log('[env-reconstruct] Panorama generated, splitting into views...')
-
-      // Step 2: Split panorama into 4 segments (front, right, back, left)
       const sharp = (await import('sharp')).default
-      const panoMeta = await sharp(panoramaBuf).metadata()
-      const panoW = panoMeta.width ?? 4096
-      const panoH = panoMeta.height ?? 2048
-      const segW = Math.floor(panoW / 4)
+      const bgHash = createHash('md5').update(args.backgroundPlateUrl).digest('hex').slice(0, 8)
+      const { callFalProxy } = await import('./lib/proxy')
 
-      // Front is centered in the panorama, so segments are offset by half a segment
-      // Panorama layout: [left-edge ... front-center ... right-edge] wraps to [left-edge]
-      // Center of panorama = front, so: front=center, right=center+1/4, back=center+2/4, left=center-1/4
-      const frontStart = Math.floor(panoW / 2 - segW / 2)
-      const segmentOffsets = [
-        frontStart,                                    // front
-        (frontStart + segW) % panoW,                   // right (90°)
-        (frontStart + segW * 2) % panoW,               // back (180°)
-        (frontStart + segW * 3) % panoW,               // left (270°)
-      ]
+      // Get source image dimensions
+      const srcMeta = await sharp(frontBuf).metadata()
+      const srcW = srcMeta.width ?? 1024
+      const srcH = srcMeta.height ?? 1024
 
+      // Outpainting: pan the camera 4x around the scene (each step keeps 50% overlap)
+      // Result: 4 views that wrap 360° around the starting viewpoint
       const viewLabels = ['front', 'right', 'back', 'left']
-      const viewBuffers: Buffer[] = []
+      const viewBuffers: Buffer[] = [frontBuf]
+      await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_front.png`, frontBuf)
+      console.log('[env-reconstruct] Saved front (original)')
 
-      for (let i = 0; i < 4; i++) {
-        const x = segmentOffsets[i]
-        let segBuf: Buffer
-        if (x + segW <= panoW) {
-          segBuf = await sharp(panoramaBuf).extract({ left: x, top: 0, width: segW, height: panoH }).toBuffer()
-        } else {
-          // Wraps around the edge — stitch two parts
-          const rightPart = panoW - x
-          const leftPart = segW - rightPart
-          const right = await sharp(panoramaBuf).extract({ left: x, top: 0, width: rightPart, height: panoH }).toBuffer()
-          const left = await sharp(panoramaBuf).extract({ left: 0, top: 0, width: leftPart, height: panoH }).toBuffer()
-          segBuf = await sharp({
-            create: { width: segW, height: panoH, channels: 3, background: { r: 0, g: 0, b: 0 } },
-          }).composite([
-            { input: right, left: 0, top: 0 },
-            { input: left, left: rightPart, top: 0 },
-          ]).jpeg({ quality: 92 }).toBuffer()
-        }
-        viewBuffers.push(segBuf)
-        await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_${viewLabels[i]}.png`, segBuf)
-        console.log(`[env-reconstruct] Saved ${viewLabels[i]} segment`)
+      // Helper: standard outpaint — current image on left, generate right half
+      async function outpaintStep(inputBuf: Buffer, stepLabel: string): Promise<Buffer> {
+        const canvasW = srcW * 2
+        const canvas = await sharp({
+          create: { width: canvasW, height: srcH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+        }).composite([
+          { input: inputBuf, left: 0, top: 0 },
+        ]).png().toBuffer()
+
+        const maskBuf = await sharp({
+          create: { width: canvasW, height: srcH, channels: 3, background: { r: 0, g: 0, b: 0 } },
+        }).composite([
+          {
+            input: await sharp({
+              create: { width: srcW, height: srcH, channels: 3, background: { r: 255, g: 255, b: 255 } },
+            }).png().toBuffer(),
+            left: srcW,
+            top: 0,
+          },
+        ]).png().toBuffer()
+
+        const result = await callFalProxy('fal-ai/flux-pro/v1/fill', {
+          image_url: `data:image/png;base64,${(await sharp(canvas).png().toBuffer()).toString('base64')}`,
+          mask_url: `data:image/png;base64,${maskBuf.toString('base64')}`,
+          prompt: `Continue this scene seamlessly to the right. Same room, same surfaces, same lighting, same materials, same style. Photorealistic, consistent perspective, the camera is panning clockwise.`,
+          num_images: 1,
+          output_format: 'png',
+        }, jwt!) as any
+
+        const url = result?.images?.[0]?.url
+        if (!url) throw new Error(`Outpainting ${stepLabel} gaf geen resultaat`)
+        const res = await fetch(url)
+        const fullBuf = Buffer.from(await res.arrayBuffer())
+        const meta = await sharp(fullBuf).metadata()
+        const w = meta.width ?? canvasW
+        const h = meta.height ?? srcH
+        const half = Math.floor(w / 2)
+        console.log(`[env-reconstruct] ${stepLabel} result: ${w}x${h}`)
+        return sharp(fullBuf).extract({ left: half, top: 0, width: w - half, height: h }).png().toBuffer()
       }
 
-      // Step 3: Generate top-down view separately
+      // Steps 1-2: standard outpaint (front→right, right→back)
+      let currentBuf = frontBuf
+      for (let step = 1; step <= 2; step++) {
+        console.log(`[env-reconstruct] Outpainting step ${step}/3 → ${viewLabels[step]}...`)
+        const newViewBuf = await outpaintStep(currentBuf, viewLabels[step])
+        viewBuffers.push(newViewBuf)
+        await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_${viewLabels[step]}.png`, newViewBuf)
+        console.log(`[env-reconstruct] Saved ${viewLabels[step]}`)
+        currentBuf = newViewBuf
+      }
+
+      // Step 3: circular close — fill gap between back (left) and front (right)
+      console.log('[env-reconstruct] Outpainting step 3/3 → left (circular close)...')
+      {
+        const canvasW = srcW * 3
+        // Canvas: [back | gap | front]
+        const canvas = await sharp({
+          create: { width: canvasW, height: srcH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+        }).composite([
+          { input: currentBuf, left: 0, top: 0 },
+          { input: frontBuf, left: srcW * 2, top: 0 },
+        ]).png().toBuffer()
+
+        // Mask: middle srcW is white (generate), sides black (preserve)
+        const maskBuf = await sharp({
+          create: { width: canvasW, height: srcH, channels: 3, background: { r: 0, g: 0, b: 0 } },
+        }).composite([
+          {
+            input: await sharp({
+              create: { width: srcW, height: srcH, channels: 3, background: { r: 255, g: 255, b: 255 } },
+            }).png().toBuffer(),
+            left: srcW,
+            top: 0,
+          },
+        ]).png().toBuffer()
+
+        const result = await callFalProxy('fal-ai/flux-pro/v1/fill', {
+          image_url: `data:image/png;base64,${(await sharp(canvas).png().toBuffer()).toString('base64')}`,
+          mask_url: `data:image/png;base64,${maskBuf.toString('base64')}`,
+          prompt: `Fill the gap between these two views of the same room. The left side shows the back, the right side shows the front. Connect them seamlessly. Same room, same surfaces, same lighting, same materials. Photorealistic.`,
+          num_images: 1,
+          output_format: 'png',
+        }, jwt!) as any
+
+        const url = result?.images?.[0]?.url
+        if (!url) throw new Error('Outpainting left (circular close) gaf geen resultaat')
+        const res = await fetch(url)
+        const fullBuf = Buffer.from(await res.arrayBuffer())
+        const meta = await sharp(fullBuf).metadata()
+        const w = meta.width ?? canvasW
+        const h = meta.height ?? srcH
+        const thirdW = Math.floor(w / 3)
+        console.log(`[env-reconstruct] Circular close result: ${w}x${h}`)
+
+        const leftViewBuf = await sharp(fullBuf)
+          .extract({ left: thirdW, top: 0, width: thirdW, height: h })
+          .png().toBuffer()
+
+        viewBuffers.push(leftViewBuf)
+        await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_left.png`, leftViewBuf)
+        console.log('[env-reconstruct] Saved left (circular close)')
+      }
+
+      // Stitch the 4 horizontal views into a panorama strip
+      console.log('[env-reconstruct] Stitching panorama...')
+      const panoWidth = srcW * 4
+      const panoramaBuf = await sharp({
+        create: { width: panoWidth, height: srcH, channels: 3, background: { r: 0, g: 0, b: 0 } },
+      }).composite(
+        viewBuffers.slice(0, 4).map((buf, i) => ({ input: buf, left: i * srcW, top: 0 }))
+      ).jpeg({ quality: 92 }).toBuffer()
+      await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_panorama.jpg`, panoramaBuf)
+      console.log('[env-reconstruct] Panorama saved')
+
+      // Generate top-down view — use front image with full mask (complete regeneration)
       console.log('[env-reconstruct] Generating top-down view...')
-      const topParts: any[] = [
-        {
-          type: 'text',
-          text: [
-            `You are given a 360° panorama of a scene. Generate what this space looks like from directly above — a bird's eye / top-down view.`,
-            `RULES:`,
-            `- Show the floor layout as seen from the ceiling looking straight down.`,
-            `- Same materials, objects, and spatial arrangement as the panorama.`,
-            `- Match the color palette and lighting exactly.`,
-            `- Output a square image.`,
-          ].join('\n'),
-        },
-        { type: 'text', text: 'PANORAMA — Full 360° view of the scene:' },
-        { type: 'image_url', image_url: { url: await h.toDataUrl(panoramaBuf) } },
-      ]
-      const topJson = await h.callModel([{ role: 'user', content: topParts }])
-      const topBuf = await h.extractImageFromResponse(topJson)
+      const topMask = await sharp({
+        create: { width: srcW, height: srcH, channels: 3, background: { r: 255, g: 255, b: 255 } },
+      }).png().toBuffer()
+      const topResult = await callFalProxy('fal-ai/flux-pro/v1/fill', {
+        image_url: `data:image/png;base64,${frontBuf.toString('base64')}`,
+        mask_url: `data:image/png;base64,${topMask.toString('base64')}`,
+        prompt: `Bird's eye view, top-down aerial photograph looking straight down at the floor of this exact same room. Same materials, same objects, same lighting. Photorealistic.`,
+        num_images: 1,
+        output_format: 'png',
+      }, jwt!) as any
+
+      const topUrl = topResult?.images?.[0]?.url
+      let topBuf: Buffer
+      if (topUrl) {
+        const topRes = await fetch(topUrl)
+        topBuf = Buffer.from(await topRes.arrayBuffer())
+      } else {
+        topBuf = frontBuf
+      }
       viewBuffers.push(topBuf)
       await saveAssetLocally(user.id, args.projectId, `env_views/${bgHash}_top.png`, topBuf)
       console.log('[env-reconstruct] Top-down view saved')
@@ -1864,7 +1969,10 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         return `huphe://file/${encodeURIComponent(viewPath)}?v=${Date.now()}`
       })
 
-      return { ok: true, meshUrl, backgroundPlateUrl: args.backgroundPlateUrl, viewUrls }
+      const panoramaPath = join(app.getPath('userData'), 'product-studio', user.id, args.projectId, `env_views/${bgHash}_panorama.jpg`)
+      const panoramaUrl = `huphe://file/${encodeURIComponent(panoramaPath)}?v=${Date.now()}`
+
+      return { ok: true, meshUrl, backgroundPlateUrl: args.backgroundPlateUrl, viewUrls, panoramaUrl }
     } catch (err: any) {
       console.error('[env-reconstruct] Error:', err.message)
       return { ok: false, error: err.message }
@@ -3115,21 +3223,337 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const labels = ['front', 'right', 'back', 'left', 'top']
     const viewUrls: string[] = []
 
-    // Front view = background plate itself
-    viewUrls.push(args.backgroundPlateUrl)
-
-    // Check new-style (bgHash-prefixed) files first, then legacy
-    for (const label of labels.slice(1)) {
+    for (const label of labels) {
       const newPath = join(envDir, `env_views/${bgHash}_${label}.png`)
       const legacyPath = join(envDir, `env_view_${label}.png`)
       if (existsSync(newPath)) {
         viewUrls.push(`huphe://file/${encodeURIComponent(newPath)}`)
       } else if (existsSync(legacyPath)) {
         viewUrls.push(`huphe://file/${encodeURIComponent(legacyPath)}`)
+      } else if (label === 'front') {
+        viewUrls.push(args.backgroundPlateUrl)
       }
     }
 
-    return { ok: viewUrls.length === 5, viewUrls: viewUrls.length === 5 ? viewUrls : [] }
+    const panoPath = join(envDir, `env_views/${bgHash}_panorama.jpg`)
+    const panoramaUrl = existsSync(panoPath) ? `huphe://file/${encodeURIComponent(panoPath)}` : null
+
+    return { ok: viewUrls.length === 5, viewUrls: viewUrls.length === 5 ? viewUrls : [], panoramaUrl }
+  })
+
+  // --- Delete env views for a background plate ---
+  ipcMain.handle('product-studio:delete-env-views', async (_e, args: {
+    projectId: string
+    backgroundPlateUrl: string
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false }
+    const sb = getUserClient(jwt)
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false }
+
+    const { unlinkSync, existsSync } = await import('fs')
+    const bgHash = createHash('md5').update(args.backgroundPlateUrl).digest('hex').slice(0, 8)
+    const envDir = join(app.getPath('userData'), 'product-studio', user.id, args.projectId, 'env_views')
+    const filesToDelete = ['front', 'right', 'back', 'left', 'top', 'panorama', 'multiview.glb']
+      .map((f) => join(envDir, `${bgHash}_${f}${f.includes('.') ? '' : '.png'}`))
+
+    let deleted = 0
+    for (const fp of filesToDelete) {
+      if (existsSync(fp)) {
+        try { unlinkSync(fp); deleted++ } catch {}
+      }
+    }
+
+    // Ook bake frame cache wissen
+    const bakeDir = join(app.getPath('userData'), 'product-studio', user.id, args.projectId, 'bake')
+    if (existsSync(bakeDir)) {
+      const { readdirSync } = await import('fs')
+      for (const f of readdirSync(bakeDir)) {
+        if (f.startsWith('frame_') && f.endsWith('.png')) {
+          try { unlinkSync(join(bakeDir, f)); deleted++ } catch {}
+        }
+      }
+    }
+
+    console.log(`[env-delete] Removed ${deleted} files (env views + bake cache) for bgHash ${bgHash}`)
+    return { ok: true, deleted }
+  })
+
+  // --- Clear bake frame cache for a project ---
+  ipcMain.handle('product-studio:clear-bake-cache', async (_e, args: { projectId: string }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false }
+    const sb = getUserClient(jwt)
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return { ok: false }
+
+    const { readdirSync, unlinkSync, existsSync } = await import('fs')
+    const bakeDir = join(app.getPath('userData'), 'product-studio', user.id, args.projectId, 'bake')
+    if (!existsSync(bakeDir)) return { ok: true, deleted: 0 }
+
+    let deleted = 0
+    for (const f of readdirSync(bakeDir)) {
+      if (f.startsWith('frame_') && f.endsWith('.png')) {
+        try { unlinkSync(join(bakeDir, f)); deleted++ } catch {}
+      }
+    }
+    console.log(`[clear-bake-cache] Removed ${deleted} cached frames for project ${args.projectId}`)
+    return { ok: true, deleted }
+  })
+
+  // --- Generative SLAM: build seed mesh from front photo (Fase 0) ---
+  ipcMain.handle('product-studio:build-seed-mesh', async (_e, args: {
+    projectId: string
+    frontPhotoUrl: string
+    depthKnownDataUrl: string
+    maskHoleDataUrl: string
+    manifest: {
+      camera: { near: number; far: number; projectionMatrix: number[]; viewMatrix: number[] }
+      viewport: { width: number; height: number; fovScale?: number }
+    }
+  }) => {
+    try {
+      const jwt = getJwt()
+      if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+      const sb = getUserClient(jwt)
+      const { data: { user } } = await sb.auth.getUser()
+      if (!user) return { ok: false, error: 'Niet ingelogd.' }
+
+      const { decodeBasicDepthPacking, affineDepthFit, unprojectDepthPatch } = await import('./lib/generative-slam')
+      const sharp = (await import('sharp')).default
+      const { camera, viewport } = args.manifest
+      const W = viewport.width, H = viewport.height
+
+      // Laad de front foto als rgb buffer
+      async function loadBuffer(url: string): Promise<Buffer> {
+        if (url.startsWith('huphe://file/')) {
+          const raw = decodeURIComponent(url.split('?')[0].slice('huphe://file/'.length))
+          return readFile(raw)
+        }
+        if (url.startsWith('data:')) {
+          const b64 = url.replace(/^data:[^;]+;base64,/, '')
+          return Buffer.from(b64, 'base64')
+        }
+        const res = await fetch(url)
+        if (!res.ok) throw new Error(`Fetch mislukt: ${res.status}`)
+        return Buffer.from(await res.arrayBuffer())
+      }
+
+      const photoBuf = await loadBuffer(args.frontPhotoUrl)
+
+      // Decode known depth (van de 3D render)
+      const knownDepthMetric = await decodeBasicDepthPacking(args.depthKnownDataUrl, camera.near, camera.far)
+
+      // maskHole buffer (wit = gat = achtergrond)
+      const maskBuf = dataUrlToBuffer(args.maskHoleDataUrl)
+      await saveBakeDebug(args.projectId, 'seed_000', 'front_photo.png', photoBuf)
+      await saveBakeDebug(args.projectId, 'seed_000', 'mask_hole.png', maskBuf)
+      await saveBakeDebug(args.projectId, 'seed_000', 'depth_known.png', dataUrlToBuffer(args.depthKnownDataUrl))
+
+      // Depth Anything op de front foto
+      const monoBuf = await extractDepthMap(photoBuf)
+      await saveBakeDebug(args.projectId, 'seed_000', 'mono_depth.png', monoBuf)
+
+      // Affine fit: schaal mono disparity naar metrische depth
+      const { a, b } = await affineDepthFit(monoBuf, knownDepthMetric, maskBuf, W, H)
+      console.log(`[build-seed-mesh] Affine fit: a=${a.toFixed(4)}, b=${b.toFixed(4)}`)
+
+      // Aligned depth voor achtergrond-pixels (gaten)
+      const { data: maskData } = await sharp(maskBuf).resize(W, H, { fit: 'fill' }).grayscale().raw().toBuffer({ resolveWithObject: true })
+      const { data: monoData } = await sharp(monoBuf).resize(W, H, { fit: 'fill' }).grayscale().raw().toBuffer({ resolveWithObject: true })
+      const alignedDepth = new Float32Array(W * H)
+      for (let i = 0; i < W * H; i++) {
+        const isHole = maskData[i] > 128
+        if (!isHole) { alignedDepth[i] = NaN; continue }
+        const disparity = a * (monoData[i] / 255) + b
+        alignedDepth[i] = disparity > 0.001 ? 1 / disparity : 0
+      }
+
+      // Unproject achtergrond pixels → seed mesh
+      const cameraParams = {
+        projectionMatrix: camera.projectionMatrix,
+        viewMatrix: camera.viewMatrix,
+        near: camera.near,
+        far: camera.far,
+        width: W,
+        height: H,
+        fovScale: viewport.fovScale,
+      }
+      const seedGlb = await unprojectDepthPatch(alignedDepth, photoBuf, maskBuf, cameraParams)
+      await saveBakeDebug(args.projectId, 'seed_000', 'seed_mesh.glb', seedGlb)
+
+      // Sla op en initialiseer accumulator
+      bakeAccumulated.set(args.projectId, seedGlb)
+      const seedUrl = await saveAssetLocally(user.id, args.projectId, 'bake/accumulated.glb', seedGlb)
+      console.log(`[build-seed-mesh] Seed ${seedGlb.length} bytes → ${seedUrl}`)
+
+      return { ok: true, seedMeshUrl: seedUrl }
+    } catch (err: any) {
+      console.error('[build-seed-mesh]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Seed mesh bouwen mislukt.' }
+    }
+  })
+
+  // --- Generative SLAM: bake one keyframe (spiral step) ---
+  ipcMain.handle('product-studio:bake-keyframe', async (_e, args: {
+    projectId: string
+    keyframeIndex: number
+    rgbPartialDataUrl: string
+    maskHoleDataUrl: string
+    depthKnownDataUrl: string
+    manifest: {
+      camera: { near: number; far: number; projectionMatrix: number[]; viewMatrix: number[] }
+      viewport: { width: number; height: number; fovScale?: number }
+      prompt?: string
+    }
+  }) => {
+    try {
+      const jwt = getJwt()
+      if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+      const sb = getUserClient(jwt)
+      const { data: { user } } = await sb.auth.getUser()
+      if (!user) return { ok: false, error: 'Niet ingelogd.' }
+
+      const { decodeBasicDepthPacking, affineDepthFit, unprojectDepthPatch, mergeTwo } = await import('./lib/generative-slam')
+      const { callFalProxy } = await import('./lib/proxy')
+      const sharp = (await import('sharp')).default
+      const { existsSync } = await import('fs')
+
+      const { camera, viewport } = args.manifest
+      const W = viewport.width, H = viewport.height
+      const frameCachePath = join(app.getPath('userData'), 'product-studio', user.id, args.projectId, 'bake', `frame_${args.keyframeIndex}.png`)
+      const debugFrameName = `frame_${String(args.keyframeIndex).padStart(3, '0')}`
+      const prompt = args.manifest.prompt ?? [
+        'Inpaint only the masked missing area.',
+        'Continue the existing scene exactly.',
+        'Match the surrounding perspective, lighting, materials, colors and texture.',
+        'Do not change any unmasked pixels.',
+        'Do not add new objects, people, products, text or focal elements.',
+        'Fill the hole as a seamless natural continuation of the current environment.',
+        'Photorealistic.',
+      ].join('\n')
+      await saveBakeDebug(args.projectId, debugFrameName, 'rgb_partial.png', dataUrlToBuffer(args.rgbPartialDataUrl))
+      await saveBakeDebug(args.projectId, debugFrameName, 'mask_hole.png', dataUrlToBuffer(args.maskHoleDataUrl))
+      await saveBakeDebug(args.projectId, debugFrameName, 'depth_known.png', dataUrlToBuffer(args.depthKnownDataUrl))
+      await saveBakeDebug(args.projectId, debugFrameName, 'prompt.txt', prompt)
+      const fluxMaxWidth = 960
+      const rgbPartialBuf = dataUrlToBuffer(args.rgbPartialDataUrl)
+      const maskHoleInputBuf = dataUrlToBuffer(args.maskHoleDataUrl)
+      const fluxImageBuf = await sharp(rgbPartialBuf)
+        .resize({ width: fluxMaxWidth, withoutEnlargement: true })
+        .png()
+        .toBuffer()
+      const fluxMaskBuf = await sharp(maskHoleInputBuf)
+        .resize({ width: fluxMaxWidth, withoutEnlargement: true })
+        .grayscale()
+        .png()
+        .toBuffer()
+      await saveBakeDebug(args.projectId, debugFrameName, 'flux_input_lowres.png', fluxImageBuf)
+      await saveBakeDebug(args.projectId, debugFrameName, 'flux_mask_lowres.png', fluxMaskBuf)
+
+      // 1. Decode known depth
+      const knownDepthMetric = await decodeBasicDepthPacking(args.depthKnownDataUrl, camera.near, camera.far)
+
+      // 2. Inpaint gaten — gebruik cache als frame al bestaat
+      let inpaintBuf: Buffer
+      const cached = existsSync(frameCachePath)
+      if (cached) {
+        inpaintBuf = await readFile(frameCachePath)
+        await saveBakeDebug(args.projectId, debugFrameName, 'flux_output_cached.png', inpaintBuf)
+        console.log(`[bake-keyframe] Frame ${args.keyframeIndex} — cache hit`)
+      } else {
+        const inpaintResult = await callFalProxy('fal-ai/flux-pro/v1/fill', {
+          image_url: pngBufferToDataUrl(fluxImageBuf),
+          mask_url: pngBufferToDataUrl(fluxMaskBuf),
+          prompt,
+          num_images: 1,
+          output_format: 'png',
+        }, jwt!)
+        const inpaintUrl: string = inpaintResult?.images?.[0]?.url ?? inpaintResult?.image?.url
+        if (!inpaintUrl) throw new Error('Flux inpainting gaf geen afbeelding terug.')
+        const res = await fetch(inpaintUrl)
+        if (!res.ok) throw new Error(`Inpaint fetch mislukt: ${res.status}`)
+        inpaintBuf = Buffer.from(await res.arrayBuffer())
+        await saveAssetLocally(user.id, args.projectId, `bake/frame_${args.keyframeIndex}.png`, inpaintBuf)
+        await saveBakeDebug(args.projectId, debugFrameName, 'flux_output.png', inpaintBuf)
+        console.log(`[bake-keyframe] Frame ${args.keyframeIndex} — Flux klaar`)
+      }
+
+      // 3. Depth Anything op het inpainted beeld
+      const monoBuf = await extractDepthMap(inpaintBuf)
+      await saveBakeDebug(args.projectId, debugFrameName, 'mono_depth.png', monoBuf)
+
+      // 4. maskHole buffer
+      const maskBuf = dataUrlToBuffer(args.maskHoleDataUrl)
+
+      // 5. Affine alignment (disparity-space)
+      const { a, b } = await affineDepthFit(monoBuf, knownDepthMetric, maskBuf, W, H)
+      console.log(`[bake-keyframe] Frame ${args.keyframeIndex} — a=${a.toFixed(4)}, b=${b.toFixed(4)}`)
+
+      // 6. Aligned depth alleen voor gat-pixels
+      const { data: maskData } = await sharp(maskBuf).resize(W, H, { fit: 'fill' }).grayscale().raw().toBuffer({ resolveWithObject: true })
+      const { data: monoData } = await sharp(monoBuf).resize(W, H, { fit: 'fill' }).grayscale().raw().toBuffer({ resolveWithObject: true })
+      const alignedDepth = new Float32Array(W * H)
+      for (let i = 0; i < W * H; i++) {
+        if (maskData[i] <= 128) { alignedDepth[i] = NaN; continue }
+        const disparity = a * (monoData[i] / 255) + b
+        alignedDepth[i] = disparity > 0.001 ? 1 / disparity : 0
+      }
+
+      // 7. Unproject gat-pixels → patch GLB (relatieve depth-ratio cull)
+      const cameraParams = {
+        projectionMatrix: camera.projectionMatrix,
+        viewMatrix: camera.viewMatrix,
+        near: camera.near,
+        far: camera.far,
+        width: W,
+        height: H,
+        fovScale: viewport.fovScale,
+      }
+      const patch = await unprojectDepthPatch(alignedDepth, inpaintBuf, maskBuf, cameraParams)
+      await saveBakeDebug(args.projectId, debugFrameName, 'patch.glb', patch)
+
+      // 8. Incrementeel samenvoegen met geaccumuleerde mesh
+      const current = bakeAccumulated.get(args.projectId)
+      const newAccumulated = current ? await mergeTwo(current, patch) : patch
+      bakeAccumulated.set(args.projectId, newAccumulated)
+
+      // 9. Sla nieuwe accumulated op zodat renderer hem kan laden
+      const accumulatedUrl = await saveAssetLocally(user.id, args.projectId, 'bake/accumulated.glb', newAccumulated)
+      console.log(`[bake-keyframe] Frame ${args.keyframeIndex} — accumulated ${newAccumulated.length} bytes → ${accumulatedUrl}`)
+
+      return { ok: true, accumulatedMeshUrl: accumulatedUrl, cached }
+    } catch (err: any) {
+      console.error('[bake-keyframe]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Bake keyframe mislukt.' }
+    }
+  })
+
+  // --- Generative SLAM: finalize (accumulated mesh is already saved) ---
+  ipcMain.handle('product-studio:finalize-bake', async (_e, args: {
+    projectId: string
+  }) => {
+    try {
+      const jwt = getJwt()
+      if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+      const sb = getUserClient(jwt)
+      const { data: { user } } = await sb.auth.getUser()
+      if (!user) return { ok: false, error: 'Niet ingelogd.' }
+
+      const accumulated = bakeAccumulated.get(args.projectId)
+      if (!accumulated) return { ok: false, error: 'Geen geaccumuleerde mesh gevonden.' }
+
+      const ts = Date.now()
+      const meshUrl = await saveAssetLocally(user.id, args.projectId, `env_baked_${ts}.glb`, accumulated)
+      bakeAccumulated.delete(args.projectId)
+      console.log(`[finalize-bake] ${accumulated.length} bytes → ${meshUrl}`)
+
+      return { ok: true, meshUrl }
+    } catch (err: any) {
+      console.error('[finalize-bake]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Bake finaliseren mislukt.' }
+    }
   })
 
   // --- Update layer_metadata on a final_render_version ---
@@ -3207,6 +3631,122 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     } catch (err: any) {
       console.error('[compose-locked-view]', err?.message ?? err)
       return { ok: false, error: err?.message ?? 'Composiet maken mislukt.' }
+    }
+  })
+
+  // --- Orbit-splat validatietest ---
+  ipcMain.handle('product-studio:test-orbit-splat', async (_e, args: {
+    projectId: string
+    imageUrl: string
+    arcDegrees?: number
+  }) => {
+    const { exec: execCb } = await import('child_process')
+    const { promisify } = await import('util')
+    const exec = promisify(execCb)
+
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+
+    const arc = args.arcDegrees ?? 120
+    const wsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+    const videoPath = join(wsDir, 'orbit.mp4')
+    const framesDir = join(wsDir, 'frames')
+    const colmapDir = join(wsDir, 'colmap')
+    await mkdir(wsDir, { recursive: true })
+    await mkdir(framesDir, { recursive: true })
+    await mkdir(colmapDir, { recursive: true })
+
+    try {
+      // Stap 1: laad afbeelding als data URL
+      let imageDataUrl = args.imageUrl
+      if (args.imageUrl.startsWith('huphe://file/')) {
+        const raw = decodeURIComponent(args.imageUrl.split('?')[0].slice('huphe://file/'.length))
+        const buf = await readFile(raw)
+        const ext = raw.split('.').pop() ?? 'jpg'
+        imageDataUrl = `data:image/${ext};base64,${buf.toString('base64')}`
+      } else if (!args.imageUrl.startsWith('data:')) {
+        const res = await fetch(args.imageUrl)
+        const buf = Buffer.from(await res.arrayBuffer())
+        imageDataUrl = `data:image/jpeg;base64,${buf.toString('base64')}`
+      }
+
+      // Stap 2: Seedance 2.0 image-to-video via fal.ai direct (sla over als video al bestaat)
+      const { safeStorage } = await import('electron')
+      const { existsSync, readFileSync } = await import('fs')
+
+      let videoUrl: string
+      if (existsSync(videoPath)) {
+        console.log(`[orbit-splat] Video al aanwezig, sla generatie over: ${videoPath}`)
+        videoUrl = videoPath
+      } else {
+        const falKeyFile = join(app.getPath('userData'), 'fal.enc')
+        if (!existsSync(falKeyFile)) return { ok: false, error: 'Geen fal.ai API key gevonden.' }
+        const falKey = safeStorage.decryptString(readFileSync(falKeyFile))
+
+        console.log(`[orbit-splat] Video genereren via fal.ai Seedance 2.0 (${arc}°)...`)
+        const falRes = await fetch('https://fal.run/bytedance/seedance-2.0/image-to-video', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Key ${falKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            image_url: imageDataUrl,
+            prompt: `Camera orbits ${arc} degrees around the central object. Smooth camera arc, static scene, fixed lighting. No zoom, no cut, no camera shake.`,
+            duration: 5,
+            aspect_ratio: '16:9',
+          }),
+        })
+
+        if (!falRes.ok) {
+          const errText = await falRes.text()
+          throw new Error(`fal.ai ${falRes.status}: ${errText.slice(0, 300)}`)
+        }
+
+        const videoResult = await falRes.json() as any
+        console.log('[orbit-splat] fal.ai response:', JSON.stringify(videoResult).slice(0, 500))
+
+        const remoteUrl: string = videoResult?.video?.url ?? videoResult?.url
+        if (!remoteUrl || !remoteUrl.startsWith('http')) throw new Error(`Geen bruikbare video URL in respons. Raw: ${JSON.stringify(videoResult).slice(0, 200)}`)
+        console.log(`[orbit-splat] Video URL: ${remoteUrl}`)
+
+        const videoRes = await fetch(remoteUrl)
+        await writeFile(videoPath, Buffer.from(await videoRes.arrayBuffer()))
+        console.log(`[orbit-splat] Video opgeslagen: ${videoPath}`)
+        videoUrl = remoteUrl
+      }
+
+      // Stap 3: frames extraheren met ffmpeg
+      console.log('[orbit-splat] Frames extraheren...')
+      await exec(`ffmpeg -y -i "${videoPath}" -vf fps=12 "${join(framesDir, 'frame_%04d.png')}"`)
+      const { stdout: lsOut } = await exec(`ls "${framesDir}" | wc -l`)
+      const frameCount = parseInt(lsOut.trim())
+      console.log(`[orbit-splat] ${frameCount} frames geëxtraheerd`)
+
+      if (frameCount < 20) {
+        return { ok: false, error: `Te weinig frames (${frameCount}). Video te kort of fps te laag.`, videoUrl }
+      }
+
+      // Stap 4: COLMAP via Python subprocess
+      console.log('[orbit-splat] COLMAP SfM starten...')
+      const scriptPath = join(__dirname, 'lib/colmap_sfm.py')
+      const python = '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3'
+      const { stdout: colmapOut } = await exec(`"${python}" "${scriptPath}" "${framesDir}" "${colmapDir}"`, { timeout: 300_000 })
+
+      const colmapResult = JSON.parse(colmapOut.trim().split('\n').pop()!)
+      console.log(`[orbit-splat] COLMAP: ${colmapResult.registered}/${colmapResult.total} (${colmapResult.pct}%)`)
+
+      return {
+        ok: true,
+        videoUrl,
+        videoPath,
+        framesDir,
+        frameCount,
+        colmap: colmapResult,
+      }
+    } catch (err: any) {
+      console.error('[orbit-splat]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Orbit splat test mislukt.' }
     }
   })
 }

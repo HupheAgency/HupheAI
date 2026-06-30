@@ -499,6 +499,16 @@ function readOtfFamilyName(data: Buffer): string | null {
   return null
 }
 
+ipcMain.handle('app:restart', (_event) => {
+  const win = BrowserWindow.fromWebContents(_event.sender) ?? BrowserWindow.getFocusedWindow()
+  if (app.isPackaged) {
+    app.relaunch()
+    app.exit(0)
+  } else {
+    win?.webContents.reload()
+  }
+})
+
 ipcMain.handle('window:set-fullscreen', (_event, flag: boolean) => {
   flag = parseIpcPayload('window:set-fullscreen', z.boolean(), flag)
   const win = BrowserWindow.fromWebContents(_event.sender) ?? BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]

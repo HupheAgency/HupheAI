@@ -159,7 +159,7 @@ function LightHelper({ light, selected }: { light: Scene3DState['lights'][number
   )
 }
 
-function SceneBackground({ background, viewMode }: { background: Scene3DBackground; viewMode: ViewMode }) {
+function SceneBackground({ background, viewMode, transparent }: { background: Scene3DBackground; viewMode: ViewMode; transparent?: boolean }) {
   const { scene } = useThree()
 
   const gradientTexture = useMemo(() => {
@@ -178,6 +178,10 @@ function SceneBackground({ background, viewMode }: { background: Scene3DBackgrou
   }, [background.gradientTop, background.gradientBottom])
 
   useEffect(() => {
+    if (transparent) {
+      scene.background = null
+      return
+    }
     if (viewMode !== 'rendered' && viewMode !== 'material') {
       scene.background = null
       return
@@ -195,7 +199,7 @@ function SceneBackground({ background, viewMode }: { background: Scene3DBackgrou
         break
     }
     return () => { scene.background = null }
-  }, [scene, background.type, background.color, gradientTexture, viewMode])
+  }, [scene, background.type, background.color, gradientTexture, viewMode, transparent])
 
   return null
 }
@@ -874,6 +878,7 @@ function SceneContent({
   selectedLightId,
   transformMode,
   viewMode,
+  transparentCanvas,
   onSelectObject,
   onDeselectAll,
   onObjectTransformed,
@@ -900,6 +905,7 @@ function SceneContent({
   setCameraOrbitRef: React.MutableRefObject<((pos: [number, number, number], tgt: [number, number, number]) => void) | null>
   debugRings?: { spacing: number; width: number }
   environmentMeshUrls?: string[]
+  transparentCanvas?: boolean
 }) {
   const orbitRef = useRef<OrbitControlsImpl>(null)
   const { camera: threeCamera } = useThree()
@@ -956,7 +962,7 @@ function SceneContent({
 
       <SceneLights lights={scene.lights} viewMode={viewMode} />
 
-      <SceneBackground background={scene.background} viewMode={viewMode} />
+      <SceneBackground background={scene.background} viewMode={viewMode} transparent={transparentCanvas} />
 
       {/* Camera markers — hide in rendered mode */}
       {viewMode !== 'rendered' && scene.cameras.map((cam) => (
@@ -1057,7 +1063,8 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
   debugRings?: { spacing: number; width: number }
   environmentMeshUrls?: string[]
-}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef, debugRings, environmentMeshUrls }, ref) {
+  transparentCanvas?: boolean
+}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef, debugRings, environmentMeshUrls, transparentCanvas }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
@@ -1094,10 +1101,10 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     <div className="relative h-full w-full" onClick={(e) => { if (e.target === e.currentTarget) onDeselectAll() }}>
       <Canvas
         ref={canvasRef}
-        gl={{ preserveDrawingBuffer: true, antialias: true }}
+        gl={{ preserveDrawingBuffer: true, antialias: true, alpha: true }}
         camera={{ position: initialPos, fov: initialFov, near: 0.1, far: 1000 }}
         shadows
-        style={{ background: viewMode === 'rendered' ? '#000000' : '#1a1a1a' }}
+        style={{ background: transparentCanvas ? 'transparent' : viewMode === 'rendered' ? '#000000' : '#1a1a1a' }}
         onPointerMissed={() => onDeselectAll()}
       >
         <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
@@ -1119,6 +1126,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           setCameraOrbitRef={setCameraOrbitRef}
           debugRings={debugRings}
           environmentMeshUrls={environmentMeshUrls}
+          transparentCanvas={transparentCanvas}
         />
       </Canvas>
     </div>

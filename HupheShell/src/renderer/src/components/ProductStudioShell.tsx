@@ -101,6 +101,10 @@ const POLICY_HINTS: Record<PreservationPolicy, string> = {
 
 type ProductStudioApi = {
   createProject: (args: { name: string; outputAspectRatio?: string; productName?: string; productCategory?: string; knownDimensionMm?: number; brandName?: string; notes?: string }) => Promise<any>
+  getProject: (id: string) => Promise<any>
+  listProjects: () => Promise<any>
+  renameProject: (args: { projectId: string; name: string }) => Promise<any>
+  deleteProject: (args: { projectId: string }) => Promise<any>
   updateProject: (id: string, updates: Record<string, unknown>) => Promise<any>
   uploadSource: (args: { projectId: string; fileBuffer: ArrayBuffer; fileName: string; mimeType: string }) => Promise<any>
   normalizeInput: (args: { projectId: string; sourceAssetId: string }) => Promise<any>
@@ -131,6 +135,31 @@ type ProductStudioApi = {
   cleanupStorage: (projectId: string) => Promise<any>
   getProviderStats: (projectId: string) => Promise<any>
   downloadPng: (args: { imageUrl: string; suggestedName?: string }) => Promise<any>
+  buildSeedMesh: (args: {
+    projectId: string
+    frontPhotoUrl: string
+    depthKnownDataUrl: string
+    maskHoleDataUrl: string
+    manifest: {
+      camera: { near: number; far: number; projectionMatrix: number[]; viewMatrix: number[] }
+      viewport: { width: number; height: number; fovScale?: number }
+    }
+  }) => Promise<any>
+  clearBakeCache: (args: { projectId: string }) => Promise<any>
+  bakeKeyframe: (args: {
+    projectId: string
+    keyframeIndex: number
+    rgbPartialDataUrl: string
+    maskHoleDataUrl: string
+    depthKnownDataUrl: string
+    manifest: {
+      camera: { near: number; far: number; projectionMatrix: number[]; viewMatrix: number[] }
+      viewport: { width: number; height: number; fovScale?: number }
+      prompt?: string
+    }
+  }) => Promise<any>
+  finalizeBake: (args: { projectId: string }) => Promise<any>
+  testOrbitSplat: (args: { projectId: string; imageUrl: string; arcDegrees?: number }) => Promise<any>
 }
 
 function getProductStudioApi(): ProductStudioApi | null {
@@ -516,15 +545,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [compareSlider, setCompareSlider] = useState(50)
   const [renderPacketStale, setRenderPacketStale] = useState(false)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
-  const [rightTab, setRightTab] = useState<'properties' | 'editor' | 'studio' | 'archive'>('studio')
+  const [rightTab, setRightTab] = useState<'properties' | 'editor' | 'studio' | 'archive' | 'projects'>('studio')
+  const [allProjects, setAllProjects] = useState<any[]>([])
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
   const [archivePreviewIndex, setArchivePreviewIndex] = useState<number | null>(null)
   const [aiDepthUrl, setAiDepthUrl] = useState<string | null>(null)
   const [envMeshUrls, setEnvMeshUrls] = useState<string[]>([])
   const [envViewUrls, setEnvViewUrls] = useState<string[]>([])
+  const [envPanoramaUrl, setEnvPanoramaUrl] = useState<string | null>(null)
   const [envMappingEnabled, setEnvMappingEnabled] = useState(false)
+  const [bakeProgress, setBakeProgress] = useState<{ phase: 'idle' | 'baking' | 'done' | 'error'; currentFrame: number; totalFrames: number; error?: string }>({ phase: 'idle', currentFrame: 0, totalFrames: 12 })
+  const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; colmap?: { registered: number; total: number; pct: number; pass: boolean }; videoUrl?: string; error?: string }>({ phase: 'idle', step: '' })
   const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number; fovScale?: number } | null>(null)
+  // Per-version local cache: model transform per archive photo (session only)
+  const archiveTransformCache = useRef<Record<string, { position: [number,number,number]; rotation: [number,number,number]; scale: [number,number,number] }>>({})
+  const activeArchiveVersionId = useRef<string | null>(null)
   const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
-  const [viewportOverlay, setViewportOverlay] = useState<'calibration' | 'light' | 'productLayer' | 'composite' | '__depth' | null>(null)
+  const [viewportOverlay, setViewportOverlay] = useState<'calibration' | 'light' | 'productLayer' | 'composite' | 'bgComposite' | '__depth' | null>(null)
   const [debugRings, setDebugRings] = useState<{ spacing: number; width: number } | undefined>({ spacing: 0.04, width: 0.002 })
   const [viewMode, setViewMode] = useState<'wireframe' | 'solid' | 'material' | 'rendered'>('material')
   const textureDeletedRef = useRef(false)
@@ -598,6 +636,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     ['Composite', finalCompositeUrl ?? project.finalRender?.src],
     ['Background', backgroundPlateUrl],
     ...(shadowLayerUrl ? [['Shadow', shadowLayerUrl] as [string, string | null | undefined]] : []),
+    ...(envPanoramaUrl ? [['Panorama 360°', envPanoramaUrl] as [string, string | null | undefined]] : []),
     ...envViewUrls.map((url, i) => [['Front', 'Rechts', 'Achter', 'Links', 'Boven'][i], url] as [string, string | null | undefined]),
   ]
   const availableLightboxPreviews = finalLayerPreviews
@@ -690,6 +729,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const file = new File([ab], `product.${ext}`, { type: mimeType })
     void handleImageFile(file)
   }, [])
+
+  // Heropen een specifiek project via de projectkiezer
+  useEffect(() => {
+    let resumeId: string | null = null
+    try {
+      resumeId = sessionStorage.getItem('huphe:resume-project-id')
+      if (resumeId) sessionStorage.removeItem('huphe:resume-project-id')
+    } catch { /* ignore */ }
+    if (!resumeId) return
+    setProject((prev) => ({ ...prev, backendProject: { id: resumeId } as any }))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(project)) } catch { /* ignore */ }
@@ -1253,6 +1303,179 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setFinalError(null)
   }
 
+  async function runOrbitTest() {
+    const api = getProductStudioApi()
+    if (!api || !project.backendProject) return
+    const imageUrl = backgroundPlateUrl ?? project.sourceImage?.src
+    if (!imageUrl) {
+      setOrbitTest({ phase: 'error', step: '', error: 'Geen achtergrond foto geselecteerd.' })
+      return
+    }
+    setOrbitTest({ phase: 'running', step: 'Video genereren via Seedance 2.0...' })
+    try {
+      setOrbitTest({ phase: 'running', step: 'Video genereren via Seedance 2.0...' })
+      const result = await api.testOrbitSplat({ projectId: project.backendProject.id, imageUrl, arcDegrees: 120 })
+      if (!result.ok) {
+        setOrbitTest({ phase: 'error', step: '', error: result.error ?? 'Onbekende fout.' })
+        return
+      }
+      setOrbitTest({ phase: 'done', step: '', colmap: result.colmap, videoUrl: result.videoUrl })
+    } catch (err: any) {
+      setOrbitTest({ phase: 'error', step: '', error: err?.message ?? 'Orbit test mislukt.' })
+    }
+  }
+
+  async function startBakeMode() {
+    if (!project.backendProject?.id) return
+    const api = getProductStudioApi()
+    if (!api) return
+
+    const projectId = project.backendProject.id
+    const frontPhotoUrl = backgroundPlateUrl ?? project.sourceImage?.src
+    if (!frontPhotoUrl) {
+      setBakeProgress({ phase: 'error', currentFrame: 0, totalFrames: 0, error: 'Geen achtergrond foto gevonden.' })
+      return
+    }
+
+    const orbitState = studioRef.current?.getSceneControls()?.getOrbitState()
+    const target: [number, number, number] = orbitState?.target ?? [0, 0.5, 0]
+    const camPos = orbitState?.position ?? [0, 2, 4]
+    const dist = Math.sqrt(
+      (camPos[0] - target[0]) ** 2 +
+      (camPos[1] - target[1]) ** 2 +
+      (camPos[2] - target[2]) ** 2,
+    )
+
+    // Probe bake: klein en snel debuggen voordat we de volledige ronde draaien.
+    const BAKE_PROBE_FRAME_LIMIT = 6
+    // Spiraal-poses: klein van stap, elke pose grenst aan gebouwde geometrie
+    const spiralPoses = computeSpiralPoses(target, dist).slice(0, BAKE_PROBE_FRAME_LIMIT)
+    const TOTAL = spiralPoses.length
+    const sceneDescription = project.finalRenderRecord?.prompt?.trim()
+    const prompt = [
+      sceneDescription ? `Scene description: ${sceneDescription}` : 'Scene description: the same existing product photography environment.',
+      '',
+      'Inpaint only the masked missing area.',
+      'Continue the existing scene exactly.',
+      'Match the surrounding perspective, lighting, materials, colors and texture.',
+      'Do not change any unmasked pixels.',
+      'Do not add new objects, people, products, text or focal elements.',
+      'Fill the hole as a seamless natural continuation of the current environment.',
+      'Photorealistic.',
+    ].join('\n')
+
+    setBakeProgress({ phase: 'baking', currentFrame: 0, totalFrames: TOTAL })
+    try {
+      await api.clearBakeCache({ projectId })
+
+      // Fase 0: Front-frame capturen voor seed mesh
+      const frontFrame = await studioRef.current?.captureKeyframe(camPos, target)
+      if (!frontFrame) throw new Error('Front frame capture mislukt.')
+
+      const seedResult = await api.buildSeedMesh({
+        projectId,
+        frontPhotoUrl,
+        depthKnownDataUrl: frontFrame.depthKnown,
+        maskHoleDataUrl: frontFrame.maskHole,
+        manifest: {
+          camera: {
+            near: frontFrame.manifest.camera.near,
+            far: frontFrame.manifest.camera.far,
+            projectionMatrix: frontFrame.manifest.camera.projectionMatrix,
+            viewMatrix: frontFrame.manifest.camera.viewMatrix,
+          },
+          viewport: {
+            width: frontFrame.manifest.viewport.width,
+            height: frontFrame.manifest.viewport.height,
+            fovScale: frontFrame.manifest.viewport.fovScale,
+          },
+        },
+      })
+      if (!seedResult?.ok) throw new Error(seedResult?.error ?? 'Seed mesh bouwen mislukt.')
+
+      // Seed mesh in viewport laden — volgende captures zien de achtergrond
+      setEnvMeshUrls([seedResult.seedMeshUrl])
+      setEnvMappingEnabled(true)
+      await sleep(1500)
+
+      // Spiraal-loop
+      for (let i = 0; i < spiralPoses.length; i++) {
+        setBakeProgress({ phase: 'baking', currentFrame: i + 1, totalFrames: TOTAL })
+
+        const frame = await studioRef.current?.captureKeyframe(spiralPoses[i].position, spiralPoses[i].target)
+        if (!frame) throw new Error(`Frame ${i} capture mislukt.`)
+
+        const result = await api.bakeKeyframe({
+          projectId,
+          keyframeIndex: i,
+          rgbPartialDataUrl: frame.rgbPartial,
+          maskHoleDataUrl: frame.maskHole,
+          depthKnownDataUrl: frame.depthKnown,
+          manifest: {
+            camera: {
+              near: frame.manifest.camera.near,
+              far: frame.manifest.camera.far,
+              projectionMatrix: frame.manifest.camera.projectionMatrix,
+              viewMatrix: frame.manifest.camera.viewMatrix,
+            },
+            viewport: {
+              width: frame.manifest.viewport.width,
+              height: frame.manifest.viewport.height,
+              fovScale: frame.manifest.viewport.fovScale,
+            },
+            prompt,
+          },
+        })
+        if (!result?.ok) throw new Error(result?.error ?? `Frame ${i} bake mislukt.`)
+
+        // Geaccumuleerde mesh terugvoeren in renderer vóór volgende capture
+        if (result.accumulatedMeshUrl) {
+          setEnvMeshUrls([result.accumulatedMeshUrl])
+          await sleep(800)
+        }
+      }
+
+      // Finalize: sla op als permanente env mesh
+      const finalResult = await api.finalizeBake({ projectId })
+      if (!finalResult?.ok) throw new Error(finalResult?.error ?? 'Bake finaliseren mislukt.')
+
+      setEnvMeshUrls([finalResult.meshUrl])
+      setBakeProgress({ phase: 'done', currentFrame: TOTAL, totalFrames: TOTAL })
+    } catch (err: any) {
+      setBakeProgress({ phase: 'error', currentFrame: 0, totalFrames: TOTAL, error: err.message })
+    } finally {
+      if (orbitState) studioRef.current?.setCameraOrbit(orbitState.position, orbitState.target)
+    }
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms))
+  }
+
+  function computeSpiralPoses(
+    center: [number, number, number],
+    distance: number,
+    topElevationDeg = 25,
+  ): Array<{ position: [number, number, number]; target: [number, number, number] }> {
+    function poseAt(elDeg: number, azDeg: number): { position: [number, number, number]; target: [number, number, number] } {
+      const elRad = (elDeg * Math.PI) / 180
+      const azRad = (azDeg * Math.PI) / 180
+      return {
+        position: [
+          center[0] + distance * Math.cos(elRad) * Math.sin(azRad),
+          center[1] + distance * Math.sin(elRad),
+          center[2] + distance * Math.cos(elRad) * Math.cos(azRad),
+        ],
+        target: center,
+      }
+    }
+    const poses: Array<{ position: [number, number, number]; target: [number, number, number] }> = []
+    for (let az = 15; az <= 165; az += 15) poses.push(poseAt(0, az))
+    for (let az = -15; az >= -165; az -= 15) poses.push(poseAt(0, az))
+    for (const az of [0, 60, -60, 120, -120]) poses.push(poseAt(topElevationDeg, az))
+    return poses
+  }
+
   async function captureRenderPacket(promptOverride?: string) {
     const packet = await studioRef.current?.captureRenderPacketPreview()
     if (!packet?.beauty && !packet?.passes) {
@@ -1435,6 +1658,21 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const api = getProductStudioApi()
     if (!api || !(api as any).restoreRenderState) return
 
+    // Sla huidige model-transform op vóór we wisselen
+    const prevId = activeArchiveVersionId.current
+    if (prevId) {
+      const controls = studioRef.current?.getSceneControls()
+      const productObj = controls?.scene.objects.find((o) => o.type === 'gltf')
+      if (productObj) {
+        archiveTransformCache.current[prevId] = {
+          position: productObj.position,
+          rotation: productObj.rotation,
+          scale: productObj.scale,
+        }
+      }
+    }
+    activeArchiveVersionId.current = version.id
+
     try {
       const result = await (api as any).restoreRenderState({ renderPacketId: version.render_packet_id })
       if (!result?.ok) return
@@ -1448,8 +1686,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         studioRef.current?.setCameraOrbit(manifest.camera.position, manifest.camera.target)
       }
 
-      // Restore product transform
-      if (scene?.product_transform && studioRef.current) {
+      // Restore model transform: eerst uit lokale cache, dan uit database
+      const cached = archiveTransformCache.current[version.id]
+      if (cached && studioRef.current) {
+        const controls = studioRef.current.getSceneControls()
+        const productObj = controls?.scene.objects.find((o) => o.type === 'gltf')
+        if (controls && productObj) {
+          controls.onObjectTransformed(productObj.id, cached.position, cached.rotation, cached.scale)
+        }
+      } else if (scene?.product_transform && studioRef.current) {
         const controls = studioRef.current.getSceneControls()
         if (controls) {
           const productObj = controls.scene.objects.find((o) => o.type === 'gltf')
@@ -1498,11 +1743,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           const envApi = getProductStudioApi()
           if (envApi && (envApi as any).getEnvViews) {
             ;(envApi as any).getEnvViews({ projectId: project.backendProject.id, backgroundPlateUrl: bgUrl })
-              .then((r: any) => { if (r?.ok && r.viewUrls) setEnvViewUrls(r.viewUrls) })
+              .then((r: any) => {
+                if (r?.ok && r.viewUrls) setEnvViewUrls(r.viewUrls)
+                if (r?.panoramaUrl) setEnvPanoramaUrl(r.panoramaUrl)
+              })
           }
         }
       } else {
         setEnvViewUrls([])
+        setEnvPanoramaUrl(null)
       }
 
       // Trigger depth extraction for env mesh
@@ -2114,12 +2363,22 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             )}
           </section>
 
-          {envViewUrls.length > 0 && (
+          {(envViewUrls.length > 0 || envPanoramaUrl) && (
             <section className="mt-6">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-white/85">Multiview omgeving</h3>
                 <span className="text-xs text-white/32">{envViewUrls.length}/5 aanzichten</span>
               </div>
+              {envPanoramaUrl && (
+                <div className="mt-3 overflow-hidden rounded-lg border border-white/[0.06] bg-black/30 transition-colors hover:border-white/[0.15]">
+                  <button type="button" onClick={() => openLightbox('Panorama 360°', envPanoramaUrl)} className="w-full">
+                    <img src={envPanoramaUrl} alt="Panorama 360°" className="w-full object-cover" style={{ aspectRatio: '4/1' }} />
+                  </button>
+                  <div className="bg-gradient-to-t from-black/70 to-transparent px-2 py-1.5">
+                    <span className="text-[10px] font-medium text-white/60">Panorama 360°</span>
+                  </div>
+                </div>
+              )}
               <div className="mt-3 grid grid-cols-2 gap-3">
                 {envViewUrls.map((url, i) => {
                   const label = ['Front', 'Rechts', 'Achter', 'Links', 'Boven'][i]
@@ -2144,6 +2403,81 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               </div>
             </section>
           )}
+
+          <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Omgeving opbouwen</p>
+                <p className="mt-1 text-xs text-white/36">Bouwt de omgeving op via 27 spiraal-poses (seed → rechts → links → bovenaanzicht). Duurt 2-5 minuten.</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {(bakeProgress.phase === 'done' || bakeProgress.phase === 'error') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const api = getProductStudioApi()
+                      if (!api || !project.backendProject) return
+                      void api.clearBakeCache({ projectId: project.backendProject.id }).then(() => {
+                        setBakeProgress({ phase: 'idle', currentFrame: 0, totalFrames: 12 })
+                      })
+                    }}
+                    className="rounded-full border border-white/[0.08] px-2.5 py-1.5 text-xs font-medium text-white/40 hover:bg-white/[0.06] hover:text-white/60"
+                  >
+                    Wis cache
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void startBakeMode()}
+                  disabled={bakeProgress.phase === 'baking' || !project.backendProject}
+                  className="rounded-full border border-[#818cf8]/25 px-3 py-1.5 text-xs font-medium text-[#818cf8] hover:bg-[#818cf8]/10 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:text-white/24"
+                >
+                  {bakeProgress.phase === 'baking'
+                    ? `Bezig (${bakeProgress.currentFrame}/${bakeProgress.totalFrames})`
+                    : bakeProgress.phase === 'done'
+                      ? 'Opnieuw opbouwen'
+                      : 'Opbouwen'}
+                </button>
+              </div>
+            </div>
+            {bakeProgress.phase === 'error' && (
+              <p className="mt-2 rounded-md border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-200">{bakeProgress.error}</p>
+            )}
+            {bakeProgress.phase === 'done' && (
+              <p className="mt-2 rounded-md border border-[#818cf8]/15 bg-[#818cf8]/8 px-2 py-1.5 text-[10px] text-[#818cf8]">Environment mesh gebakken en geladen in de 3D viewport.</p>
+            )}
+          </section>
+
+          <section className="mt-4 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Orbit splat test</p>
+                <p className="mt-1 text-xs text-white/36">Genereert een orbit-video van de achtergrond en test of COLMAP de frames kan reconstrueren. Diagnose: ≥80% = bruikbaar voor splat-training.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void runOrbitTest()}
+                disabled={orbitTest.phase === 'running' || !project.backendProject || (!backgroundPlateUrl && !project.sourceImage?.src)}
+                className="shrink-0 rounded-full border border-emerald-400/25 px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-400/10 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:text-white/24"
+              >
+                {orbitTest.phase === 'running' ? 'Bezig...' : orbitTest.phase === 'done' ? 'Opnieuw' : 'Starten'}
+              </button>
+            </div>
+            {orbitTest.phase === 'running' && (
+              <p className="mt-2 text-[10px] text-white/40">{orbitTest.step}</p>
+            )}
+            {orbitTest.phase === 'error' && (
+              <p className="mt-2 rounded-md border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-200">{orbitTest.error}</p>
+            )}
+            {orbitTest.phase === 'done' && orbitTest.colmap && (
+              <div className={`mt-2 rounded-md border px-2 py-1.5 text-[10px] ${orbitTest.colmap.pass ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200' : 'border-red-400/20 bg-red-500/10 text-red-200'}`}>
+                {orbitTest.colmap.pass ? '✓ Geslaagd' : '✗ Gezakt'} — COLMAP: {orbitTest.colmap.registered}/{orbitTest.colmap.total} frames ({orbitTest.colmap.pct}%)
+                {orbitTest.colmap.pass
+                  ? ' — Video is geometrisch consistent. Splat training mogelijk.'
+                  : ' — Video te inconsistent. Ander videomodel of meer camera-sturing nodig.'}
+              </div>
+            )}
+          </section>
 
           <section className="mt-6 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
             <div className="flex items-center justify-between gap-3">
@@ -2540,14 +2874,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     </>
   )
 
-  const overlayPasses: { key: 'calibration' | 'light' | 'productLayer' | 'composite'; label: string; src: string | undefined; icon: string }[] = [
+  const overlayPasses: { key: 'calibration' | 'light' | 'productLayer' | 'composite' | 'bgComposite'; label: string; src: string | undefined; icon: string }[] = [
     { key: 'calibration', label: 'Calibration', src: calibrationPreviewUrl, icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z' },
     { key: 'light', label: 'Light map', src: lightMapPreviewUrl, icon: 'M12 2L2 7l10 5 10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
     { key: 'productLayer', label: 'Product layer', src: productLayerUrl, icon: 'M12 2a10 10 0 100 20 10 10 0 000-20zM12 8v8M8 12h8' },
     { key: 'composite', label: 'Composite', src: finalCompositeUrl ?? project.finalRender?.src, icon: 'M4 4h16v16H4zM9 9h6v6H9z' },
+    { key: 'bgComposite', label: 'Background + product', src: backgroundPlateUrl, icon: 'M4 4h16v16H4zM12 2v4M12 18v4M2 12h4M18 12h4' },
   ]
   const activeOverlaySrc = viewportOverlay === '__depth'
     ? (aiDepthUrl ?? depthPreviewUrl)
+    : viewportOverlay === 'bgComposite'
+    ? undefined  // handled separately as layered composite
     : viewportOverlay ? overlayPasses.find((p) => p.key === viewportOverlay)?.src : undefined
 
   const viewportContent = (
@@ -2573,7 +2910,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           setSceneControls(studioRef.current?.getSceneControls() ?? null)
         }}
         hideProperties
-        overlayImageSrc={activeOverlaySrc}
+        overlayImageSrc={viewportOverlay === 'bgComposite' ? undefined : activeOverlaySrc}
+        productOverlaySrc={undefined}
+        productOverlayBlend="normal"
+        backgroundPlateSrc={viewportOverlay === 'bgComposite' ? backgroundPlateUrl : undefined}
+        transparentCanvas={viewportOverlay === 'bgComposite'}
         debugRings={debugRings}
         viewMode={viewMode}
         environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
@@ -2596,8 +2937,44 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   }
                 }}
                 mode={promptBarMode}
-                onToggleLock={() => {
+                onToggleLock={async () => {
                   const willLock = !backgroundLocked
+
+                  // Confirm before unlocking — this deletes the panorama and env views
+                  if (!willLock && backgroundLocked) {
+                    const confirmed = window.confirm(
+                      'Weet je zeker dat je de achtergrond wilt ontgrendelen? De panorama en alle omgevingsaanzichten worden verwijderd.'
+                    )
+                    if (!confirmed) return
+                    // Delete env view files
+                    const api = getProductStudioApi()
+                    if (api && project.finalRenderRecord?.background_plate_url && project.backendProject) {
+                      ;(api as any).deleteEnvViews?.({
+                        projectId: project.backendProject.id,
+                        backgroundPlateUrl: project.finalRenderRecord.background_plate_url as string,
+                      })
+                      // Clear env metadata on the version
+                      if (project.finalRenderRecord) {
+                        const versionId = project.finalRenderRecord.id
+                        const cleanMeta = { ...(project.finalRenderRecord.layer_metadata ?? {}) } as Record<string, unknown>
+                        delete cleanMeta.env_mesh_url
+                        delete cleanMeta.env_views_ready
+                        delete cleanMeta.env_source_background
+                        setProject((prev) => ({
+                          ...prev,
+                          finalRenderRecord: prev.finalRenderRecord ? { ...prev.finalRenderRecord, layer_metadata: cleanMeta } : prev.finalRenderRecord,
+                        }))
+                        setFinalRenderVersions((prev) => prev.map((v) => v.id === versionId ? { ...v, layer_metadata: cleanMeta } : v))
+                        ;(api as any).updateFinalRenderMetadata?.({ versionId, layerMetadata: cleanMeta })
+                      }
+                    }
+                    setEnvViewUrls([])
+                    setEnvPanoramaUrl(null)
+                    setEnvMeshUrls([])
+                    setBackgroundLocked(false)
+                    return
+                  }
+
                   setBackgroundLocked(willLock)
                   if (willLock && project.finalRenderRecord?.background_plate_url && project.backendProject) {
                     const bgUrl = project.finalRenderRecord.background_plate_url as string
@@ -2610,6 +2987,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                           if (result?.ok && result.meshUrl) {
                             setEnvMeshUrls((prev) => [...prev, result.meshUrl])
                             if (result.viewUrls) setEnvViewUrls(result.viewUrls)
+                            if (result.panoramaUrl) setEnvPanoramaUrl(result.panoramaUrl)
                             console.log('[env-reconstruct] Multi-view mesh ready:', result.meshUrl)
                             // Persist env mesh info on the source version
                             if (project.finalRenderRecord) {
@@ -2642,7 +3020,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             </p>
           )}
           <div className="group pointer-events-auto absolute right-4 top-4 flex items-center justify-end gap-2">
-          <div className="flex max-w-0 translate-x-2 items-center gap-1 overflow-hidden rounded-full border border-white/[0.10] bg-black/70 p-1 opacity-0 shadow-2xl backdrop-blur-xl transition-all duration-200 group-hover:max-w-[720px] group-hover:translate-x-0 group-hover:opacity-100">
+          <div className="pointer-events-none flex translate-x-2 items-center gap-1 rounded-full border border-white/[0.10] bg-black/70 p-1 opacity-0 shadow-2xl backdrop-blur-xl transition-all duration-200 group-hover:pointer-events-auto group-hover:translate-x-0 group-hover:opacity-100">
             {([
               { mode: 'rings' as const, label: 'Rings', icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z' },
               { mode: 'solid' as const, label: 'Solid', icon: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
@@ -2671,7 +3049,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   }
                 }}
                 className={[
-                  'group relative flex h-8 w-8 items-center justify-center rounded-full transition-colors',
+                  'group/btn relative flex h-8 w-8 items-center justify-center rounded-full transition-colors',
                   active
                     ? 'bg-white/20 text-white'
                     : 'text-white/50 hover:bg-white/10 hover:text-white/80',
@@ -2680,7 +3058,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d={v.icon} />
                 </svg>
-                <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+                <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-full border border-white/[0.12] bg-white px-2.5 py-1 text-[10px] font-semibold text-black opacity-0 shadow-lg transition-opacity duration-150 group-hover/btn:opacity-100 whitespace-nowrap">
                   {v.label}
                 </div>
               </button>
@@ -2691,7 +3069,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               type="button"
               onClick={() => setEnvMappingEnabled((v) => !v)}
               className={[
-                'group relative flex h-8 items-center gap-1 rounded-full px-2 transition-colors',
+                'group/btn relative flex h-8 items-center gap-1 rounded-full px-2 transition-colors',
                 envMappingEnabled
                   ? 'bg-[#facc15]/20 text-[#facc15]'
                   : 'text-white/50 hover:bg-white/10 hover:text-white/80',
@@ -2702,7 +3080,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <circle cx="12" cy="10" r="3" />
               </svg>
               <span className="text-[10px] font-semibold">Env</span>
-              <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+              <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-full border border-white/[0.12] bg-white px-2.5 py-1 text-[10px] font-semibold text-black opacity-0 shadow-lg transition-opacity duration-150 group-hover/btn:opacity-100 whitespace-nowrap">
                 {envMappingEnabled ? 'Environment mapping aan' : 'Environment mapping uit'}
                 {envMeshUrls.length > 0 && ` (${envMeshUrls.length} meshes)`}
               </div>
@@ -2715,7 +3093,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 disabled={!pass.src}
                 onClick={() => setViewportOverlay((prev) => prev === pass.key ? null : pass.key)}
                 className={[
-                  'group relative flex h-8 w-8 items-center justify-center rounded-full transition-colors',
+                  'group/btn relative flex h-8 w-8 items-center justify-center rounded-full transition-colors',
                   !pass.src
                     ? 'cursor-not-allowed text-white/15'
                     : viewportOverlay === pass.key
@@ -2726,7 +3104,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d={pass.icon} />
                 </svg>
-                <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-lg border border-white/[0.08] bg-[#1c1c1c] px-2 py-1 text-[10px] font-semibold text-white/85 opacity-0 shadow-xl transition-opacity group-hover:opacity-100 whitespace-nowrap">
+                <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-full border border-white/[0.12] bg-white px-2.5 py-1 text-[10px] font-semibold text-black opacity-0 shadow-lg transition-opacity duration-150 group-hover/btn:opacity-100 whitespace-nowrap">
                   {pass.label}
                 </div>
               </button>
@@ -2752,19 +3130,27 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const rightPanelContent = (
     <>
       <div className="flex shrink-0 border-b border-white/[0.08]">
-        {(['properties', 'editor', 'studio', 'archive'] as const).map((tab) => (
+        {(['properties', 'editor', 'studio', 'archive', 'projects'] as const).map((tab) => (
           <button
             key={tab}
             type="button"
-            onClick={() => setRightTab(tab)}
+            onClick={() => {
+              setRightTab(tab)
+              if (tab === 'projects') {
+                const api = getProductStudioApi()
+                if (api?.listProjects) {
+                  void api.listProjects().then((r: any) => { if (r?.projects) setAllProjects(r.projects) })
+                }
+              }
+            }}
             className={[
-              'flex-1 py-3 text-center text-sm font-semibold transition-colors',
+              'flex-1 py-2.5 text-center text-xs font-semibold transition-colors',
               rightTab === tab
                 ? 'border-b-2 border-[#facc15] text-white'
                 : 'text-white/40 hover:text-white/70',
             ].join(' ')}
           >
-            {tab === 'properties' ? 'Properties' : tab === 'editor' ? 'Editor' : tab === 'archive' ? 'Archive' : 'Studio'}
+            {tab === 'properties' ? 'Properties' : tab === 'editor' ? 'Editor' : tab === 'archive' ? 'Archive' : tab === 'projects' ? 'Projects' : 'Studio'}
           </button>
         ))}
       </div>
@@ -2890,6 +3276,97 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           <div className="absolute bottom-6 text-center text-sm text-white/50">
             {archivePreviewIndex + 1} / {finalRenderVersions.length}
           </div>
+        </div>
+      )}
+
+      {rightTab === 'projects' && (
+        <div className="p-3">
+          {allProjects.length === 0 ? (
+            <div className="flex h-32 items-center justify-center text-sm text-white/30">
+              Geen projecten gevonden
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {allProjects.map((p) => (
+                <div
+                  key={p.id}
+                  className={`group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 transition-colors ${p.id === project.backendProject?.id ? 'border-[#facc15]/25 bg-[#facc15]/5' : 'border-white/[0.06] hover:border-white/[0.12] hover:bg-white/[0.03]'}`}
+                >
+                  {p.source_image_url ? (
+                    <img src={p.source_image_url} alt="" className="h-10 w-10 shrink-0 rounded-lg object-cover" />
+                  ) : (
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white/[0.05]">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-white/25"><path d="M12 3l9 5v8l-9 5-9-5V8z"/></svg>
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    {renamingProjectId === p.id ? (
+                      <input
+                        autoFocus
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            const api = getProductStudioApi()
+                            if (api?.renameProject && renameValue.trim()) {
+                              void api.renameProject({ projectId: p.id, name: renameValue.trim() }).then(() => {
+                                setAllProjects((prev) => prev.map((x) => x.id === p.id ? { ...x, name: renameValue.trim(), product_name: renameValue.trim() } : x))
+                              })
+                            }
+                            setRenamingProjectId(null)
+                          }
+                          if (e.key === 'Escape') setRenamingProjectId(null)
+                        }}
+                        onBlur={() => setRenamingProjectId(null)}
+                        className="w-full rounded bg-white/[0.08] px-1.5 py-0.5 text-sm text-white outline-none ring-1 ring-[#facc15]/40"
+                      />
+                    ) : (
+                      <p className="truncate text-sm font-medium text-white/80">{p.product_name || p.name || 'Naamloos'}</p>
+                    )}
+                    <p className="mt-0.5 text-[10px] text-white/30">{new Date(p.updated_at).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', year: 'numeric' })}</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      title="Hernoem"
+                      onClick={() => { setRenamingProjectId(p.id); setRenameValue(p.product_name || p.name || '') }}
+                      className="rounded-lg p-1.5 text-white/25 opacity-0 transition-opacity hover:text-white/60 group-hover:opacity-100"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                    <button
+                      type="button"
+                      title="Verwijder project"
+                      onClick={() => {
+                        if (!confirm(`Project "${p.product_name || p.name || 'Naamloos'}" verwijderen?`)) return
+                        const api = getProductStudioApi()
+                        if (!api?.deleteProject) return
+                        void api.deleteProject({ projectId: p.id }).then(() => {
+                          setAllProjects((prev) => prev.filter((x) => x.id !== p.id))
+                        })
+                      }}
+                      className="rounded-lg p-1.5 text-white/25 opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
+                    </button>
+                    {p.id !== project.backendProject?.id && (
+                      <button
+                        type="button"
+                        title="Open project"
+                        onClick={() => {
+                          try { sessionStorage.setItem('huphe:resume-project-id', p.id) } catch { /* ignore */ }
+                          setProject((prev) => ({ ...prev, backendProject: { id: p.id } as any }))
+                        }}
+                        className="rounded-lg p-1.5 text-white/25 opacity-0 transition-opacity hover:text-white/60 group-hover:opacity-100"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </>

@@ -11,7 +11,9 @@ INSERT INTO ai_models (provider, model_id, input_cost_per_1k, output_cost_per_1k
 
 -- Fal.ai image models
 ('fal', 'fal-ai/flux-pro/v1/fill', NULL, NULL, 4600, 25),     -- approx $0.05 per generation
-('fal', 'fal-ai/flux/dev', NULL, NULL, 2760, 25)              -- approx $0.03 per generation
+('fal', 'fal-ai/flux/dev', NULL, NULL, 2760, 25),             -- approx $0.03 per generation
+('fal', 'fal-ai/flux-lora/inpainting', NULL, NULL, 2760, 25), -- outpainting for env reconstruction
+('fal', 'fal-ai/flux-lora/image-to-image', NULL, NULL, 2760, 25) -- img2img for top-down view
 ON CONFLICT (provider, model_id) DO UPDATE SET
   input_cost_per_1k = EXCLUDED.input_cost_per_1k,
   output_cost_per_1k = EXCLUDED.output_cost_per_1k,

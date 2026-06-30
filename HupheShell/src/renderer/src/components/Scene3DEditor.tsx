@@ -11,8 +11,16 @@ export interface Scene3DRenderPacketPreview {
   manifest: Scene3DRenderManifest | null
 }
 
+export interface BakeKeyframeCapture {
+  rgbPartial: string
+  depthKnown: string
+  maskHole: string
+  manifest: Scene3DRenderManifest
+}
+
 export interface Scene3DEditorHandle {
   captureRenderPacketPreview: () => Promise<Scene3DRenderPacketPreview>
+  captureKeyframe: (position: [number, number, number], target: [number, number, number]) => Promise<BakeKeyframeCapture | null>
   getScene: () => Scene3DState
   addModelFromUrl: (url: string, name?: string) => void
   getSceneControls: () => Scene3DSceneControls | null
@@ -60,10 +68,14 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   onSceneDirty?: () => void
   hideProperties?: boolean
   overlayImageSrc?: string | null
+  productOverlaySrc?: string | null
+  productOverlayBlend?: 'normal' | 'screen'
+  backgroundPlateSrc?: string | null
+  transparentCanvas?: boolean
   debugRings?: { spacing: number; width: number }
   viewMode?: ViewMode
   environmentMeshUrls?: string[]
-}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, debugRings, viewMode: viewModeProp, environmentMeshUrls }, ref) {
+}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls }, ref) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
@@ -160,7 +172,43 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
     })
   }
 
+  function invertMaskDataUrl(maskDataUrl: string): Promise<string> {
+    return new Promise((resolve) => {
+      const img = new Image()
+      img.onload = () => {
+        const canvas = document.createElement('canvas')
+        canvas.width = img.width
+        canvas.height = img.height
+        const ctx = canvas.getContext('2d')!
+        ctx.drawImage(img, 0, 0)
+        const imageData = ctx.getImageData(0, 0, img.width, img.height)
+        for (let i = 0; i < imageData.data.length; i += 4) {
+          imageData.data[i] = 255 - imageData.data[i]
+          imageData.data[i + 1] = 255 - imageData.data[i + 1]
+          imageData.data[i + 2] = 255 - imageData.data[i + 2]
+        }
+        ctx.putImageData(imageData, 0, 0)
+        resolve(canvas.toDataURL('image/png'))
+      }
+      img.src = maskDataUrl
+    })
+  }
+
   useImperativeHandle(ref, () => ({
+    async captureKeyframe(position, target) {
+      viewportRef.current?.setCameraOrbit(position, target)
+      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+      const passes = viewportRef.current?.captureAllPasses() ?? null
+      const manifest = viewportRef.current?.captureRenderManifest() ?? null
+      if (!passes || !manifest) return null
+      const maskHole = await invertMaskDataUrl(passes.mask)
+      return {
+        rgbPartial: passes.textured,
+        depthKnown: passes.depth,
+        maskHole,
+        manifest,
+      }
+    },
     async captureRenderPacketPreview() {
       const fovScale = showFrame ? computeFovScale() : undefined
       const manifest = viewportRef.current?.captureRenderManifest() ?? null
@@ -251,6 +299,13 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
         hasSelection={!!selectedObjectId}
       />
       <div className="relative flex-1">
+        {backgroundPlateSrc && (
+          <div className="pointer-events-none absolute inset-4 z-0 flex items-center justify-center">
+            <div className="relative w-full max-w-[min(92%,calc((100vh-180px)*16/9))]" style={{ aspectRatio: '16 / 9' }}>
+              <img src={backgroundPlateSrc} alt="" className="absolute inset-0 h-full w-full object-cover" />
+            </div>
+          </div>
+        )}
         <Scene3DViewport
           ref={viewportRef}
           scene={scene}
@@ -267,6 +322,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           orbitStateRef={orbitStateRef}
           debugRings={debugRings}
           environmentMeshUrls={environmentMeshUrls}
+          transparentCanvas={transparentCanvas}
         />
         {showFrame && (
           <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center">
@@ -277,6 +333,14 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
             >
               {overlayImageSrc && (
                 <img src={overlayImageSrc} alt="" className="absolute inset-0 h-full w-full object-cover" />
+              )}
+              {productOverlaySrc && (
+                <img
+                  src={productOverlaySrc}
+                  alt=""
+                  className="absolute inset-0 h-full w-full object-contain"
+                  style={{ mixBlendMode: productOverlayBlend }}
+                />
               )}
               <div className="absolute -top-6 left-0 rounded-full border border-white/15 bg-black/55 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white/70">
                 1920x1080

@@ -49,6 +49,8 @@ export function AtelierMediaCreationPanel({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const create3dInputRef = useRef<HTMLInputElement>(null)
   const [productStudioOpen, setProductStudioOpen] = useState(false)
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+  const [existingProjects, setExistingProjects] = useState<any[]>([])
   const promptInputRef = useRef<HTMLInputElement>(null)
   const projectCreatedRef = useRef(false)
 
@@ -570,6 +572,60 @@ export function AtelierMediaCreationPanel({
           </LeftToolTooltip>
         ))}
       </div>
+      {projectPickerOpen && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="flex w-[480px] flex-col rounded-2xl border border-white/[0.08] bg-[#141414] shadow-2xl">
+            <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
+              <p className="text-sm font-semibold text-white">3D projecten</p>
+              <button type="button" onClick={() => setProjectPickerOpen(false)} className="text-white/40 hover:text-white/70">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+            <div className="max-h-[360px] overflow-y-auto p-3">
+              {existingProjects.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => {
+                    try { sessionStorage.setItem('huphe:resume-project-id', p.id) } catch { /* ignore */ }
+                    setProjectPickerOpen(false)
+                    setProductStudioOpen(true)
+                  }}
+                  className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left hover:bg-white/[0.04]"
+                >
+                  {p.source_image_url ? (
+                    <img src={p.source_image_url} alt="" className="h-12 w-12 rounded-lg object-cover" />
+                  ) : (
+                    <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-white/[0.05]">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-white/30"><path d="M12 3l9 5v8l-9 5-9-5V8z"/></svg>
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-white/80">{p.product_name || p.name || 'Naamloos'}</p>
+                    <p className="mt-0.5 text-xs text-white/36">{new Date(p.updated_at).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', year: 'numeric' })}</p>
+                  </div>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-white/25"><path d="M9 18l6-6-6-6"/></svg>
+                </button>
+              ))}
+            </div>
+            <div className="border-t border-white/[0.06] p-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setProjectPickerOpen(false)
+                  create3dInputRef.current?.click()
+                }}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/[0.07] py-2.5 text-sm text-white/50 hover:bg-white/[0.04] hover:text-white/70"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14"/></svg>
+                Nieuw project starten
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
       {productStudioOpen ? (
         <ProductStudioShell
           renderLayout={(sidebar, viewport) => (
@@ -833,7 +889,19 @@ export function AtelierMediaCreationPanel({
                   />
                   <button
                     type="button"
-                    onClick={() => create3dInputRef.current?.click()}
+                    onClick={async () => {
+                      const api = (window as any).api?.productStudio
+                      if (api?.listProjects) {
+                        const result = await api.listProjects().catch(() => null)
+                        const projects = result?.projects ?? []
+                        if (projects.length > 0) {
+                          setExistingProjects(projects)
+                          setProjectPickerOpen(true)
+                          return
+                        }
+                      }
+                      create3dInputRef.current?.click()
+                    }}
                     className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.04] px-3 text-sm text-white/65 transition-colors hover:border-[#facc15]/25 hover:bg-[#facc15]/8 hover:text-[#facc15]"
                     aria-label="Create 3D"
                     title="Upload een productfoto en start de Product Studio"
