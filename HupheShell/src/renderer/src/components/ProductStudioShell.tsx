@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { SplatViewer } from './SplatViewer'
 import { notifyIfCreditsRequired } from '../lib/credits-required'
 import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview, type Scene3DSceneControls } from './Scene3DEditor'
+import type { SplatAlignment } from './GaussianSplatBackground'
 import Scene3DPropertiesPanel from './Scene3DPropertiesPanel'
 import Scene3DEditorInline from './Scene3DEditorInline'
 import { AtelierPromptBar, type AtelierPromptBarHandle } from './AtelierPromptBar'
@@ -159,7 +161,10 @@ type ProductStudioApi = {
     }
   }) => Promise<any>
   finalizeBake: (args: { projectId: string }) => Promise<any>
-  testOrbitSplat: (args: { projectId: string; imageUrl: string; arcDegrees?: number }) => Promise<any>
+  testOrbitSplat: (args: { projectId: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance' | 'minimax' | 'kling'; videoOnly?: boolean }) => Promise<any>
+  checkOrbitVideo: (args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling' }) => Promise<{ exists: boolean; videoUrl: string | null }>
+  loadSplat: () => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number }>
+  getSplatPose: (args: { projectId: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
 }
 
 function getProductStudioApi(): ProductStudioApi | null {
@@ -549,14 +554,86 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [allProjects, setAllProjects] = useState<any[]>([])
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [archivePreviewIndex, setArchivePreviewIndex] = useState<number | null>(null)
+  const [archivePreviewId, setArchivePreviewId] = useState<string | null>(null)
   const [aiDepthUrl, setAiDepthUrl] = useState<string | null>(null)
   const [envMeshUrls, setEnvMeshUrls] = useState<string[]>([])
   const [envViewUrls, setEnvViewUrls] = useState<string[]>([])
   const [envPanoramaUrl, setEnvPanoramaUrl] = useState<string | null>(null)
   const [envMappingEnabled, setEnvMappingEnabled] = useState(false)
   const [bakeProgress, setBakeProgress] = useState<{ phase: 'idle' | 'baking' | 'done' | 'error'; currentFrame: number; totalFrames: number; error?: string }>({ phase: 'idle', currentFrame: 0, totalFrames: 12 })
-  const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; colmap?: { registered: number; total: number; pct: number; pass: boolean }; videoUrl?: string; error?: string }>({ phase: 'idle', step: '' })
+  const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean }; videoUrl?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
+  const [orbitModel, setOrbitModel] = useState<'seedance' | 'minimax' | 'kling'>('seedance')
+  const [orbitConfirmOpen, setOrbitConfirmOpen] = useState(false)
+  const [orbitVideoExpanded, setOrbitVideoExpanded] = useState(false)
+  const [splatViewerUrl, setSplatViewerUrl] = useState<string | null>(null)
+  const [splatAlignment, setSplatAlignment] = useState<SplatAlignment | null>(null)
+  const [splatBaseAlignment, setSplatBaseAlignment] = useState<SplatAlignment | null>(null)
+
+  const nudgeSplatAlignment = (dx: number, dy: number, dz = 0) => {
+    setSplatAlignment((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        groupPositionX: (prev.groupPositionX ?? 0) + dx,
+        groupPositionY: prev.groupPositionY + dy,
+        groupPositionZ: (prev.groupPositionZ ?? 0) + dz,
+        sceneCenter: [
+          prev.sceneCenter[0] + dx,
+          prev.sceneCenter[1] + dy,
+          prev.sceneCenter[2] + dz,
+        ],
+      }
+    })
+  }
+
+  const setSplatAlignmentAxis = (axis: 'x' | 'y' | 'z', value: number) => {
+    setSplatAlignment((prev) => {
+      if (!prev) return prev
+      const currentX = prev.groupPositionX ?? 0
+      const currentY = prev.groupPositionY
+      const currentZ = prev.groupPositionZ ?? 0
+      const dx = axis === 'x' ? value - currentX : 0
+      const dy = axis === 'y' ? value - currentY : 0
+      const dz = axis === 'z' ? value - currentZ : 0
+
+      return {
+        ...prev,
+        groupPositionX: axis === 'x' ? value : currentX,
+        groupPositionY: axis === 'y' ? value : currentY,
+        groupPositionZ: axis === 'z' ? value : currentZ,
+        sceneCenter: [
+          prev.sceneCenter[0] + dx,
+          prev.sceneCenter[1] + dy,
+          prev.sceneCenter[2] + dz,
+        ],
+      }
+    })
+  }
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { step, progress } = (e as CustomEvent<{ step: string; progress: number }>).detail
+      setOrbitTest((prev) => prev.phase === 'running' ? { ...prev, step, progress } : prev)
+    }
+    window.addEventListener('product-studio:orbit-step', handler)
+    return () => window.removeEventListener('product-studio:orbit-step', handler)
+  }, [])
+
+  useEffect(() => {
+    const api = getProductStudioApi()
+    if (!api || !project.backendProject?.id) return
+    if (orbitTest.phase === 'running') return
+    api.checkOrbitVideo({ projectId: project.backendProject.id, model: orbitModel }).then((res) => {
+      if (res.exists && res.videoUrl) {
+        setOrbitTest((prev) => prev.phase === 'idle' || prev.phase === 'done'
+          ? { phase: 'done', step: '', videoUrl: res.videoUrl! }
+          : prev
+        )
+      } else {
+        setOrbitTest((prev) => prev.phase === 'done' ? { phase: 'idle', step: '' } : prev)
+      }
+    }).catch(() => {})
+  }, [orbitModel, project.backendProject?.id])
   const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number; fovScale?: number } | null>(null)
   // Per-version local cache: model transform per archive photo (session only)
   const archiveTransformCache = useRef<Record<string, { position: [number,number,number]; rotation: [number,number,number]; scale: [number,number,number] }>>({})
@@ -1303,7 +1380,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setFinalError(null)
   }
 
-  async function runOrbitTest() {
+  async function runOrbitTest(force = false) {
     const api = getProductStudioApi()
     if (!api || !project.backendProject) return
     const imageUrl = backgroundPlateUrl ?? project.sourceImage?.src
@@ -1311,17 +1388,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       setOrbitTest({ phase: 'error', step: '', error: 'Geen achtergrond foto geselecteerd.' })
       return
     }
-    setOrbitTest({ phase: 'running', step: 'Video genereren via Seedance 2.0...' })
-    try {
-      setOrbitTest({ phase: 'running', step: 'Video genereren via Seedance 2.0...' })
-      const result = await api.testOrbitSplat({ projectId: project.backendProject.id, imageUrl, arcDegrees: 120 })
-      if (!result.ok) {
-        setOrbitTest({ phase: 'error', step: '', error: result.error ?? 'Onbekende fout.' })
+    if (!force) {
+      const check = await api.checkOrbitVideo({ projectId: project.backendProject.id, model: orbitModel })
+      if (check.exists) {
+        setOrbitConfirmOpen(true)
         return
       }
-      setOrbitTest({ phase: 'done', step: '', colmap: result.colmap, videoUrl: result.videoUrl })
+    }
+    const modelLabel = orbitModel === 'minimax' ? 'MiniMax Hailuo' : orbitModel === 'kling' ? 'Kling v3' : 'Seedance 2.0'
+    setOrbitTest({ phase: 'running', step: `Video genereren via ${modelLabel}...`, progress: 2 })
+    try {
+      const result = await api.testOrbitSplat({ projectId: project.backendProject.id, imageUrl, arcDegrees: 270, force, model: orbitModel })
+      if (!result.ok) {
+        setOrbitTest({ phase: 'error', step: '', progress: 0, error: result.error ?? 'Onbekende fout.' })
+        return
+      }
+      setOrbitTest({ phase: 'done', step: '', progress: 100, colmap: result.colmap, videoUrl: result.videoUrl })
     } catch (err: any) {
-      setOrbitTest({ phase: 'error', step: '', error: err?.message ?? 'Orbit test mislukt.' })
+      setOrbitTest({ phase: 'error', step: '', progress: 0, error: err?.message ?? 'Orbit test mislukt.' })
     }
   }
 
@@ -2463,11 +2547,59 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 {orbitTest.phase === 'running' ? 'Bezig...' : orbitTest.phase === 'done' ? 'Opnieuw' : 'Starten'}
               </button>
             </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {(['seedance', 'minimax', 'kling'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setOrbitModel(m)}
+                  disabled={orbitTest.phase === 'running'}
+                  className={`rounded-full border px-2.5 py-1 text-[10px] font-medium disabled:cursor-not-allowed ${
+                    orbitModel === m
+                      ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300'
+                      : 'border-white/10 text-white/40 hover:border-white/20 hover:text-white/60'
+                  }`}
+                >
+                  {m === 'seedance' ? 'Seedance 2.0 (10s, 720p)' : m === 'minimax' ? 'MiniMax Hailuo (6s, 768p)' : 'Kling v3 (10s, 16:9)'}
+                </button>
+              ))}
+            </div>
             {orbitTest.phase === 'running' && (
-              <p className="mt-2 text-[10px] text-white/40">{orbitTest.step}</p>
+              <div className="mt-3">
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-[10px] text-white/50">{orbitTest.step}</p>
+                  <p className="text-[10px] text-white/30">{orbitTest.progress}%</p>
+                </div>
+                <div className="h-1 w-full rounded-full bg-white/[0.06]">
+                  <div
+                    className="h-1 rounded-full bg-emerald-400/70 transition-all duration-500"
+                    style={{ width: `${orbitTest.progress}%` }}
+                  />
+                </div>
+              </div>
             )}
             {orbitTest.phase === 'error' && (
               <p className="mt-2 rounded-md border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-200">{orbitTest.error}</p>
+            )}
+            {orbitTest.phase === 'done' && orbitTest.videoUrl && (
+              <div className="mt-3">
+                <div className="relative cursor-pointer group" onClick={() => setOrbitVideoExpanded(true)}>
+                  <video
+                    src={orbitTest.videoUrl}
+                    loop
+                    autoPlay
+                    muted
+                    className="w-full rounded-md border border-white/[0.07]"
+                    style={{ maxHeight: 200, pointerEvents: 'none' }}
+                  />
+                  <div className="absolute inset-0 flex items-center justify-center rounded-md bg-black/0 group-hover:bg-black/30 transition-colors">
+                    <span className="opacity-0 group-hover:opacity-100 transition-opacity rounded-full bg-black/60 px-3 py-1.5 text-[11px] font-medium text-white">Vergroot</span>
+                  </div>
+                </div>
+                {!orbitTest.colmap && (
+                  <p className="mt-1.5 text-[10px] text-amber-300/70">Video klaar, COLMAP nog niet gedraaid.</p>
+                )}
+              </div>
             )}
             {orbitTest.phase === 'done' && orbitTest.colmap && (
               <div className={`mt-2 rounded-md border px-2 py-1.5 text-[10px] ${orbitTest.colmap.pass ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200' : 'border-red-400/20 bg-red-500/10 text-red-200'}`}>
@@ -2476,6 +2608,109 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   ? ' — Video is geometrisch consistent. Splat training mogelijk.'
                   : ' — Video te inconsistent. Ander videomodel of meer camera-sturing nodig.'}
               </div>
+            )}
+            <button
+              type="button"
+              onClick={async () => {
+                const api = getProductStudioApi()
+                if (!api) return
+                const result = await api.loadSplat()
+                if (result.ok && result.splatUrl) setSplatViewerUrl(result.splatUrl)
+              }}
+              className="mt-2 w-full rounded-md border border-violet-400/25 bg-violet-500/10 py-1.5 text-[11px] font-medium text-violet-300 hover:bg-violet-500/20"
+            >
+              Gaussian Splat bekijken (.ply kiezen)
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const api = getProductStudioApi()
+                if (!api || !project.backendProject?.id) return
+                const splatResult = await api.loadSplat()
+                if (!splatResult.ok || !splatResult.splatUrl) return
+                const poseResult = await api.getSplatPose({ projectId: project.backendProject.id })
+                if (!poseResult.ok || !poseResult.pose) {
+                  console.error('[splatAlignment] pose ophalen mislukt:', poseResult.error)
+                  return
+                }
+                const localFloorY = splatResult.localFloorY ?? 0
+                const nextAlignment: SplatAlignment = {
+                  splatUrl: splatResult.splatUrl,
+                  ...poseResult.pose,
+                  groupPositionX: poseResult.pose.groupPositionX ?? 0,
+                  groupPositionY: (poseResult.pose.groupPositionY ?? 0) - localFloorY,
+                  groupPositionZ: poseResult.pose.groupPositionZ ?? 0,
+                  sceneCenter: [
+                    poseResult.pose.sceneCenter[0],
+                    poseResult.pose.sceneCenter[1] - localFloorY,
+                    poseResult.pose.sceneCenter[2],
+                  ],
+                }
+                setSplatViewerUrl(null)
+                setSplatBaseAlignment(nextAlignment)
+                setSplatAlignment(nextAlignment)
+              }}
+              className="mt-1.5 w-full rounded-md border border-sky-400/25 bg-sky-500/10 py-1.5 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20"
+            >
+              3D achtergrond uitlijnen (COLMAP)
+            </button>
+            {splatAlignment && (
+              <>
+                <div className="mt-2 rounded-md border border-white/[0.08] bg-black/20 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-[11px] font-semibold text-white/60">Achtergrond positie</p>
+                      <p className="mt-0.5 text-[10px] text-white/30">
+                        Sleep of vul exact de offset in.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => splatBaseAlignment && setSplatAlignment(splatBaseAlignment)}
+                      className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] font-medium text-white/45 hover:bg-white/[0.06] hover:text-white/70"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                  <div className="mt-3 space-y-2.5">
+                    {([
+                      { axis: 'x' as const, label: 'X', value: splatAlignment.groupPositionX ?? 0 },
+                      { axis: 'y' as const, label: 'Y', value: splatAlignment.groupPositionY },
+                      { axis: 'z' as const, label: 'Z', value: splatAlignment.groupPositionZ ?? 0 },
+                    ]).map((control) => (
+                      <div key={control.axis} className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
+                        <span className="text-[10px] font-semibold text-white/45">{control.label}</span>
+                        <input
+                          type="range"
+                          min="-3"
+                          max="3"
+                          step="0.01"
+                          value={control.value}
+                          onChange={(event) => setSplatAlignmentAxis(control.axis, Number(event.currentTarget.value))}
+                          className="h-1.5 w-full accent-[#facc15]"
+                        />
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={Number(control.value.toFixed(2))}
+                          onChange={(event) => setSplatAlignmentAxis(control.axis, Number(event.currentTarget.value || 0))}
+                          className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-[#facc15]/40"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSplatAlignment(null)
+                    setSplatBaseAlignment(null)
+                  }}
+                  className="mt-1 w-full rounded-md border border-white/10 bg-white/[0.04] py-1.5 text-[11px] font-medium text-white/40 hover:bg-white/[0.07]"
+                >
+                  Achtergrond verwijderen
+                </button>
+              </>
             )}
           </section>
 
@@ -2900,25 +3135,28 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       )}
       <ReconstructingOverlay visible={envReconstructing} label="Reconstructing environment" />
       <ReconstructingOverlay visible={finalLoading || !!busy} label={busy || 'Composing image'} />
-      <Scene3DEditor
-        ref={studioRef}
-        key={sceneStorageKey}
-        storageKey={sceneStorageKey}
-        className="h-full w-full rounded-lg"
-        onSceneDirty={() => {
-          markRenderPacketStale()
-          setSceneControls(studioRef.current?.getSceneControls() ?? null)
-        }}
-        hideProperties
-        overlayImageSrc={viewportOverlay === 'bgComposite' ? undefined : activeOverlaySrc}
-        productOverlaySrc={undefined}
-        productOverlayBlend="normal"
-        backgroundPlateSrc={viewportOverlay === 'bgComposite' ? backgroundPlateUrl : undefined}
-        transparentCanvas={viewportOverlay === 'bgComposite'}
-        debugRings={debugRings}
-        viewMode={viewMode}
-        environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
-      />
+      {!splatViewerUrl && (
+        <Scene3DEditor
+          ref={studioRef}
+          key={sceneStorageKey}
+          storageKey={sceneStorageKey}
+          className="h-full w-full rounded-lg"
+          onSceneDirty={() => {
+            markRenderPacketStale()
+            setSceneControls(studioRef.current?.getSceneControls() ?? null)
+          }}
+          hideProperties
+          overlayImageSrc={viewportOverlay === 'bgComposite' ? undefined : activeOverlaySrc}
+          productOverlaySrc={undefined}
+          productOverlayBlend="normal"
+          backgroundPlateSrc={viewportOverlay === 'bgComposite' ? backgroundPlateUrl : undefined}
+          transparentCanvas={viewportOverlay === 'bgComposite'}
+          debugRings={debugRings}
+          viewMode={viewMode}
+          environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
+          splatAlignment={splatAlignment}
+        />
+      )}
       {sourceReady && (
         <div className="pointer-events-none absolute inset-0 z-20">
           <div className="pointer-events-auto absolute bottom-8 left-1/2 flex w-[clamp(360px,40%,640px)] -translate-x-1/2 items-center gap-2">
@@ -3198,7 +3436,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   >
                     <button
                       type="button"
-                      onClick={() => setArchivePreviewIndex(finalRenderVersions.indexOf(version))}
+                      onClick={() => setArchivePreviewId(version.id)}
                       className="w-full"
                     >
                       {version.output_url ? (
@@ -3245,39 +3483,44 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           </div>
         )}
       </div>
-      {archivePreviewIndex !== null && finalRenderVersions[archivePreviewIndex] && (
-        <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 backdrop-blur-sm"
-          onClick={() => setArchivePreviewIndex(null)}
-          onKeyDown={(e) => {
-            if (e.key === 'ArrowLeft' && archivePreviewIndex > 0) setArchivePreviewIndex(archivePreviewIndex - 1)
-            if (e.key === 'ArrowRight' && archivePreviewIndex < finalRenderVersions.length - 1) setArchivePreviewIndex(archivePreviewIndex + 1)
-            if (e.key === 'Escape') setArchivePreviewIndex(null)
-          }}
-          tabIndex={0}
-          ref={(el) => el?.focus()}
-        >
-          <img
-            src={finalRenderVersions[archivePreviewIndex].output_url ?? ''}
-            alt=""
-            className="max-h-[90vh] max-w-[90vw] rounded-lg shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          />
-          {archivePreviewIndex > 0 && (
-            <button type="button" onClick={(e) => { e.stopPropagation(); setArchivePreviewIndex(archivePreviewIndex - 1) }} className="absolute left-4 rounded-full bg-black/50 p-2 text-white/70 hover:text-white">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
-            </button>
-          )}
-          {archivePreviewIndex < finalRenderVersions.length - 1 && (
-            <button type="button" onClick={(e) => { e.stopPropagation(); setArchivePreviewIndex(archivePreviewIndex + 1) }} className="absolute right-4 rounded-full bg-black/50 p-2 text-white/70 hover:text-white">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-            </button>
-          )}
-          <div className="absolute bottom-6 text-center text-sm text-white/50">
-            {archivePreviewIndex + 1} / {finalRenderVersions.length}
+      {(() => {
+        const archiveIdx = archivePreviewId ? finalRenderVersions.findIndex((v) => v.id === archivePreviewId) : -1
+        const archiveVersion = archiveIdx >= 0 ? finalRenderVersions[archiveIdx] : null
+        if (!archiveVersion) return null
+        return (
+          <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 backdrop-blur-sm"
+            onClick={() => setArchivePreviewId(null)}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowLeft' && archiveIdx > 0) setArchivePreviewId(finalRenderVersions[archiveIdx - 1].id)
+              if (e.key === 'ArrowRight' && archiveIdx < finalRenderVersions.length - 1) setArchivePreviewId(finalRenderVersions[archiveIdx + 1].id)
+              if (e.key === 'Escape') setArchivePreviewId(null)
+            }}
+            tabIndex={0}
+            ref={(el) => el?.focus()}
+          >
+            <img
+              src={archiveVersion.output_url ?? ''}
+              alt=""
+              className="max-h-[90vh] max-w-[90vw] rounded-lg shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            />
+            {archiveIdx > 0 && (
+              <button type="button" onClick={(e) => { e.stopPropagation(); setArchivePreviewId(finalRenderVersions[archiveIdx - 1].id) }} className="absolute left-4 rounded-full bg-black/50 p-2 text-white/70 hover:text-white">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+              </button>
+            )}
+            {archiveIdx < finalRenderVersions.length - 1 && (
+              <button type="button" onClick={(e) => { e.stopPropagation(); setArchivePreviewId(finalRenderVersions[archiveIdx + 1].id) }} className="absolute right-4 rounded-full bg-black/50 p-2 text-white/70 hover:text-white">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+              </button>
+            )}
+            <div className="absolute bottom-6 text-center text-sm text-white/50">
+              {archiveIdx + 1} / {finalRenderVersions.length}
+            </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {rightTab === 'projects' && (
         <div className="p-3">
@@ -3427,6 +3670,64 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     return loadingState
   }
 
+  const orbitVideoModal = orbitVideoExpanded && orbitTest.videoUrl ? (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 backdrop-blur-sm"
+      onClick={() => setOrbitVideoExpanded(false)}
+    >
+      <video
+        src={orbitTest.videoUrl}
+        controls
+        loop
+        autoPlay
+        muted
+        className="max-h-[90vh] max-w-[90vw] rounded-lg shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
+      <button
+        type="button"
+        onClick={() => setOrbitVideoExpanded(false)}
+        className="absolute right-6 top-6 rounded-full bg-white/10 p-2 text-white/60 hover:bg-white/20"
+      >
+        ✕
+      </button>
+    </div>
+  ) : null
+
+  const orbitConfirmModal = orbitConfirmOpen ? (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      onClick={() => setOrbitConfirmOpen(false)}
+    >
+      <div
+        className="w-[320px] rounded-lg border border-white/10 bg-[#161616] p-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p className="text-sm font-semibold text-white/80">Er bestaat al een render</p>
+        <p className="mt-1.5 text-xs text-white/45">Wil je een nieuwe orbit-video genereren? De bestaande video wordt verwijderd.</p>
+        <div className="mt-3 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setOrbitConfirmOpen(false)}
+            className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-white/60 hover:bg-white/[0.06]"
+          >
+            Annuleren
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setOrbitConfirmOpen(false)
+              void runOrbitTest(true)
+            }}
+            className="rounded-full border border-emerald-400/25 px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-400/10"
+          >
+            Ja, nieuwe maken
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null
+
   if (renderLayout) {
     return (
       <>
@@ -3441,6 +3742,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             onNext={showNextLightboxImage}
           />
         )}
+        {orbitConfirmModal}
+        {orbitVideoModal}
+        {splatViewerUrl && <SplatViewer src={splatViewerUrl} onClose={() => setSplatViewerUrl(null)} />}
       </>
     )
   }
@@ -3463,6 +3767,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           onNext={showNextLightboxImage}
         />
       )}
+      {orbitConfirmModal}
     </div>
   )
 }

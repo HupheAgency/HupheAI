@@ -256,7 +256,7 @@ const ImportPayloadSchema = z.object({
 const LocalPathSchema = z.string().min(1).max(4096)
 const HUPHE_FILE_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg',
-  '.glb', '.gltf', '.json',
+  '.glb', '.gltf', '.json', '.ply', '.splat',
   '.mp4', '.webm', '.mov', '.m4v', '.mp3', '.wav', '.ogg', '.m4a',
   '.woff', '.woff2', '.ttf', '.otf',
   '.pdf',
@@ -406,6 +406,7 @@ function buildRendererCsp(): string {
     "media-src 'self' data: blob: file: https: huphe: hupheai:",
     "font-src 'self' data: file: https://fonts.gstatic.com https://use.typekit.net",
     `connect-src ${connectSrc} blob: huphe:`,
+    "worker-src blob: 'self'",
     "frame-src 'none'",
     "object-src 'none'",
     "base-uri 'self'",

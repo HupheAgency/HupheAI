@@ -45,6 +45,10 @@ ipcRenderer.on('atelier:stream-chunk', (_event, token) => {
   g.dispatchEvent(new g.CustomEvent('atelier:stream-chunk', { detail: token }))
 })
 
+ipcRenderer.on('product-studio:orbit-step', (_event, step) => {
+  g.dispatchEvent(new g.CustomEvent('product-studio:orbit-step', { detail: step }))
+})
+
 // Forward Engine push events
 ipcRenderer.on('engine:message-added', (_event, data) => {
   g.dispatchEvent(new g.CustomEvent('engine:message-added', { detail: data }))
@@ -335,7 +339,13 @@ contextBridge.exposeInMainWorld('api', {
       projectId: string
       imageUrl: string
       arcDegrees?: number
+      force?: boolean
+      model?: 'seedance' | 'minimax' | 'kling'
+      videoOnly?: boolean
     }) => ipcRenderer.invoke('product-studio:test-orbit-splat', args),
+    checkOrbitVideo: (args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling' }) => ipcRenderer.invoke('product-studio:check-orbit-video', args),
+    loadSplat: () => ipcRenderer.invoke('product-studio:load-splat'),
+    getSplatPose: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:get-splat-pose', args),
     renameProject: (args: { projectId: string; name: string }) => ipcRenderer.invoke('product-studio:rename-project', args),
     deleteProject: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:delete-project', args),
     retryProviderRun: (runId: string) =>

@@ -3,11 +3,12 @@ import ReactDOM from 'react-dom/client'
 import * as Sentry from '@sentry/electron/renderer'
 import App from './App'
 import CalibrationApp from './CalibrationApp'
+import { SplatViewer } from './components/SplatViewer'
 import './index.css'
 
-// Hidden offscreen calibration window boots into a minimal harness-only mode,
-// skipping the full app (auth/Supabase) entirely.
-const isCalibrationMode = window.location.hash.replace('#', '') === 'calibration'
+const hashBase = window.location.hash.replace('#', '').split('?')[0]
+const isCalibrationMode = hashBase === 'calibration'
+const isSplatViewerMode = hashBase === 'splat-viewer'
 
 if (import.meta.env.PROD) {
   Sentry.init({
@@ -26,8 +27,14 @@ if (import.meta.env.PROD) {
   })
 }
 
+function SplatViewerApp() {
+  const params = new URLSearchParams(window.location.hash.split('?')[1] ?? '')
+  const src = params.get('src') ?? ''
+  return <SplatViewer src={src} onClose={() => window.close()} />
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    {isCalibrationMode ? <CalibrationApp /> : <App />}
+    {isSplatViewerMode ? <SplatViewerApp /> : isCalibrationMode ? <CalibrationApp /> : <App />}
   </React.StrictMode>
 )

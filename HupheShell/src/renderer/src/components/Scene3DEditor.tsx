@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from 'react'
 import { useScene3D } from '../hooks/useScene3D'
-import Scene3DViewport, { type RenderPasses, type Scene3DRenderManifest, type Scene3DViewportHandle } from './Scene3DViewport'
+import Scene3DViewport, { type RenderPasses, type Scene3DRenderManifest, type Scene3DViewportHandle, type SplatAlignment } from './Scene3DViewport'
 import Scene3DToolbar from './Scene3DToolbar'
 import Scene3DPropertiesPanel from './Scene3DPropertiesPanel'
 import type { Scene3DBackground, Scene3DCamera, Scene3DLight, Scene3DObject, Scene3DObjectType, Scene3DState, TransformMode, ViewMode } from '../lib/scene3d-types'
@@ -75,7 +75,8 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   debugRings?: { spacing: number; width: number }
   viewMode?: ViewMode
   environmentMeshUrls?: string[]
-}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls }, ref) {
+  splatAlignment?: SplatAlignment | null
+}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls, splatAlignment }, ref) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
@@ -323,6 +324,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           debugRings={debugRings}
           environmentMeshUrls={environmentMeshUrls}
           transparentCanvas={transparentCanvas}
+          splatAlignment={splatAlignment}
         />
         {showFrame && (
           <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center">

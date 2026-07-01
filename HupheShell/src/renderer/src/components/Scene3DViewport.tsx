@@ -5,6 +5,9 @@ import * as THREE from 'three'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { Scene3DState, TransformMode, ViewMode, Scene3DBackground } from '../lib/scene3d-types'
 import SceneObject from './SceneObject'
+import { GaussianSplatBackground, type SplatAlignment } from './GaussianSplatBackground'
+
+export type { SplatAlignment }
 
 function EnvironmentMesh({ url }: { url: string }) {
   const gltf = useGLTF(url)
@@ -1064,7 +1067,8 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   debugRings?: { spacing: number; width: number }
   environmentMeshUrls?: string[]
   transparentCanvas?: boolean
-}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef, debugRings, environmentMeshUrls, transparentCanvas }, ref) {
+  splatAlignment?: SplatAlignment | null
+}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef, debugRings, environmentMeshUrls, transparentCanvas, splatAlignment }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
@@ -1094,8 +1098,8 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     },
   }))
 
-  const initialPos = orbitStateRef.current?.position ?? scene.cameras[0]?.position ?? [4, 3, 4]
-  const initialFov = scene.cameras[0]?.fov ?? 50
+  const initialPos = orbitStateRef.current?.position ?? splatAlignment?.position ?? scene.cameras[0]?.position ?? [4, 3, 4]
+  const initialFov = splatAlignment?.fovY ?? scene.cameras[0]?.fov ?? 50
 
   return (
     <div className="relative h-full w-full" onClick={(e) => { if (e.target === e.currentTarget) onDeselectAll() }}>
@@ -1128,6 +1132,18 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           environmentMeshUrls={environmentMeshUrls}
           transparentCanvas={transparentCanvas}
         />
+        {splatAlignment && (
+          <GaussianSplatBackground
+            splatUrl={splatAlignment.splatUrl}
+            position={splatAlignment.position}
+            quaternion={splatAlignment.quaternion}
+            fovY={splatAlignment.fovY}
+            sceneCenter={splatAlignment.sceneCenter}
+            groupPositionX={splatAlignment.groupPositionX ?? 0}
+            groupPositionY={splatAlignment.groupPositionY}
+            groupPositionZ={splatAlignment.groupPositionZ ?? 0}
+          />
+        )}
       </Canvas>
     </div>
   )

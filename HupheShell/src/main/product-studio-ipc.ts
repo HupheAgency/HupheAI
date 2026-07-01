@@ -3261,7 +3261,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     let deleted = 0
     for (const fp of filesToDelete) {
       if (existsSync(fp)) {
-        try { unlinkSync(fp); deleted++ } catch {}
+        try { unlinkSync(fp); deleted++ } catch { }
       }
     }
 
@@ -3271,7 +3271,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const { readdirSync } = await import('fs')
       for (const f of readdirSync(bakeDir)) {
         if (f.startsWith('frame_') && f.endsWith('.png')) {
-          try { unlinkSync(join(bakeDir, f)); deleted++ } catch {}
+          try { unlinkSync(join(bakeDir, f)); deleted++ } catch { }
         }
       }
     }
@@ -3295,7 +3295,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     let deleted = 0
     for (const f of readdirSync(bakeDir)) {
       if (f.startsWith('frame_') && f.endsWith('.png')) {
-        try { unlinkSync(join(bakeDir, f)); deleted++ } catch {}
+        try { unlinkSync(join(bakeDir, f)); deleted++ } catch { }
       }
     }
     console.log(`[clear-bake-cache] Removed ${deleted} cached frames for project ${args.projectId}`)
@@ -3635,20 +3635,37 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
   })
 
   // --- Orbit-splat validatietest ---
+  ipcMain.handle('product-studio:check-orbit-video', async (_e, args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling' }) => {
+    const { existsSync } = await import('fs')
+    const model = args.model ?? 'seedance'
+    const wsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
+    const videoPath = join(wsDir, 'orbit.mp4')
+    const exists = existsSync(videoPath)
+    return { exists, videoUrl: exists ? `huphe://file/${encodeURIComponent(videoPath)}` : null }
+  })
+
   ipcMain.handle('product-studio:test-orbit-splat', async (_e, args: {
     projectId: string
     imageUrl: string
     arcDegrees?: number
+    force?: boolean
+    model?: 'seedance' | 'minimax' | 'kling'
+    videoOnly?: boolean
   }) => {
     const { exec: execCb } = await import('child_process')
     const { promisify } = await import('util')
     const exec = promisify(execCb)
 
+    const pushStep = (step: string, progress: number) => {
+      console.log(`[orbit-splat] (${progress}%) ${step}`)
+      _e.sender.send('product-studio:orbit-step', { step, progress })
+    }
+
     const jwt = getJwt()
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
 
-    const arc = args.arcDegrees ?? 120
-    const wsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+    const model = args.model ?? 'seedance'
+    const wsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
     const videoPath = join(wsDir, 'orbit.mp4')
     const framesDir = join(wsDir, 'frames')
     const colmapDir = join(wsDir, 'colmap')
@@ -3672,73 +3689,128 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
       // Stap 2: Seedance 2.0 image-to-video via fal.ai direct (sla over als video al bestaat)
       const { safeStorage } = await import('electron')
-      const { existsSync, readFileSync } = await import('fs')
+      const { existsSync, readFileSync, unlinkSync } = await import('fs')
+
+      if (args.force && existsSync(videoPath)) {
+        unlinkSync(videoPath)
+        pushStep('Bestaande video verwijderd, nieuwe generatie gestart.', 2)
+      }
 
       let videoUrl: string
       if (existsSync(videoPath)) {
-        console.log(`[orbit-splat] Video al aanwezig, sla generatie over: ${videoPath}`)
+        pushStep('Video al aanwezig, generatie overgeslagen.', 60)
         videoUrl = videoPath
       } else {
         const falKeyFile = join(app.getPath('userData'), 'fal.enc')
         if (!existsSync(falKeyFile)) return { ok: false, error: 'Geen fal.ai API key gevonden.' }
         const falKey = safeStorage.decryptString(readFileSync(falKeyFile))
 
-        console.log(`[orbit-splat] Video genereren via fal.ai Seedance 2.0 (${arc}°)...`)
-        const falRes = await fetch('https://fal.run/bytedance/seedance-2.0/image-to-video', {
+        const orbitPrompt = `Technical reference video of a room with a stationary central product. Single continuous orbit shot. The camera must complete exactly 320 degrees of clockwise rotation around the central product. It must begin on the front view, pass the side view, fully reveal the back view, and end at the rear-side angle after completing the full 270-degree arc. Do not stop early and do not perform a shorter orbit. Constant orbit radius, constant camera height, constant speed, and perfectly level horizon. No tilt, no roll, no vertical movement, no zoom, and no shake. The camera remains locked on the center product at all times. The surrounding room remains rigid and spatially consistent in every frame, including walls, floor, ceiling, corners, furniture, and background elements. Sharp, highly detailed frames, deep depth of field, everything in focus, no motion blur, neutral lighting, and stable exposure. No cuts, no morphing, no warping, no flicker, no geometry drift, and no changes to the room layout or product geometry.`
+
+        const modelEndpoint = model === 'minimax'
+          ? 'fal-ai/minimax/hailuo-02/standard/image-to-video'
+          : model === 'kling'
+            ? 'fal-ai/kling-video/v3/standard/image-to-video'
+            : 'bytedance/seedance-2.0/image-to-video'
+        const modelBody = model === 'minimax'
+          ? { image_url: imageDataUrl, prompt: orbitPrompt, duration: '6', resolution: '768P' }
+          : model === 'kling'
+            ? { image_url: imageDataUrl, prompt: orbitPrompt, duration: 10, aspect_ratio: '16:9', resolution: '720p', enable_audio: false }
+            : { image_url: imageDataUrl, prompt: orbitPrompt, duration: 10, aspect_ratio: '16:9', resolution: '720p' }
+
+        pushStep(`Video aanmelden bij fal.ai (${model})...`, 3)
+        const submitRes = await fetch(`https://queue.fal.run/${modelEndpoint}`, {
           method: 'POST',
-          headers: {
-            'Authorization': `Key ${falKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            image_url: imageDataUrl,
-            prompt: `Camera orbits ${arc} degrees around the central object. Smooth camera arc, static scene, fixed lighting. No zoom, no cut, no camera shake.`,
-            duration: 5,
-            aspect_ratio: '16:9',
-          }),
+          headers: { 'Authorization': `Key ${falKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(modelBody),
         })
-
-        if (!falRes.ok) {
-          const errText = await falRes.text()
-          throw new Error(`fal.ai ${falRes.status}: ${errText.slice(0, 300)}`)
+        if (!submitRes.ok) {
+          const errText = await submitRes.text()
+          throw new Error(`fal.ai submit ${submitRes.status}: ${errText.slice(0, 300)}`)
         }
+        const submitResult = await submitRes.json() as any
+        const statusUrl: string = submitResult.status_url
+        const responseUrl: string = submitResult.response_url
+        if (!statusUrl || !responseUrl) throw new Error(`Geen status/response URL in queue respons: ${JSON.stringify(submitResult).slice(0, 200)}`)
 
-        const videoResult = await falRes.json() as any
-        console.log('[orbit-splat] fal.ai response:', JSON.stringify(videoResult).slice(0, 500))
+        let videoResult: any = null
+        const maxAttempts = 72 // 72 × 5s = 6 min
+        const generationStartAttempt = { value: -1 }
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          await new Promise((r) => setTimeout(r, 5000))
+          const statusRes = await fetch(statusUrl, { headers: { 'Authorization': `Key ${falKey}` } })
+          const statusResult = await statusRes.json() as any
+          if (statusResult.status === 'FAILED') throw new Error(`fal.ai job mislukt: ${JSON.stringify(statusResult).slice(0, 300)}`)
+          if (statusResult.status === 'IN_QUEUE') {
+            const pos = statusResult.queue_position ?? '?'
+            pushStep(`Wachtrij positie ${pos} — video staat in de rij bij fal.ai...`, 5)
+          } else if (statusResult.status === 'IN_PROGRESS') {
+            if (generationStartAttempt.value < 0) generationStartAttempt.value = attempt
+            const elapsed = (attempt - generationStartAttempt.value) * 5
+            const expectedSec = model === 'minimax' ? 90 : 150
+            const genProgress = Math.min(55, Math.round((elapsed / expectedSec) * 55))
+            pushStep(`Video genereren... (${elapsed}s)`, 5 + genProgress)
+          }
+          if (statusResult.status === 'COMPLETED') {
+            const finalRes = await fetch(responseUrl, { headers: { 'Authorization': `Key ${falKey}` } })
+            if (!finalRes.ok) throw new Error(`fal.ai response ${finalRes.status}: ${(await finalRes.text()).slice(0, 300)}`)
+            videoResult = await finalRes.json()
+            break
+          }
+        }
+        if (!videoResult) throw new Error(`Video generatie timeout (>6 min) via ${model}.`)
 
         const remoteUrl: string = videoResult?.video?.url ?? videoResult?.url
         if (!remoteUrl || !remoteUrl.startsWith('http')) throw new Error(`Geen bruikbare video URL in respons. Raw: ${JSON.stringify(videoResult).slice(0, 200)}`)
-        console.log(`[orbit-splat] Video URL: ${remoteUrl}`)
 
+        pushStep('Video downloaden en opslaan...', 61)
         const videoRes = await fetch(remoteUrl)
         await writeFile(videoPath, Buffer.from(await videoRes.arrayBuffer()))
-        console.log(`[orbit-splat] Video opgeslagen: ${videoPath}`)
         videoUrl = remoteUrl
       }
 
+      const videoFileUrl = `huphe://file/${encodeURIComponent(videoPath)}`
+
       // Stap 3: frames extraheren met ffmpeg
-      console.log('[orbit-splat] Frames extraheren...')
+      pushStep('Frames extraheren uit video...', 65)
       await exec(`ffmpeg -y -i "${videoPath}" -vf fps=12 "${join(framesDir, 'frame_%04d.png')}"`)
       const { stdout: lsOut } = await exec(`ls "${framesDir}" | wc -l`)
       const frameCount = parseInt(lsOut.trim())
-      console.log(`[orbit-splat] ${frameCount} frames geëxtraheerd`)
+      pushStep(`${frameCount} frames geëxtraheerd`, 70)
 
       if (frameCount < 20) {
         return { ok: false, error: `Te weinig frames (${frameCount}). Video te kort of fps te laag.`, videoUrl }
       }
 
-      // Stap 4: COLMAP via Python subprocess
-      console.log('[orbit-splat] COLMAP SfM starten...')
+      // Stap 4: COLMAP via Python subprocess — push tijdsgebaseerde voortgang tijdens wachten
+      pushStep(`Frames analyseren met COLMAP (${frameCount} frames)...`, 72)
       const scriptPath = join(__dirname, 'lib/colmap_sfm.py')
       const python = '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3'
-      const { stdout: colmapOut } = await exec(`"${python}" "${scriptPath}" "${framesDir}" "${colmapDir}"`, { timeout: 300_000 })
+      const colmapExpectedSec = Math.round(frameCount * 2.5)
+      const colmapTimer = setInterval(() => {
+        // wordt gecanceld zodra COLMAP klaar is
+      }, 8000)
+      let colmapElapsed = 0
+      const colmapInterval = setInterval(() => {
+        colmapElapsed += 8
+        const colmapPct = Math.min(93, 72 + Math.round((colmapElapsed / colmapExpectedSec) * 21))
+        pushStep(`COLMAP bezig... (${colmapElapsed}s / ~${colmapExpectedSec}s verwacht)`, colmapPct)
+      }, 8000)
+      let colmapOut: string
+      try {
+        const result = await exec(`"${python}" "${scriptPath}" "${framesDir}" "${colmapDir}"`, { timeout: 300_000 })
+        colmapOut = result.stdout
+      } finally {
+        clearInterval(colmapTimer)
+        clearInterval(colmapInterval)
+      }
 
       const colmapResult = JSON.parse(colmapOut.trim().split('\n').pop()!)
-      console.log(`[orbit-splat] COLMAP: ${colmapResult.registered}/${colmapResult.total} (${colmapResult.pct}%)`)
+      pushStep(`COLMAP klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
 
       return {
         ok: true,
-        videoUrl,
+        videoUrl: videoFileUrl,
         videoPath,
         framesDir,
         frameCount,
@@ -3747,6 +3819,45 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     } catch (err: any) {
       console.error('[orbit-splat]', err?.message ?? err)
       return { ok: false, error: err?.message ?? 'Orbit splat test mislukt.' }
+    }
+  })
+
+  ipcMain.handle('product-studio:load-splat', async () => {
+    const { dialog } = await import('electron')
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: 'Kies een Gaussian Splat .ply bestand',
+      filters: [{ name: 'PLY Gaussian Splat', extensions: ['ply'] }],
+      properties: ['openFile'],
+    })
+    if (canceled || !filePaths[0]) return { ok: false }
+
+    const plyPath = filePaths[0]
+    const { plyToSplat } = await import('./lib/ply-to-splat')
+    const { splatPath, localFloorY } = await plyToSplat(plyPath)
+    const splatUrl = `huphe://file/${encodeURIComponent(splatPath)}`
+    return { ok: true, splatUrl, localFloorY }
+  })
+
+  ipcMain.handle('product-studio:get-splat-pose', async (_e, args: { projectId: string }) => {
+    const { existsSync } = await import('fs')
+    const wsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+
+    // Try project-level colmap first, then model-specific kling subfolder
+    let sparseDir = join(wsDir, 'colmap', 'sparse', '1')
+    if (!existsSync(join(sparseDir, 'images.bin'))) {
+      sparseDir = join(wsDir, 'kling', 'colmap', 'sparse', '1')
+    }
+    if (!existsSync(join(sparseDir, 'images.bin'))) {
+      return { ok: false, error: 'COLMAP reconstructie niet gevonden' }
+    }
+
+    try {
+      const { readColmapPose } = await import('./lib/colmap-reader')
+      const pose = await readColmapPose(sparseDir)
+      return { ok: true, pose }
+    } catch (err: any) {
+      console.error('[get-splat-pose]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Pose lezen mislukt.' }
     }
   })
 }
