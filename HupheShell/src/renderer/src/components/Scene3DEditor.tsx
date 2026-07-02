@@ -330,6 +330,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center">
             <div
               ref={frameRef}
+              data-scene-frame="true"
               className="relative w-full max-w-[min(92%,calc((100vh-180px)*16/9))] border border-white/85 shadow-[0_0_0_9999px_rgba(0,0,0,0.08),0_0_24px_rgba(255,255,255,0.12)]"
               style={{ aspectRatio: '16 / 9' }}
             >

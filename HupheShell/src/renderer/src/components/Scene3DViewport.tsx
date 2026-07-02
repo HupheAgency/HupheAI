@@ -1142,6 +1142,10 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
             groupPositionX={splatAlignment.groupPositionX ?? 0}
             groupPositionY={splatAlignment.groupPositionY}
             groupPositionZ={splatAlignment.groupPositionZ ?? 0}
+            groupTiltX={splatAlignment.groupTiltX ?? 0}
+            groupTiltZ={splatAlignment.groupTiltZ ?? 0}
+            groupScale={splatAlignment.groupScale ?? 1}
+            groupMaskSize={splatAlignment.groupMaskSize ?? 20}
           />
         )}
       </Canvas>

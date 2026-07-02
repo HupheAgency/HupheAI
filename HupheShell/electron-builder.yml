@@ -40,6 +40,13 @@ files:
 # These are plain CJS files that cannot be bundled by electron-vite
 # (they rely on runtime __dirname and chokidar's native fs watchers).
 extraResources:
+  # Brush Gaussian Splat trainer — gebundeld zodat gebruikers het niet zelf hoeven te installeren
+  - from: build/bin
+    to: bin
+    filter:
+      - "brush"
+      - "brush.exe"
+
   - from: src/modules/huphe-code
     to: modules/huphe-code
     filter:

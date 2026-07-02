@@ -346,6 +346,17 @@ contextBridge.exposeInMainWorld('api', {
     checkOrbitVideo: (args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling' }) => ipcRenderer.invoke('product-studio:check-orbit-video', args),
     loadSplat: () => ipcRenderer.invoke('product-studio:load-splat'),
     getSplatPose: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:get-splat-pose', args),
+    trainSplat: (args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling'; brushBinPath?: string; maxSteps?: number }) =>
+      ipcRenderer.invoke('product-studio:train-splat', args),
+    saveSceneAlignment: (args: { projectId: string; alignment: Record<string, unknown> }) =>
+      ipcRenderer.invoke('product-studio:save-scene-alignment', args),
+    loadSceneAlignment: (args: { projectId: string }) =>
+      ipcRenderer.invoke('product-studio:load-scene-alignment', args),
+    onTrainingProgress: (cb: (data: { step: string; progress: number }) => void) => {
+      const handler = (_: unknown, data: { step: string; progress: number }) => cb(data)
+      ipcRenderer.on('product-studio:training-progress', handler)
+      return () => ipcRenderer.removeListener('product-studio:training-progress', handler)
+    },
     renameProject: (args: { projectId: string; name: string }) => ipcRenderer.invoke('product-studio:rename-project', args),
     deleteProject: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:delete-project', args),
     retryProviderRun: (runId: string) =>

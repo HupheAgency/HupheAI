@@ -76,6 +76,24 @@ type ProviderStats = {
   }
 }
 
+function length3(v: [number, number, number]) {
+  return Math.hypot(v[0], v[1], v[2])
+}
+
+function normalize3(v: [number, number, number]): [number, number, number] {
+  const len = length3(v)
+  if (len <= 0.000001) return [0, 0, 0]
+  return [v[0] / len, v[1] / len, v[2] / len]
+}
+
+function cross3(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ]
+}
+
 const STORAGE_KEY = 'huphe:product-studio-project:v1'
 
 const STATUS_LABELS: Record<ReferenceStatus, string> = {
@@ -562,12 +580,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [envMappingEnabled, setEnvMappingEnabled] = useState(false)
   const [bakeProgress, setBakeProgress] = useState<{ phase: 'idle' | 'baking' | 'done' | 'error'; currentFrame: number; totalFrames: number; error?: string }>({ phase: 'idle', currentFrame: 0, totalFrames: 12 })
   const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean }; videoUrl?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
+  const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [orbitModel, setOrbitModel] = useState<'seedance' | 'minimax' | 'kling'>('seedance')
   const [orbitConfirmOpen, setOrbitConfirmOpen] = useState(false)
   const [orbitVideoExpanded, setOrbitVideoExpanded] = useState(false)
   const [splatViewerUrl, setSplatViewerUrl] = useState<string | null>(null)
   const [splatAlignment, setSplatAlignment] = useState<SplatAlignment | null>(null)
   const [splatBaseAlignment, setSplatBaseAlignment] = useState<SplatAlignment | null>(null)
+  const [splatVisible, setSplatVisible] = useState(true)
+  const viewportShellRef = useRef<HTMLDivElement>(null)
 
   const nudgeSplatAlignment = (dx: number, dy: number, dz = 0) => {
     setSplatAlignment((prev) => {
@@ -610,6 +631,174 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     })
   }
 
+  const setSplatTilt = (axis: 'x' | 'z', value: number) => {
+    setSplatAlignment((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        groupTiltX: axis === 'x' ? value : (prev.groupTiltX ?? 0),
+        groupTiltZ: axis === 'z' ? value : (prev.groupTiltZ ?? 0),
+      }
+    })
+  }
+
+  const setSplatScale = (value: number) => {
+    const safeValue = Math.max(0.1, Math.min(5, Number.isFinite(value) ? value : 1))
+    setSplatAlignment((prev) => prev ? { ...prev, groupScale: safeValue } : prev)
+  }
+
+  const setSplatMaskSize = (value: number) => {
+    const safeValue = Math.max(0.2, Math.min(50, Number.isFinite(value) ? value : 20))
+    setSplatAlignment((prev) => prev ? { ...prev, groupMaskSize: safeValue } : prev)
+  }
+
+  const [splatPuntMode, setSplatPuntMode] = useState<'off' | 'foto' | 'scene'>('off')
+  const [puntenFoto, setPuntenFoto] = useState<Array<{ x: number; y: number }>>([])
+  const [puntenScene, setPuntenScene] = useState<Array<{ x: number; y: number }>>([])
+  const [puntPanelPos, setPuntPanelPos] = useState<{ x: number; y: number } | null>(null)
+  const [puntPanelW, setPuntPanelW] = useState(280)
+  const [imgZoom, setImgZoom] = useState(1)
+  const [imgOffset, setImgOffset] = useState({ x: 0, y: 0 })
+  const [imgNaturalAspect, setImgNaturalAspect] = useState(4 / 3)
+  const imgPanStartRef = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean } | null>(null)
+  const imgContainerRef = useRef<HTMLDivElement | null>(null)
+
+  // Non-passive wheel listener so we can prevent page scroll while zooming the image
+  useEffect(() => {
+    const el = imgContainerRef.current
+    if (!el || splatPuntMode === 'off') return
+    const handler = (e: WheelEvent) => {
+      e.preventDefault()
+      const rect = el.getBoundingClientRect()
+      const mx = e.clientX - rect.left
+      const my = e.clientY - rect.top
+      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2
+      const imgH = Math.round(rect.width / imgNaturalAspect)
+      setImgZoom((prevZoom) => {
+        const newZoom = Math.max(1, Math.min(12, prevZoom * factor))
+        setImgOffset((prevOffset) => ({
+          x: Math.min(0, Math.max(rect.width - rect.width * newZoom, mx - ((mx - prevOffset.x) / prevZoom) * newZoom)),
+          y: Math.min(0, Math.max(imgH - imgH * newZoom, my - ((my - prevOffset.y) / prevZoom) * newZoom)),
+        }))
+        return newZoom
+      })
+    }
+    el.addEventListener('wheel', handler, { passive: false })
+    return () => el.removeEventListener('wheel', handler)
+  }, [splatPuntMode, imgNaturalAspect])
+
+  const resetPuntMode = () => {
+    setSplatPuntMode('off')
+    setPuntenFoto([])
+    setPuntenScene([])
+    setImgZoom(1)
+    setImgOffset({ x: 0, y: 0 })
+  }
+
+  const berekenPuntUitlijning = () => {
+    const n = Math.min(puntenFoto.length, puntenScene.length)
+    if (n < 1) return
+    const viewportRect = viewportShellRef.current?.getBoundingClientRect()
+    const frameRect = viewportShellRef.current?.querySelector('[data-scene-frame="true"]')?.getBoundingClientRect()
+    if (!viewportRect || !frameRect || viewportRect.width <= 0 || viewportRect.height <= 0) return
+    let fx = 0, fy = 0, sx = 0, sy = 0
+    for (let i = 0; i < n; i++) {
+      fx += (frameRect.left - viewportRect.left + puntenFoto[i].x * frameRect.width) / viewportRect.width
+      fy += (frameRect.top - viewportRect.top + puntenFoto[i].y * frameRect.height) / viewportRect.height
+      sx += puntenScene[i].x; sy += puntenScene[i].y
+    }
+    fx /= n; fy /= n; sx /= n; sy /= n
+    const dx = fx - sx
+    const dy = fy - sy
+
+    const orbit = studioRef.current?.getSceneControls()?.getOrbitState()
+    const cameraPosition = orbit?.position ?? splatAlignment?.position ?? [4, 3, 4]
+    const cameraTarget = orbit?.target ?? splatAlignment?.sceneCenter ?? [0, 0.5, 0]
+    const fov = splatAlignment?.fovY ?? sceneControls?.scene.cameras[0]?.fov ?? 50
+    const forward = normalize3([
+      cameraTarget[0] - cameraPosition[0],
+      cameraTarget[1] - cameraPosition[1],
+      cameraTarget[2] - cameraPosition[2],
+    ])
+    const right = normalize3(cross3(forward, [0, 1, 0]))
+    const up = normalize3(cross3(right, forward))
+    const distance = Math.max(0.001, length3([
+      cameraPosition[0] - cameraTarget[0],
+      cameraPosition[1] - cameraTarget[1],
+      cameraPosition[2] - cameraTarget[2],
+    ]))
+    const viewHeight = 2 * distance * Math.tan((fov * Math.PI / 180) / 2)
+    const viewWidth = viewHeight * (viewportRect.width / viewportRect.height)
+    const worldShift: [number, number, number] = [
+      right[0] * dx * viewWidth - up[0] * dy * viewHeight,
+      right[1] * dx * viewWidth - up[1] * dy * viewHeight,
+      right[2] * dx * viewWidth - up[2] * dy * viewHeight,
+    ]
+
+    setSplatAlignment((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        groupPositionX: (prev.groupPositionX ?? 0) + worldShift[0],
+        groupPositionY: prev.groupPositionY + worldShift[1],
+        groupPositionZ: (prev.groupPositionZ ?? 0) + worldShift[2],
+        sceneCenter: [
+          prev.sceneCenter[0] + worldShift[0],
+          prev.sceneCenter[1] + worldShift[1],
+          prev.sceneCenter[2] + worldShift[2],
+        ],
+      }
+    })
+    resetPuntMode()
+  }
+
+  const saveSceneAlignment = (alignment: SplatAlignment) => {
+    const api = getProductStudioApi()
+    if (!api || !project.backendProject?.id) return
+    api.saveSceneAlignment?.({ projectId: project.backendProject.id, alignment: alignment as unknown as Record<string, unknown> })
+      .catch((e: unknown) => console.warn('[scene.json] opslaan mislukt:', e))
+  }
+
+  const startSplatTraining = async () => {
+    const api = getProductStudioApi()
+    if (!api || !project.backendProject?.id) return
+    setSplatTraining({ phase: 'running', step: 'Brush training starten...', progress: 0 })
+    try {
+      const result = await api.trainSplat({
+        projectId: project.backendProject.id,
+        model: orbitModel,
+      })
+      if (!result.ok || !result.splatUrl) {
+        setSplatTraining({ phase: 'error', step: result.error ?? 'Training mislukt', progress: 0, error: result.error })
+        return
+      }
+      // Auto-load het PLY + COLMAP pose in de scene
+      const nextAlignment: SplatAlignment = {
+        splatUrl: result.splatUrl,
+        ...(result.pose ?? {
+          position: [0, 5, 6] as [number, number, number],
+          quaternion: [0, 0, 0, 1] as [number, number, number, number],
+          fovY: 50,
+          width: 1920,
+          height: 1080,
+          sceneCenter: [0, 0, 0] as [number, number, number],
+        }),
+        groupPositionX: 0,
+        groupPositionY: (result.pose?.groupPositionY ?? 0) - (result.localFloorY ?? 0),
+        groupPositionZ: 0,
+        groupTiltX: 0,
+        groupTiltZ: 0,
+      }
+      setSplatViewerUrl(null)
+      setSplatBaseAlignment(nextAlignment)
+      setSplatAlignment(nextAlignment)
+      saveSceneAlignment(nextAlignment)
+      setSplatTraining({ phase: 'done', step: 'Training klaar!', progress: 100 })
+    } catch (err: any) {
+      setSplatTraining({ phase: 'error', step: err?.message ?? 'Training mislukt', progress: 0, error: err?.message })
+    }
+  }
+
   useEffect(() => {
     const handler = (e: Event) => {
       const { step, progress } = (e as CustomEvent<{ step: string; progress: number }>).detail
@@ -617,6 +806,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
     window.addEventListener('product-studio:orbit-step', handler)
     return () => window.removeEventListener('product-studio:orbit-step', handler)
+  }, [])
+
+  useEffect(() => {
+    const api = getProductStudioApi()
+    if (!api) return
+    const unsub = api.onTrainingProgress?.((data) => {
+      setSplatTraining((prev) => prev.phase === 'running' ? { ...prev, step: data.step, progress: data.progress } : prev)
+    })
+    return () => unsub?.()
   }, [])
 
   useEffect(() => {
@@ -634,12 +832,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       }
     }).catch(() => {})
   }, [orbitModel, project.backendProject?.id])
+  // Auto-save splat alignment naar scene.json na elke wijziging (debounced 1.5s)
+  useEffect(() => {
+    if (!splatAlignment || !project.backendProject?.id) return
+    const api = getProductStudioApi()
+    if (!api) return
+    const tid = setTimeout(() => {
+      api.saveSceneAlignment?.({ projectId: project.backendProject!.id, alignment: splatAlignment as unknown as Record<string, unknown> })
+        .catch((e: unknown) => console.warn('[scene.json] auto-save mislukt:', e))
+    }, 1500)
+    return () => clearTimeout(tid)
+  }, [splatAlignment, project.backendProject?.id])
+
   const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number; fovScale?: number } | null>(null)
   // Per-version local cache: model transform per archive photo (session only)
   const archiveTransformCache = useRef<Record<string, { position: [number,number,number]; rotation: [number,number,number]; scale: [number,number,number] }>>({})
   const activeArchiveVersionId = useRef<string | null>(null)
   const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
-  const [viewportOverlay, setViewportOverlay] = useState<'calibration' | 'light' | 'productLayer' | 'composite' | 'bgComposite' | '__depth' | null>(null)
+  const [viewportOverlay, setViewportOverlay] = useState<'light' | 'productLayer' | 'composite' | 'bgComposite' | '__depth' | null>(null)
   const [debugRings, setDebugRings] = useState<{ spacing: number; width: number } | undefined>({ spacing: 0.04, width: 0.002 })
   const [viewMode, setViewMode] = useState<'wireframe' | 'solid' | 'material' | 'rendered'>('material')
   const textureDeletedRef = useRef(false)
@@ -2609,6 +2819,50 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   : ' — Video te inconsistent. Ander videomodel of meer camera-sturing nodig.'}
               </div>
             )}
+
+            {/* Brush training knop + voortgang */}
+            {(orbitTest.phase === 'done' && orbitTest.colmap?.pass) && (
+              <div className="mt-2">
+                {splatTraining.phase !== 'running' && (
+                  <button
+                    type="button"
+                    disabled={splatTraining.phase === 'running'}
+                    onClick={startSplatTraining}
+                    className="w-full rounded-md border border-emerald-400/25 bg-emerald-500/10 py-1.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40"
+                  >
+                    {splatTraining.phase === 'done' ? '✓ Splat trainen (opnieuw)' : '▶ Splat trainen met Brush'}
+                  </button>
+                )}
+                {splatTraining.phase === 'running' && (
+                  <div className="rounded-md border border-emerald-400/15 bg-emerald-500/8 p-2">
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <span className="text-[10px] font-medium text-emerald-300">Brush training...</span>
+                      <span className="text-[10px] text-emerald-400/60">{splatTraining.progress}%</span>
+                    </div>
+                    <div className="h-1 w-full overflow-hidden rounded-full bg-white/10">
+                      <div
+                        className="h-full rounded-full bg-emerald-400 transition-all duration-300"
+                        style={{ width: `${splatTraining.progress}%` }}
+                      />
+                    </div>
+                    <p className="mt-1 truncate text-[9px] text-emerald-300/60">{splatTraining.step}</p>
+                  </div>
+                )}
+                {splatTraining.phase === 'error' && (
+                  <div className="mt-1 rounded-md border border-red-400/20 bg-red-500/8 p-2">
+                    <p className="text-[10px] text-red-300">✗ {splatTraining.error}</p>
+                    <button
+                      type="button"
+                      onClick={startSplatTraining}
+                      className="mt-1 text-[9px] text-red-300/60 underline hover:text-red-300"
+                    >
+                      Opnieuw proberen
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               type="button"
               onClick={async () => {
@@ -2640,6 +2894,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   groupPositionX: poseResult.pose.groupPositionX ?? 0,
                   groupPositionY: (poseResult.pose.groupPositionY ?? 0) - localFloorY,
                   groupPositionZ: poseResult.pose.groupPositionZ ?? 0,
+                  groupScale: poseResult.pose.groupScale ?? 1,
+                  groupMaskSize: poseResult.pose.groupMaskSize ?? 20,
                   sceneCenter: [
                     poseResult.pose.sceneCenter[0],
                     poseResult.pose.sceneCenter[1] - localFloorY,
@@ -2682,8 +2938,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                         <span className="text-[10px] font-semibold text-white/45">{control.label}</span>
                         <input
                           type="range"
-                          min="-3"
-                          max="3"
+                          min="-10"
+                          max="10"
                           step="0.01"
                           value={control.value}
                           onChange={(event) => setSplatAlignmentAxis(control.axis, Number(event.currentTarget.value))}
@@ -2699,12 +2955,97 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                       </div>
                     ))}
                   </div>
+                  <div className="mt-3 grid grid-cols-[48px_1fr_64px] items-center gap-2">
+                    <span className="text-[10px] font-semibold text-white/45">Schaal</span>
+                    <input
+                      type="range"
+                      min="0.2"
+                      max="3"
+                      step="0.01"
+                      value={splatAlignment.groupScale ?? 1}
+                      onChange={(event) => setSplatScale(Number(event.currentTarget.value))}
+                      className="h-1.5 w-full accent-[#facc15]"
+                    />
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.01"
+                      value={Number((splatAlignment.groupScale ?? 1).toFixed(2))}
+                      onChange={(event) => setSplatScale(Number(event.currentTarget.value || 1))}
+                      className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-[#facc15]/40"
+                    />
+                  </div>
+                  <div className="mt-3 grid grid-cols-[48px_1fr_64px] items-center gap-2">
+                    <span className="text-[10px] font-semibold text-white/45">Masker</span>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="30"
+                      step="0.1"
+                      value={splatAlignment.groupMaskSize ?? 20}
+                      onChange={(event) => setSplatMaskSize(Number(event.currentTarget.value))}
+                      className="h-1.5 w-full accent-emerald-400"
+                    />
+                    <input
+                      type="number"
+                      min="0.2"
+                      step="0.1"
+                      value={Number((splatAlignment.groupMaskSize ?? 20).toFixed(1))}
+                      onChange={(event) => setSplatMaskSize(Number(event.currentTarget.value || 20))}
+                      className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-emerald-400/40"
+                    />
+                  </div>
+                  <p className="mt-3 text-[10px] font-semibold text-white/40">Kanteling</p>
+                  <div className="mt-1.5 space-y-2.5">
+                    {([
+                      { axis: 'x' as const, label: 'V/A', title: 'Voor/achter kantelen', value: splatAlignment.groupTiltX ?? 0 },
+                      { axis: 'z' as const, label: 'L/R', title: 'Links/rechts kantelen', value: splatAlignment.groupTiltZ ?? 0 },
+                    ]).map((control) => (
+                      <div key={control.axis} className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
+                        <span className="text-[10px] font-semibold text-white/45" title={control.title}>{control.label}</span>
+                        <input
+                          type="range"
+                          min="-0.5"
+                          max="0.5"
+                          step="0.001"
+                          value={control.value}
+                          onChange={(event) => setSplatTilt(control.axis, Number(event.currentTarget.value))}
+                          className="h-1.5 w-full accent-sky-400"
+                        />
+                        <input
+                          type="number"
+                          step="0.001"
+                          value={Number(control.value.toFixed(3))}
+                          onChange={(event) => setSplatTilt(control.axis, Number(event.currentTarget.value || 0))}
+                          className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-sky-400/40"
+                        />
+                      </div>
+                    ))}
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (splatPuntMode !== 'off') {
+                      resetPuntMode()
+                    } else {
+                      setSplatPuntMode('foto')
+                    }
+                  }}
+                  className={`mt-1 w-full rounded-md border py-1.5 text-[11px] font-medium ${
+                    splatPuntMode !== 'off'
+                      ? 'border-orange-400/40 bg-orange-500/20 text-orange-300 hover:bg-orange-500/30'
+                      : 'border-orange-400/20 bg-orange-500/8 text-orange-300/70 hover:bg-orange-500/15'
+                  }`}
+                >
+                  {splatPuntMode !== 'off' ? '✕ Punt-uitlijning stoppen' : 'Punt-uitlijning'}
+                </button>
                 <button
                   type="button"
                   onClick={() => {
                     setSplatAlignment(null)
                     setSplatBaseAlignment(null)
+                    resetPuntMode()
                   }}
                   className="mt-1 w-full rounded-md border border-white/10 bg-white/[0.04] py-1.5 text-[11px] font-medium text-white/40 hover:bg-white/[0.07]"
                 >
@@ -3109,8 +3450,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     </>
   )
 
-  const overlayPasses: { key: 'calibration' | 'light' | 'productLayer' | 'composite' | 'bgComposite'; label: string; src: string | undefined; icon: string }[] = [
-    { key: 'calibration', label: 'Calibration', src: calibrationPreviewUrl, icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z' },
+  const overlayPasses: { key: 'light' | 'productLayer' | 'composite' | 'bgComposite'; label: string; src: string | undefined; icon: string }[] = [
     { key: 'light', label: 'Light map', src: lightMapPreviewUrl, icon: 'M12 2L2 7l10 5 10-5zM2 17l10 5 10-5M2 12l10 5 10-5' },
     { key: 'productLayer', label: 'Product layer', src: productLayerUrl, icon: 'M12 2a10 10 0 100 20 10 10 0 000-20zM12 8v8M8 12h8' },
     { key: 'composite', label: 'Composite', src: finalCompositeUrl ?? project.finalRender?.src, icon: 'M4 4h16v16H4zM9 9h6v6H9z' },
@@ -3123,7 +3463,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     : viewportOverlay ? overlayPasses.find((p) => p.key === viewportOverlay)?.src : undefined
 
   const viewportContent = (
-    <div className="relative h-full w-full">
+    <div ref={viewportShellRef} className="relative h-full w-full">
       {backgroundLocked && viewportOverlay === 'composite' && (
         <div className="pointer-events-none absolute left-3 top-3 z-40 flex items-center gap-1.5 rounded-full bg-black/50 px-2.5 py-1 backdrop-blur-sm">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-[#facc15]">
@@ -3133,6 +3473,235 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           <span className="text-[11px] font-medium text-white/70">Achtergrond vergrendeld</span>
         </div>
       )}
+      {/* Point-alignment: transparent canvas overlay for picking scene points */}
+      {splatPuntMode === 'scene' && (
+        <div
+          className="absolute inset-0 z-30 cursor-crosshair"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect()
+            const x = (e.clientX - rect.left) / rect.width
+            const y = (e.clientY - rect.top) / rect.height
+            setPuntenScene((prev) => [...prev, { x, y }])
+          }}
+        >
+          {puntenScene.map((p, i) => (
+            <div
+              key={i}
+              className="pointer-events-none absolute flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white/60 bg-sky-500 text-[9px] font-bold text-white shadow-lg"
+              style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }}
+            >
+              {i + 1}
+            </div>
+          ))}
+          <div className="pointer-events-none absolute bottom-20 left-1/2 -translate-x-1/2">
+            <div className="rounded-full bg-black/70 px-4 py-2 text-[11px] text-sky-200 backdrop-blur-sm">
+              {puntenScene.length < puntenFoto.length
+                ? `Klik punt ${puntenScene.length + 1} van ${puntenFoto.length} aan in de scène`
+                : 'Klik "Uitlijnen" om toe te passen'}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Point-alignment: draggable/resizable/zoomable photo panel */}
+      {splatPuntMode !== 'off' && (() => {
+        const refImg = finalCompositeUrl ?? project.finalRender?.src ?? backgroundPlateUrl ?? project.sourceImage?.src
+        if (!refImg) return null
+        const imgH = Math.round(puntPanelW / imgNaturalAspect)
+        const panelX = puntPanelPos?.x ?? (window.innerWidth - puntPanelW - 16)
+        const panelY = puntPanelPos?.y ?? (window.innerHeight - imgH - 160)
+
+        const startPanelDrag = (e: React.MouseEvent) => {
+          e.preventDefault()
+          const ox = e.clientX - panelX
+          const oy = e.clientY - panelY
+          const onMove = (ev: MouseEvent) => {
+            setPuntPanelPos({
+              x: Math.max(0, Math.min(window.innerWidth - puntPanelW, ev.clientX - ox)),
+              y: Math.max(0, Math.min(window.innerHeight - 60, ev.clientY - oy)),
+            })
+          }
+          const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+          window.addEventListener('mousemove', onMove)
+          window.addEventListener('mouseup', onUp)
+        }
+
+        const startResizeDrag = (e: React.MouseEvent) => {
+          e.preventDefault()
+          e.stopPropagation()
+          const startX = e.clientX
+          const startW = puntPanelW
+          const onMove = (ev: MouseEvent) => {
+            setPuntPanelW(Math.max(200, Math.min(700, startW + (ev.clientX - startX))))
+          }
+          const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+          window.addEventListener('mousemove', onMove)
+          window.addEventListener('mouseup', onUp)
+        }
+
+        const onImgMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+          if (e.button !== 0) return
+          imgPanStartRef.current = { x: e.clientX, y: e.clientY, ox: imgOffset.x, oy: imgOffset.y, moved: false }
+        }
+
+        const onImgMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+          if (!imgPanStartRef.current) return
+          const dx = e.clientX - imgPanStartRef.current.x
+          const dy = e.clientY - imgPanStartRef.current.y
+          if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+            imgPanStartRef.current.moved = true
+            const rect = e.currentTarget.getBoundingClientRect()
+            const cw = rect.width
+            const ch = imgH
+            setImgOffset({
+              x: Math.min(0, Math.max(cw - cw * imgZoom, imgPanStartRef.current.ox + dx)),
+              y: Math.min(0, Math.max(ch - ch * imgZoom, imgPanStartRef.current.oy + dy)),
+            })
+          }
+        }
+
+        const onImgMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
+          const start = imgPanStartRef.current
+          imgPanStartRef.current = null
+          if (!start || start.moved || splatPuntMode !== 'foto') return
+          const rect = e.currentTarget.getBoundingClientRect()
+          const x = Math.max(0, Math.min(1, (e.clientX - rect.left - imgOffset.x) / (rect.width * imgZoom)))
+          const y = Math.max(0, Math.min(1, (e.clientY - rect.top - imgOffset.y) / (imgH * imgZoom)))
+          setPuntenFoto((prev) => [...prev, { x, y }])
+        }
+
+        return (
+          <div
+            className="fixed z-50 overflow-hidden rounded-xl border border-white/15 bg-black/90 shadow-2xl backdrop-blur-md"
+            style={{ left: panelX, top: panelY, width: puntPanelW }}
+          >
+            {/* Draggable header */}
+            <div
+              className="flex cursor-grab items-center justify-between px-2.5 py-2 select-none active:cursor-grabbing"
+              onMouseDown={startPanelDrag}
+            >
+              <span className="text-[11px] font-semibold text-white/70">
+                {splatPuntMode === 'foto' ? '📍 Stap 1: klik punten op composite' : '📍 Stap 2: klik in de scène'}
+              </span>
+              <button type="button" onClick={resetPuntMode} className="ml-2 shrink-0 text-[13px] leading-none text-white/40 hover:text-white/70">✕</button>
+            </div>
+
+            {/* Zoomable/pannable image area */}
+            <div
+              ref={imgContainerRef}
+              className="relative mx-2 overflow-hidden rounded-lg select-none"
+              style={{
+                height: imgH,
+                cursor: imgZoom > 1
+                  ? (imgPanStartRef.current?.moved ? 'grabbing' : 'grab')
+                  : (splatPuntMode === 'foto' ? 'crosshair' : 'default'),
+              }}
+              onMouseDown={onImgMouseDown}
+              onMouseMove={onImgMouseMove}
+              onMouseUp={onImgMouseUp}
+              onMouseLeave={() => { imgPanStartRef.current = null }}
+            >
+              {/* Scaled image + markers in one layer */}
+              <div
+                style={{
+                  position: 'absolute',
+                  left: imgOffset.x,
+                  top: imgOffset.y,
+                  width: `${imgZoom * 100}%`,
+                  height: `${imgZoom * 100}%`,
+                }}
+              >
+                <img
+                  src={refImg}
+                  className="block h-full w-full"
+                  style={{ objectFit: 'fill', pointerEvents: 'none', userSelect: 'none' }}
+                  draggable={false}
+                  onLoad={(e) => {
+                    const img = e.currentTarget
+                    if (img.naturalHeight > 0) setImgNaturalAspect(img.naturalWidth / img.naturalHeight)
+                  }}
+                />
+                {puntenFoto.map((p, i) => (
+                  <div
+                    key={i}
+                    className="pointer-events-none absolute flex h-5 w-5 items-center justify-center rounded-full border-2 border-white/70 bg-orange-500 text-[8px] font-bold text-white shadow-lg"
+                    style={{
+                      left: `${p.x * 100}%`,
+                      top: `${p.y * 100}%`,
+                      transform: `translate(-50%, -50%) scale(${1 / imgZoom})`,
+                    }}
+                  >
+                    {i + 1}
+                  </div>
+                ))}
+              </div>
+              {/* Zoom level indicator */}
+              {imgZoom > 1 && (
+                <div className="pointer-events-none absolute right-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white/60">
+                  {Math.round(imgZoom * 100)}%
+                </div>
+              )}
+            </div>
+
+            {/* Controls */}
+            <div className="px-2.5 pb-2.5 pt-2 space-y-1.5">
+              {imgZoom > 1 && (
+                <button
+                  type="button"
+                  onClick={() => { setImgZoom(1); setImgOffset({ x: 0, y: 0 }) }}
+                  className="rounded border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[9px] text-white/40 hover:bg-white/[0.08]"
+                >
+                  Reset zoom
+                </button>
+              )}
+              {splatPuntMode === 'foto' && puntenFoto.length === 0 && (
+                <p className="text-[9px] text-white/40">Scroll om in te zoomen · Klik herkenbare punten in de achtergrond aan (bijv. hoeken van het blok)</p>
+              )}
+              {splatPuntMode === 'foto' && puntenFoto.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSplatPuntMode('scene')}
+                  className="w-full rounded-md border border-sky-400/25 bg-sky-500/20 py-1.5 text-[11px] font-medium text-sky-300 hover:bg-sky-500/30"
+                >
+                  Klaar → Klik nu in de scène ({puntenFoto.length} punt{puntenFoto.length !== 1 ? 'en' : ''})
+                </button>
+              )}
+              {splatPuntMode === 'scene' && (
+                <>
+                  {puntenScene.length >= puntenFoto.length && puntenFoto.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={berekenPuntUitlijning}
+                      className="w-full rounded-md border border-emerald-400/25 bg-emerald-500/20 py-1.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/30"
+                    >
+                      Uitlijnen toepassen
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => { setSplatPuntMode('foto'); setPuntenScene([]) }}
+                    className="w-full rounded-md border border-white/10 bg-white/[0.04] py-1 text-[11px] font-medium text-white/40 hover:bg-white/[0.07]"
+                  >
+                    ← Composite opnieuw
+                  </button>
+                </>
+              )}
+              <p className="text-center text-[9px] text-white/25">
+                {puntenFoto.length} composite · {puntenScene.length} scène
+              </p>
+            </div>
+
+            {/* Resize handle */}
+            <div
+              className="absolute bottom-0 right-0 h-5 w-5 cursor-se-resize opacity-40 hover:opacity-80"
+              onMouseDown={startResizeDrag}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" className="absolute bottom-1 right-1 text-white/60">
+                <path d="M9 1L1 9M9 5L5 9M9 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" fill="none"/>
+              </svg>
+            </div>
+          </div>
+        )
+      })()}
       <ReconstructingOverlay visible={envReconstructing} label="Reconstructing environment" />
       <ReconstructingOverlay visible={finalLoading || !!busy} label={busy || 'Composing image'} />
       {!splatViewerUrl && (
@@ -3154,7 +3723,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           debugRings={debugRings}
           viewMode={viewMode}
           environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
-          splatAlignment={splatAlignment}
+          splatAlignment={splatVisible ? splatAlignment : null}
         />
       )}
       {sourceReady && (
@@ -3303,26 +3872,26 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               )
             })}
             <div className="mx-0.5 h-5 w-px bg-white/15" />
-            <button
-              type="button"
-              onClick={() => setEnvMappingEnabled((v) => !v)}
-              className={[
-                'group/btn relative flex h-8 items-center gap-1 rounded-full px-2 transition-colors',
-                envMappingEnabled
-                  ? 'bg-[#facc15]/20 text-[#facc15]'
-                  : 'text-white/50 hover:bg-white/10 hover:text-white/80',
-              ].join(' ')}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
-                <circle cx="12" cy="10" r="3" />
-              </svg>
-              <span className="text-[10px] font-semibold">Env</span>
-              <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-full border border-white/[0.12] bg-white px-2.5 py-1 text-[10px] font-semibold text-black opacity-0 shadow-lg transition-opacity duration-150 group-hover/btn:opacity-100 whitespace-nowrap">
-                {envMappingEnabled ? 'Environment mapping aan' : 'Environment mapping uit'}
-                {envMeshUrls.length > 0 && ` (${envMeshUrls.length} meshes)`}
-              </div>
-            </button>
+            {splatAlignment && (
+              <button
+                type="button"
+                onClick={() => setSplatVisible((v) => !v)}
+                className={[
+                  'group/btn relative flex h-8 items-center gap-1 rounded-full px-2 transition-colors',
+                  splatVisible
+                    ? 'bg-sky-500/20 text-sky-400'
+                    : 'text-white/50 hover:bg-white/10 hover:text-white/80',
+                ].join(' ')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+                </svg>
+                <span className="text-[10px] font-semibold">3D</span>
+                <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-full border border-white/[0.12] bg-white px-2.5 py-1 text-[10px] font-semibold text-black opacity-0 shadow-lg transition-opacity duration-150 group-hover/btn:opacity-100 whitespace-nowrap">
+                  {splatVisible ? '3D achtergrond aan' : '3D achtergrond uit'}
+                </div>
+              </button>
+            )}
             <div className="mx-0.5 h-5 w-px bg-white/15" />
             {overlayPasses.map((pass) => (
               <button

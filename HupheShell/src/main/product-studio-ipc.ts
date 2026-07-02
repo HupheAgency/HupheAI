@@ -3860,4 +3860,121 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       return { ok: false, error: err?.message ?? 'Pose lezen mislukt.' }
     }
   })
+
+  // ─── Brush CLI training ───────────────────────────────────────────────────────
+  ipcMain.handle('product-studio:train-splat', async (_e, args: {
+    projectId: string
+    model?: 'seedance' | 'minimax' | 'kling'
+    brushBinPath?: string
+    maxSteps?: number
+  }) => {
+    const model = args.model ?? 'seedance'
+    const baseWsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+    const wsDir = join(baseWsDir, model)
+    const framesDir = join(wsDir, 'frames')
+    const colmapDir = join(wsDir, 'colmap')
+    const outputDir = join(wsDir, 'brush')
+
+    const pushStep = (step: string, progress: number) => {
+      console.log(`[train-splat] (${progress}%) ${step}`)
+      _e.sender.send('product-studio:training-progress', { step, progress })
+    }
+
+    try {
+      const { existsSync } = await import('fs')
+      if (!existsSync(framesDir)) return { ok: false, error: 'Geen frames gevonden. Voer eerst de orbit-stap uit.' }
+
+      // Zoek Brush binary (gebundeld in app → local installs → BRUSH_BIN env)
+      const { runBrush, findBrushBinary } = await import('./lib/brush-trainer')
+      const brushBinPath = findBrushBinary(args.brushBinPath)
+      if (!brushBinPath) {
+        return {
+          ok: false,
+          error:
+            'Brush binary niet gevonden. De binary hoort meegeleverd te zijn met de app.\n' +
+            'Als je de app opnieuw installeert lost dit zich vanzelf op.\n' +
+            'Of installeer Brush handmatig: https://github.com/ArthurBrussee/brush',
+        }
+      }
+
+      pushStep('Dataset klaarmaken...', 2)
+
+      const maxSteps = args.maxSteps ?? 10000
+      let lastProgress = 2
+
+      const result = await runBrush({
+        framesDir,
+        colmapDir,
+        outputDir,
+        brushBinPath,
+        maxSteps,
+        onProgress: ({ step, totalSteps, loss, elapsedSec }) => {
+          const pct = Math.min(95, 5 + Math.round((step / totalSteps) * 90))
+          if (pct > lastProgress + 1) {
+            lastProgress = pct
+            const lossStr = loss != null ? ` · loss ${loss.toFixed(4)}` : ''
+            pushStep(`Brush training: stap ${step}/${totalSteps}${lossStr} (${elapsedSec}s)`, pct)
+          }
+        },
+        onLog: (line) => console.log('[brush]', line),
+      })
+
+      // Converteer PLY naar splat-formaat (floor detection etc.)
+      pushStep('PLY verwerken...', 96)
+      const { plyToSplat } = await import('./lib/ply-to-splat')
+      const { splatPath, localFloorY } = await plyToSplat(result.plyPath)
+      const splatUrl = `huphe://file/${encodeURIComponent(splatPath)}`
+
+      // Lees COLMAP pose voor auto-alignment
+      pushStep('Camera-positie uitlezen...', 98)
+      let pose = null
+      try {
+        const { readColmapPose } = await import('./lib/colmap-reader')
+        const sparseDir = existsSync(join(colmapDir, 'sparse', '1', 'images.bin'))
+          ? join(colmapDir, 'sparse', '1')
+          : join(colmapDir, 'sparse', '0')
+        pose = await readColmapPose(sparseDir)
+      } catch {
+        // pose optioneel
+      }
+
+      pushStep('Klaar!', 100)
+      return { ok: true, splatUrl, localFloorY, pose, plyPath: result.plyPath }
+    } catch (err: any) {
+      console.error('[train-splat]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Brush training mislukt.' }
+    }
+  })
+
+  // ─── Scene.json opslaan en laden ──────────────────────────────────────────────
+  ipcMain.handle('product-studio:save-scene-alignment', async (_e, args: {
+    projectId: string
+    alignment: Record<string, unknown>
+  }) => {
+    try {
+      const { writeFile, mkdir } = await import('fs/promises')
+      const dir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+      await mkdir(dir, { recursive: true })
+      const scenePath = join(dir, 'scene.json')
+      const data = JSON.stringify({ version: 1, savedAt: new Date().toISOString(), alignment: args.alignment }, null, 2)
+      await writeFile(scenePath, data, 'utf8')
+      return { ok: true }
+    } catch (err: any) {
+      return { ok: false, error: err?.message }
+    }
+  })
+
+  ipcMain.handle('product-studio:load-scene-alignment', async (_e, args: { projectId: string }) => {
+    try {
+      const { readFile } = await import('fs/promises')
+      const { existsSync } = await import('fs')
+      const scenePath = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, 'scene.json')
+      if (!existsSync(scenePath)) return { ok: false, error: 'Geen opgeslagen uitlijning gevonden.' }
+      const raw = await readFile(scenePath, 'utf8')
+      const { alignment } = JSON.parse(raw)
+      return { ok: true, alignment }
+    } catch (err: any) {
+      return { ok: false, error: err?.message }
+    }
+  })
 }

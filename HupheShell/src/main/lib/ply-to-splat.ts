@@ -82,9 +82,19 @@ export async function plyToSplat(plyPath: string): Promise<{ splatPath: string; 
   // Output buffer: 32 bytes per vertex
   const out = Buffer.allocUnsafe(numVertices * 32)
   const yValues: number[] = []
+  let validVertices = 0
 
   for (let i = 0; i < numVertices; i++) {
-    const base = i * 32
+    const opacity = sigmoid(get(i, 'opacity'))
+    // Mist / floaters filter: opacity < ~6% (15 out of 255)
+    // Dit verwijdert de gigantische wolken aan de randen van de scan
+    if (opacity * 255 < 15) {
+      continue
+    }
+
+    const base = validVertices * 32
+    validVertices++
+
     const x = get(i, 'x')
     const y = get(i, 'y')
     const z = get(i, 'z')
@@ -106,7 +116,7 @@ export async function plyToSplat(plyPath: string): Promise<{ splatPath: string; 
     const r = clamp((0.5 + SH_C0 * get(i, 'f_dc_0')) * 255)
     const g = clamp((0.5 + SH_C0 * get(i, 'f_dc_1')) * 255)
     const b = clamp((0.5 + SH_C0 * get(i, 'f_dc_2')) * 255)
-    const a = clamp(sigmoid(get(i, 'opacity')) * 255)
+    const a = clamp(opacity * 255)
     out[base + 24] = r
     out[base + 25] = g
     out[base + 26] = b
@@ -130,7 +140,8 @@ export async function plyToSplat(plyPath: string): Promise<{ splatPath: string; 
     : 0
 
   const splatPath = join(dirname(plyPath), basename(plyPath, '.ply') + '.splat')
-  await writeFile(splatPath, out)
-  console.log(`[ply-to-splat] ${numVertices} vertices → ${splatPath} | localFloorY=${localFloorY.toFixed(3)}`)
+  const finalOut = out.subarray(0, validVertices * 32)
+  await writeFile(splatPath, finalOut)
+  console.log(`[ply-to-splat] ${numVertices} vertices → ${validVertices} valid → ${splatPath} | localFloorY=${localFloorY.toFixed(3)}`)
   return { splatPath, localFloorY }
 }

@@ -8,8 +8,9 @@
     "build": "electron-vite build",
     "build:safe": "npm run test:security && npm run build",
     "preview": "electron-vite preview",
-    "build:mac": "npm run build:safe && electron-builder --mac --dir",
-    "dist:mac": "npm run build:safe && electron-builder --mac",
+    "download:brush": "node scripts/download-brush.mjs",
+    "build:mac": "node scripts/download-brush.mjs && npm run build:safe && electron-builder --mac --dir",
+    "dist:mac": "node scripts/download-brush.mjs && npm run build:safe && electron-builder --mac",
     "test": "echo \"No tests configured\"",
     "test:security": "node scripts/security-smoke-test.mjs"
   },
