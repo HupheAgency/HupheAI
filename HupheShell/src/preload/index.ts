@@ -352,6 +352,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:save-scene-alignment', args),
     loadSceneAlignment: (args: { projectId: string }) =>
       ipcRenderer.invoke('product-studio:load-scene-alignment', args),
+    reconvertSplat: (args: { plyPath: string; alphaThreshold?: number; scaleIqrFactor?: number; positionSigma?: number }) =>
+      ipcRenderer.invoke('product-studio:reconvert-splat', args),
     onTrainingProgress: (cb: (data: { step: string; progress: number }) => void) => {
       const handler = (_: unknown, data: { step: string; progress: number }) => cb(data)
       ipcRenderer.on('product-studio:training-progress', handler)

@@ -7,6 +7,11 @@
  *   - 12 bytes: scale xyz (float32 × 3, exp() toegepast)
  *   -  4 bytes: color rgba (uint8 × 4, sigmoid toegepast op f_dc en opacity)
  *   -  4 bytes: rotation quaternion (int8 × 4, genormaliseerd naar -128..128)
+ *
+ * Filters (twee passes):
+ *   1. Alpha-drempel  — lage-opacity mist/floaters (instelbaar, default 15/255 ≈ 6%)
+ *   2. Schaalfilter   — IQR outlier: Q3 + 3×IQR van max(sx,sy,sz)
+ *   3. Bounding box   — posities buiten 4×standaarddeviatie van het gemiddelde
  */
 
 import { readFile, writeFile } from 'fs/promises'
@@ -36,7 +41,35 @@ function readFloat(buf: Buffer, offset: number, littleEndian = true): number {
   return littleEndian ? buf.readFloatLE(offset) : buf.readFloatBE(offset)
 }
 
-export async function plyToSplat(plyPath: string): Promise<{ splatPath: string; localFloorY: number }> {
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor(p * sorted.length)))
+  return sorted[idx]
+}
+
+function meanStd(values: number[]): { mean: number; std: number } {
+  if (values.length === 0) return { mean: 0, std: 1 }
+  const mean = values.reduce((s, v) => s + v, 0) / values.length
+  const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length
+  return { mean, std: Math.sqrt(variance) || 1 }
+}
+
+export interface PlyToSplatOptions {
+  alphaThreshold?: number   // uint8, default 15 (~6%)
+  positionSigma?: number    // std-dev multiplier for bounding box, default 4
+  scaleIqrFactor?: number   // Tukey fence multiplier for scale, default 3
+}
+
+export async function plyToSplat(
+  plyPath: string,
+  options: PlyToSplatOptions = {},
+): Promise<{ splatPath: string; localFloorY: number }> {
+  const {
+    alphaThreshold = 15,
+    positionSigma = 4,
+    scaleIqrFactor = 3,
+  } = options
+
   const raw = await readFile(plyPath)
 
   // Parse header
@@ -79,50 +112,94 @@ export async function plyToSplat(plyPath: string): Promise<{ splatPath: string; 
     return readFloat(data, off, littleEndian)
   }
 
-  // Output buffer: 32 bytes per vertex
-  const out = Buffer.allocUnsafe(numVertices * 32)
-  const yValues: number[] = []
-  let validVertices = 0
+  // ── Pass 1: verzamel statistieken voor alle alpha-valide vertices ──────────
+  const xs: number[] = [], ys: number[] = [], zs: number[] = []
+  const maxScales: number[] = []
 
   for (let i = 0; i < numVertices; i++) {
     const opacity = sigmoid(get(i, 'opacity'))
-    // Mist / floaters filter: opacity < ~6% (15 out of 255)
-    // Dit verwijdert de gigantische wolken aan de randen van de scan
-    if (opacity * 255 < 15) {
+    if (opacity * 255 < alphaThreshold) continue
+
+    xs.push(get(i, 'x'))
+    ys.push(get(i, 'y'))
+    zs.push(get(i, 'z'))
+
+    const s = Math.max(
+      Math.exp(get(i, 'scale_0')),
+      Math.exp(get(i, 'scale_1')),
+      Math.exp(get(i, 'scale_2')),
+    )
+    maxScales.push(s)
+  }
+
+  // Schaalgrens via Tukey-fence (IQR)
+  const sortedScales = [...maxScales].sort((a, b) => a - b)
+  const q1 = percentile(sortedScales, 0.25)
+  const q3 = percentile(sortedScales, 0.75)
+  const iqr = q3 - q1
+  const maxScaleAllowed = q3 + scaleIqrFactor * iqr
+
+  // Positiegrenzen via mean ± sigma × std per as
+  const statX = meanStd(xs)
+  const statY = meanStd(ys)
+  const statZ = meanStd(zs)
+  const bounds = {
+    xMin: statX.mean - positionSigma * statX.std, xMax: statX.mean + positionSigma * statX.std,
+    yMin: statY.mean - positionSigma * statY.std, yMax: statY.mean + positionSigma * statY.std,
+    zMin: statZ.mean - positionSigma * statZ.std, zMax: statZ.mean + positionSigma * statZ.std,
+  }
+
+  console.log(`[ply-to-splat] filters: alpha≥${alphaThreshold}, maxScale≤${maxScaleAllowed.toFixed(3)} (IQR×${scaleIqrFactor}), pos bounds X[${bounds.xMin.toFixed(2)},${bounds.xMax.toFixed(2)}] Y[${bounds.yMin.toFixed(2)},${bounds.yMax.toFixed(2)}] Z[${bounds.zMin.toFixed(2)},${bounds.zMax.toFixed(2)}]`)
+
+  // ── Pass 2: schrijf gefilterde vertices ───────────────────────────────────
+  const out = Buffer.allocUnsafe(numVertices * 32)
+  const yValues: number[] = []
+  let validVertices = 0
+  let filteredScale = 0, filteredBounds = 0
+
+  for (let i = 0; i < numVertices; i++) {
+    const opacity = sigmoid(get(i, 'opacity'))
+    if (opacity * 255 < alphaThreshold) continue
+
+    const x = get(i, 'x')
+    const y = get(i, 'y')
+    const z = get(i, 'z')
+
+    // Bounding box filter
+    if (x < bounds.xMin || x > bounds.xMax ||
+        y < bounds.yMin || y > bounds.yMax ||
+        z < bounds.zMin || z > bounds.zMax) {
+      filteredBounds++
+      continue
+    }
+
+    // Schaalfilter
+    const sx = Math.exp(get(i, 'scale_0'))
+    const sy = Math.exp(get(i, 'scale_1'))
+    const sz = Math.exp(get(i, 'scale_2'))
+    if (Math.max(sx, sy, sz) > maxScaleAllowed) {
+      filteredScale++
       continue
     }
 
     const base = validVertices * 32
     validVertices++
-
-    const x = get(i, 'x')
-    const y = get(i, 'y')
-    const z = get(i, 'z')
     yValues.push(y)
 
-    // Position (float32 × 3)
     out.writeFloatLE(x, base + 0)
     out.writeFloatLE(y, base + 4)
     out.writeFloatLE(z, base + 8)
+    out.writeFloatLE(sx, base + 12)
+    out.writeFloatLE(sy, base + 16)
+    out.writeFloatLE(sz, base + 20)
 
-    // Scale (exp van log-scale, float32 × 3)
-    out.writeFloatLE(Math.exp(get(i, 'scale_0')), base + 12)
-    out.writeFloatLE(Math.exp(get(i, 'scale_1')), base + 16)
-    out.writeFloatLE(Math.exp(get(i, 'scale_2')), base + 20)
-
-    // Color RGBA (uint8): lineaire SH DC formule — geen sigmoid op kleur
     const SH_C0 = 0.28209479177387814
     const clamp = (v: number) => Math.min(255, Math.max(0, Math.round(v)))
-    const r = clamp((0.5 + SH_C0 * get(i, 'f_dc_0')) * 255)
-    const g = clamp((0.5 + SH_C0 * get(i, 'f_dc_1')) * 255)
-    const b = clamp((0.5 + SH_C0 * get(i, 'f_dc_2')) * 255)
-    const a = clamp(opacity * 255)
-    out[base + 24] = r
-    out[base + 25] = g
-    out[base + 26] = b
-    out[base + 27] = a
+    out[base + 24] = clamp((0.5 + SH_C0 * get(i, 'f_dc_0')) * 255)
+    out[base + 25] = clamp((0.5 + SH_C0 * get(i, 'f_dc_1')) * 255)
+    out[base + 26] = clamp((0.5 + SH_C0 * get(i, 'f_dc_2')) * 255)
+    out[base + 27] = clamp(opacity * 255)
 
-    // Rotation quaternion: genormaliseerd naar uint8 (0..255, mapping: q * 128 + 128)
     const qw = get(i, 'rot_0')
     const qx = get(i, 'rot_1')
     const qy = get(i, 'rot_2')
@@ -140,8 +217,7 @@ export async function plyToSplat(plyPath: string): Promise<{ splatPath: string; 
     : 0
 
   const splatPath = join(dirname(plyPath), basename(plyPath, '.ply') + '.splat')
-  const finalOut = out.subarray(0, validVertices * 32)
-  await writeFile(splatPath, finalOut)
-  console.log(`[ply-to-splat] ${numVertices} vertices → ${validVertices} valid → ${splatPath} | localFloorY=${localFloorY.toFixed(3)}`)
+  await writeFile(splatPath, out.subarray(0, validVertices * 32))
+  console.log(`[ply-to-splat] ${numVertices} vertices → ${validVertices} geldig (−${filteredScale} schaal, −${filteredBounds} bounds) → ${splatPath} | floorY=${localFloorY.toFixed(3)}`)
   return { splatPath, localFloorY }
 }

@@ -1105,11 +1105,14 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     <div className="relative h-full w-full" onClick={(e) => { if (e.target === e.currentTarget) onDeselectAll() }}>
       <Canvas
         ref={canvasRef}
-        gl={{ preserveDrawingBuffer: true, antialias: true, alpha: true }}
+        gl={{ preserveDrawingBuffer: true, antialias: true, alpha: true, powerPreference: 'high-performance' }}
         camera={{ position: initialPos, fov: initialFov, near: 0.1, far: 1000 }}
         shadows
         style={{ background: transparentCanvas ? 'transparent' : viewMode === 'rendered' ? '#000000' : '#1a1a1a' }}
         onPointerMissed={() => onDeselectAll()}
+        onCreated={({ gl }) => {
+          gl.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault() }, false)
+        }}
       >
         <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
         <RenderPassCapture passRef={passRef} />
@@ -1146,6 +1149,9 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
             groupTiltZ={splatAlignment.groupTiltZ ?? 0}
             groupScale={splatAlignment.groupScale ?? 1}
             groupMaskSize={splatAlignment.groupMaskSize ?? 20}
+            groupMaskOffsetX={splatAlignment.groupMaskOffsetX ?? 0}
+            groupMaskOffsetY={splatAlignment.groupMaskOffsetY ?? 0}
+            groupMaskOffsetZ={splatAlignment.groupMaskOffsetZ ?? 0}
           />
         )}
       </Canvas>

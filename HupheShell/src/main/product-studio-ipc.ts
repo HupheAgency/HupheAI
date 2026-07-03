@@ -3977,4 +3977,28 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       return { ok: false, error: err?.message }
     }
   })
+
+  // ─── Herconverteer PLY naar .splat met nieuwe cleanup-instellingen ────────
+  ipcMain.handle('product-studio:reconvert-splat', async (_e, args: {
+    plyPath: string
+    alphaThreshold?: number
+    scaleIqrFactor?: number
+    positionSigma?: number
+  }) => {
+    try {
+      const { existsSync } = await import('fs')
+      if (!existsSync(args.plyPath)) return { ok: false, error: `PLY niet gevonden: ${args.plyPath}` }
+      const { plyToSplat } = await import('./lib/ply-to-splat')
+      const { splatPath, localFloorY } = await plyToSplat(args.plyPath, {
+        alphaThreshold: args.alphaThreshold,
+        scaleIqrFactor: args.scaleIqrFactor,
+        positionSigma: args.positionSigma,
+      })
+      const splatUrl = `huphe://file/${encodeURIComponent(splatPath)}`
+      return { ok: true, splatUrl, localFloorY }
+    } catch (err: any) {
+      console.error('[reconvert-splat]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Herconversie mislukt.' }
+    }
+  })
 }

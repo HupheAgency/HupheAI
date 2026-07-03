@@ -652,6 +652,37 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setSplatAlignment((prev) => prev ? { ...prev, groupMaskSize: safeValue } : prev)
   }
 
+  const [splatReconverting, setSplatReconverting] = useState(false)
+
+  const reconvertSplat = async () => {
+    const api = getProductStudioApi()
+    if (!api || !splatAlignment?.plyPath) return
+    setSplatReconverting(true)
+    try {
+      const result = await api.reconvertSplat?.({
+        plyPath: splatAlignment.plyPath,
+        alphaThreshold: splatAlignment.cleanupAlpha ?? 15,
+        scaleIqrFactor: splatAlignment.cleanupScaleIqr ?? 3,
+        positionSigma: splatAlignment.cleanupPosSigma ?? 4,
+      })
+      if (result?.ok && result.splatUrl) {
+        setSplatAlignment((prev) => prev ? { ...prev, splatUrl: result.splatUrl } : prev)
+      }
+    } finally {
+      setSplatReconverting(false)
+    }
+  }
+
+  const setSplatMaskOffset = (axis: 'x' | 'y' | 'z', value: number) => {
+    const safeValue = Number.isFinite(value) ? value : 0
+    setSplatAlignment((prev) => prev ? {
+      ...prev,
+      groupMaskOffsetX: axis === 'x' ? safeValue : (prev.groupMaskOffsetX ?? 0),
+      groupMaskOffsetY: axis === 'y' ? safeValue : (prev.groupMaskOffsetY ?? 0),
+      groupMaskOffsetZ: axis === 'z' ? safeValue : (prev.groupMaskOffsetZ ?? 0),
+    } : prev)
+  }
+
   const [splatPuntMode, setSplatPuntMode] = useState<'off' | 'foto' | 'scene'>('off')
   const [puntenFoto, setPuntenFoto] = useState<Array<{ x: number; y: number }>>([])
   const [puntenScene, setPuntenScene] = useState<Array<{ x: number; y: number }>>([])
@@ -775,6 +806,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       // Auto-load het PLY + COLMAP pose in de scene
       const nextAlignment: SplatAlignment = {
         splatUrl: result.splatUrl,
+        plyPath: result.plyPath,
         ...(result.pose ?? {
           position: [0, 5, 6] as [number, number, number],
           quaternion: [0, 0, 0, 1] as [number, number, number, number],
@@ -788,6 +820,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         groupPositionZ: 0,
         groupTiltX: 0,
         groupTiltZ: 0,
+        cleanupAlpha: 15,
+        cleanupScaleIqr: 3,
+        cleanupPosSigma: 4,
       }
       setSplatViewerUrl(null)
       setSplatBaseAlignment(nextAlignment)
@@ -2995,6 +3030,110 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                       className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-emerald-400/40"
                     />
                   </div>
+                  <p className="mt-3 text-[10px] font-semibold text-white/40">Masker verschuiven</p>
+                  <div className="mt-1.5 space-y-2.5">
+                    {([
+                      { axis: 'x' as const, label: 'L/R', title: 'Links/rechts', value: splatAlignment.groupMaskOffsetX ?? 0 },
+                      { axis: 'y' as const, label: 'H', title: 'Hoogte', value: splatAlignment.groupMaskOffsetY ?? 0 },
+                      { axis: 'z' as const, label: 'V/A', title: 'Voor/achter', value: splatAlignment.groupMaskOffsetZ ?? 0 },
+                    ]).map((control) => (
+                      <div key={control.axis} className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
+                        <span className="text-[10px] font-semibold text-white/45" title={control.title}>{control.label}</span>
+                        <input
+                          type="range"
+                          min="-10"
+                          max="10"
+                          step="0.05"
+                          value={control.value}
+                          onChange={(event) => setSplatMaskOffset(control.axis, Number(event.currentTarget.value))}
+                          className="h-1.5 w-full accent-emerald-400"
+                        />
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={Number(control.value.toFixed(2))}
+                          onChange={(event) => setSplatMaskOffset(control.axis, Number(event.currentTarget.value || 0))}
+                          className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-emerald-400/40"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  {splatAlignment.plyPath && (
+                    <>
+                      <p className="mt-3 text-[10px] font-semibold text-white/40">Schoonmaak filters</p>
+                      <div className="mt-1.5 space-y-2.5">
+                        <div className="grid grid-cols-[48px_1fr_64px] items-center gap-2">
+                          <span className="text-[10px] font-semibold text-white/45" title="Alpha-drempel (0-255): hogere waarde verwijdert meer mist">Mist</span>
+                          <input
+                            type="range"
+                            min="0"
+                            max="80"
+                            step="1"
+                            value={splatAlignment.cleanupAlpha ?? 15}
+                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupAlpha: Number(e.currentTarget.value) } : prev)}
+                            className="h-1.5 w-full accent-violet-400"
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            max="255"
+                            step="1"
+                            value={splatAlignment.cleanupAlpha ?? 15}
+                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupAlpha: Number(e.currentTarget.value || 15) } : prev)}
+                            className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-violet-400/40"
+                          />
+                        </div>
+                        <div className="grid grid-cols-[48px_1fr_64px] items-center gap-2">
+                          <span className="text-[10px] font-semibold text-white/45" title="IQR-factor voor schaalfilter: lagere waarde verwijdert meer grote splats">Schaal</span>
+                          <input
+                            type="range"
+                            min="1"
+                            max="10"
+                            step="0.5"
+                            value={splatAlignment.cleanupScaleIqr ?? 3}
+                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupScaleIqr: Number(e.currentTarget.value) } : prev)}
+                            className="h-1.5 w-full accent-violet-400"
+                          />
+                          <input
+                            type="number"
+                            min="0.5"
+                            step="0.5"
+                            value={splatAlignment.cleanupScaleIqr ?? 3}
+                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupScaleIqr: Number(e.currentTarget.value || 3) } : prev)}
+                            className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-violet-400/40"
+                          />
+                        </div>
+                        <div className="grid grid-cols-[48px_1fr_64px] items-center gap-2">
+                          <span className="text-[10px] font-semibold text-white/45" title="Bounding box: lagere waarde knipt verder buiten de kern">Rand</span>
+                          <input
+                            type="range"
+                            min="1"
+                            max="8"
+                            step="0.5"
+                            value={splatAlignment.cleanupPosSigma ?? 4}
+                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupPosSigma: Number(e.currentTarget.value) } : prev)}
+                            className="h-1.5 w-full accent-violet-400"
+                          />
+                          <input
+                            type="number"
+                            min="0.5"
+                            step="0.5"
+                            value={splatAlignment.cleanupPosSigma ?? 4}
+                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupPosSigma: Number(e.currentTarget.value || 4) } : prev)}
+                            className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-violet-400/40"
+                          />
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={splatReconverting}
+                        onClick={reconvertSplat}
+                        className="mt-2 w-full rounded-md border border-violet-400/30 bg-violet-500/10 py-1.5 text-[11px] font-medium text-violet-300 hover:bg-violet-500/20 disabled:cursor-wait disabled:opacity-50"
+                      >
+                        {splatReconverting ? 'Herconverteren...' : '↻ Herconverteren met deze filters'}
+                      </button>
+                    </>
+                  )}
                   <p className="mt-3 text-[10px] font-semibold text-white/40">Kanteling</p>
                   <div className="mt-1.5 space-y-2.5">
                     {([
