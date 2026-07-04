@@ -1134,7 +1134,23 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     try {
       const result = await api.getLatestState(projectId)
       if (!result?.ok) throw new Error(result?.error || 'Project synchroniseren mislukt.')
-      setProject((prev) => projectFromLatestState(prev, result))
+      const activeArchiveId = activeArchiveVersionId.current
+      setProject((prev) => {
+        const next = projectFromLatestState(prev, result)
+        if (!activeArchiveId || prev.finalRenderRecord?.id !== activeArchiveId) return next
+
+        // Een herstelde archief-render is bewust de actieve canvas-state.
+        // Achtergrond-polling mag dan wel projectdata verversen, maar niet de canvas
+        // terugduwen naar de nieuwste final render uit de database.
+        return {
+          ...next,
+          finalRenderRecord: prev.finalRenderRecord,
+          finalRender: prev.finalRender,
+          renderPacketRecord: prev.renderPacketRecord,
+          studioScene: prev.studioScene,
+          activeStep: 'final',
+        }
+      })
       void refreshProviderStats(projectId)
       void refreshVersionLists(projectId)
     } catch (err: any) {
@@ -1806,6 +1822,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }
 
   async function captureRenderPacket(promptOverride?: string) {
+    activeArchiveVersionId.current = null
     const packet = await studioRef.current?.captureRenderPacketPreview()
     if (!packet?.beauty && !packet?.passes) {
       setFinalError('Kan nog geen preview uit de studio maken.')
@@ -2040,6 +2057,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         finalRenderRecord: version,
         finalRender: { prompt: version.prompt ?? '', src: version.output_url as string, createdAt: version.created_at },
         renderPacketRecord: packet,
+        studioScene: scene ?? prev.studioScene,
         activeStep: 'final',
         updatedAt: new Date().toISOString(),
       }))
@@ -2131,6 +2149,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }
 
   async function handleFinalPrompt(prompt: string) {
+    activeArchiveVersionId.current = null
     if (renderPacketStale) {
       setFinalError('De studio preview is verouderd. Klik eerst op Update preview zodat de huidige camera en productpositie worden gebruikt.')
       return
@@ -3395,6 +3414,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                         type="button"
                         disabled={!!busy || finalLoading}
                         onClick={async () => {
+                          activeArchiveVersionId.current = null
                           setBusy('Nieuwe hoek genereren...')
                           setFinalError(null)
                           try {
