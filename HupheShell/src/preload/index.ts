@@ -337,13 +337,14 @@ contextBridge.exposeInMainWorld('api', {
     }) => ipcRenderer.invoke('product-studio:finalize-bake', args),
     testOrbitSplat: (args: {
       projectId: string
+      renderVersionId?: string
       imageUrl: string
       arcDegrees?: number
       force?: boolean
       model?: 'seedance' | 'minimax' | 'kling'
       videoOnly?: boolean
     }) => ipcRenderer.invoke('product-studio:test-orbit-splat', args),
-    checkOrbitVideo: (args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling' }) => ipcRenderer.invoke('product-studio:check-orbit-video', args),
+    checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => ipcRenderer.invoke('product-studio:check-orbit-video', args),
     loadSplat: () => ipcRenderer.invoke('product-studio:load-splat'),
     getSplatPose: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:get-splat-pose', args),
     trainSplat: (args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling'; brushBinPath?: string; maxSteps?: number }) =>

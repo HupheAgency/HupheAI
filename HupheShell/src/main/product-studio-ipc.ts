@@ -3635,17 +3635,37 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
   })
 
   // --- Orbit-splat validatietest ---
-  ipcMain.handle('product-studio:check-orbit-video', async (_e, args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling' }) => {
+  ipcMain.handle('product-studio:check-orbit-video', async (_e, args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => {
     const { existsSync } = await import('fs')
+    const { rename, copyFile, unlink } = await import('fs/promises')
     const model = args.model ?? 'seedance'
-    const wsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
-    const videoPath = join(wsDir, 'orbit.mp4')
-    const exists = existsSync(videoPath)
-    return { exists, videoUrl: exists ? `huphe://file/${encodeURIComponent(videoPath)}` : null }
+    const primaryDir = args.renderVersionId
+      ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId, model)
+      : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
+    const primaryPath = join(primaryDir, 'orbit.mp4')
+    if (existsSync(primaryPath)) {
+      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}` }
+    }
+    // Migrate legacy project-level video to per-photo path
+    if (args.renderVersionId) {
+      const legacyPath = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model, 'orbit.mp4')
+      if (existsSync(legacyPath)) {
+        await mkdir(primaryDir, { recursive: true })
+        try {
+          await rename(legacyPath, primaryPath)
+        } catch {
+          await copyFile(legacyPath, primaryPath)
+          await unlink(legacyPath).catch(() => {})
+        }
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}` }
+      }
+    }
+    return { exists: false, videoUrl: null }
   })
 
   ipcMain.handle('product-studio:test-orbit-splat', async (_e, args: {
     projectId: string
+    renderVersionId?: string
     imageUrl: string
     arcDegrees?: number
     force?: boolean
@@ -3665,7 +3685,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
 
     const model = args.model ?? 'seedance'
-    const wsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
+    const wsDir = args.renderVersionId
+      ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId, model)
+      : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
     const videoPath = join(wsDir, 'orbit.mp4')
     const framesDir = join(wsDir, 'frames')
     const colmapDir = join(wsDir, 'colmap')
@@ -3782,31 +3804,141 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         return { ok: false, error: `Te weinig frames (${frameCount}). Video te kort of fps te laag.`, videoUrl }
       }
 
-      // Stap 4: COLMAP via Python subprocess — push tijdsgebaseerde voortgang tijdens wachten
-      pushStep(`Frames analyseren met COLMAP (${frameCount} frames)...`, 72)
-      const scriptPath = join(__dirname, 'lib/colmap_sfm.py')
+      // Stap 4: pose-estimatie — VGGT (als endpoint beschikbaar) of COLMAP fallback
+      const useVggt = !!process.env.VGGT_ENDPOINT_ID
       const python = '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3'
-      const colmapExpectedSec = Math.round(frameCount * 2.5)
-      const colmapTimer = setInterval(() => {
-        // wordt gecanceld zodra COLMAP klaar is
-      }, 8000)
-      let colmapElapsed = 0
-      const colmapInterval = setInterval(() => {
-        colmapElapsed += 8
-        const colmapPct = Math.min(93, 72 + Math.round((colmapElapsed / colmapExpectedSec) * 21))
-        pushStep(`COLMAP bezig... (${colmapElapsed}s / ~${colmapExpectedSec}s verwacht)`, colmapPct)
-      }, 8000)
-      let colmapOut: string
-      try {
-        const result = await exec(`"${python}" "${scriptPath}" "${framesDir}" "${colmapDir}"`, { timeout: 300_000 })
-        colmapOut = result.stdout
-      } finally {
-        clearInterval(colmapTimer)
-        clearInterval(colmapInterval)
+
+      let colmapResult: {
+        registered: number; total: number; pct: number; pass: boolean
+        sparse_dir: string; anchor_point: number[] | null; scale_factor: number | null
       }
 
-      const colmapResult = JSON.parse(colmapOut.trim().split('\n').pop()!)
-      pushStep(`COLMAP klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
+      if (useVggt) {
+        pushStep('Markerframe genereren...', 71)
+        const markerScriptPath = join(__dirname, 'lib/generate_marker_frame.py')
+        const markerFramePath = join(framesDir, 'frame_0000.png')
+        const firstOrbitFrame = join(framesDir, 'frame_0001.png')
+        try {
+          await exec(`"${python}" "${markerScriptPath}" "${firstOrbitFrame}" "${markerFramePath}"`, { timeout: 30_000 })
+        } catch (markerErr: any) {
+          console.warn('[orbit-splat] Markerframe generatie mislukt (doorgaan zonder marker):', markerErr?.message)
+        }
+
+        pushStep('Frames uploaden naar fal.ai...', 72)
+        const { existsSync: existsSync2, readFileSync: readFileSync2 } = await import('fs')
+        const { safeStorage: safeStorage2 } = await import('electron')
+        const falKeyFile2 = join(app.getPath('userData'), 'fal.enc')
+        if (!existsSync2(falKeyFile2)) return { ok: false, error: 'Geen fal.ai API key gevonden voor VGGT.', videoUrl: videoFileUrl }
+        const falKey2 = safeStorage2.decryptString(readFileSync2(falKeyFile2))
+
+        const allFrameFiles = (await import('fs/promises').then(m => m.readdir(framesDir)))
+          .filter(f => f.match(/^frame_\d+\.png$/)).sort()
+        const orbitFrames = allFrameFiles.filter(f => f !== 'frame_0000.png')
+        const maxOrbit = 39
+        const sampleStep = orbitFrames.length > maxOrbit ? Math.ceil(orbitFrames.length / maxOrbit) : 1
+        const sampledOrbit = orbitFrames.filter((_, i) => i % sampleStep === 0).slice(0, maxOrbit)
+        const hasMarker = existsSync2(markerFramePath)
+        const sampledFrames = hasMarker ? ['frame_0000.png', ...sampledOrbit] : sampledOrbit
+        const markerFrameIdx = hasMarker ? 0 : -1
+
+        const frameUrls: string[] = []
+        for (let i = 0; i < sampledFrames.length; i++) {
+          const frameData = await readFile(join(framesDir, sampledFrames[i]))
+          const uploadRes = await fetch('https://storage.fal.ai/upload', {
+            method: 'POST',
+            headers: { 'Authorization': `Key ${falKey2}`, 'Content-Type': 'image/png' },
+            body: frameData,
+          })
+          if (!uploadRes.ok) throw new Error(`Frame upload mislukt: ${uploadRes.status}`)
+          const { url } = await (uploadRes.json() as Promise<{ url: string }>)
+          frameUrls.push(url)
+          if (i % 5 === 0) pushStep(`Frames uploaden... (${i + 1}/${sampledFrames.length})`, 72 + Math.round((i / sampledFrames.length) * 8))
+        }
+        pushStep(`${frameUrls.length} frames geüpload, VGGT starten...`, 81)
+
+        const vggtEndpointId = process.env.VGGT_ENDPOINT_ID
+        const vggtSubmitRes = await fetch(`https://queue.fal.run/${vggtEndpointId}`, {
+          method: 'POST',
+          headers: { 'Authorization': `Key ${falKey2}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ frame_urls: frameUrls, marker_frame_idx: markerFrameIdx, marker_size_m: 0.10, conf_thres: 5.0 }),
+        })
+        if (!vggtSubmitRes.ok) {
+          const errText = await vggtSubmitRes.text()
+          throw new Error(`VGGT submit mislukt ${vggtSubmitRes.status}: ${errText.slice(0, 300)}`)
+        }
+        const vggtSubmit = await vggtSubmitRes.json() as { status_url: string; response_url: string }
+
+        let vggtResult: any = null
+        let vggtElapsed = 0
+        for (let attempt = 0; attempt < 60; attempt++) {
+          await new Promise((r) => setTimeout(r, 5000))
+          vggtElapsed += 5
+          const statusRes = await fetch(vggtSubmit.status_url, { headers: { 'Authorization': `Key ${falKey2}` } })
+          const status = await statusRes.json() as any
+          if (status.status === 'FAILED') throw new Error(`VGGT mislukt: ${JSON.stringify(status).slice(0, 300)}`)
+          if (status.status === 'IN_PROGRESS' || status.status === 'IN_QUEUE') {
+            pushStep(`VGGT bezig... (${vggtElapsed}s)`, Math.min(92, 82 + Math.round(vggtElapsed / 15)))
+          }
+          if (status.status === 'COMPLETED') {
+            const finalRes = await fetch(vggtSubmit.response_url, { headers: { 'Authorization': `Key ${falKey2}` } })
+            vggtResult = await finalRes.json()
+            break
+          }
+        }
+        if (!vggtResult) throw new Error('VGGT timeout (>5 min).')
+        if (!vggtResult.ok) throw new Error(`VGGT fout: ${vggtResult.error ?? 'Onbekend'}`)
+
+        const sparseDir = join(colmapDir, 'sparse', '1')
+        await mkdir(sparseDir, { recursive: true })
+        await writeFile(join(sparseDir, 'cameras.bin'), Buffer.from(vggtResult.cameras_b64, 'base64'))
+        await writeFile(join(sparseDir, 'images.bin'), Buffer.from(vggtResult.images_b64, 'base64'))
+        await writeFile(join(sparseDir, 'points3D.bin'), Buffer.from(vggtResult.points3d_b64, 'base64'))
+
+        colmapResult = {
+          registered: vggtResult.registered ?? sampledFrames.length,
+          total: vggtResult.total ?? sampledFrames.length,
+          pct: vggtResult.pct ?? 100,
+          pass: (vggtResult.pct ?? 100) >= 80,
+          sparse_dir: sparseDir,
+          anchor_point: vggtResult.anchor_point ?? null,
+          scale_factor: vggtResult.scale_factor ?? null,
+        }
+
+        if (colmapResult.anchor_point || colmapResult.scale_factor) {
+          await writeFile(join(wsDir, 'vggt.json'), JSON.stringify({
+            savedAt: new Date().toISOString(),
+            anchor_point: colmapResult.anchor_point,
+            scale_factor: colmapResult.scale_factor,
+            registered: colmapResult.registered,
+            total: colmapResult.total,
+            pct: colmapResult.pct,
+          }, null, 2), 'utf8')
+        }
+
+        pushStep(`VGGT klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
+
+      } else {
+        // COLMAP fallback (geen VGGT_ENDPOINT_ID gezet)
+        pushStep(`Frames analyseren met COLMAP (${frameCount} frames)...`, 72)
+        const scriptPath = join(__dirname, 'lib/colmap_sfm.py')
+        const colmapExpectedSec = Math.round(frameCount * 2.5)
+        let colmapElapsed = 0
+        const colmapInterval = setInterval(() => {
+          colmapElapsed += 8
+          const colmapPct = Math.min(93, 72 + Math.round((colmapElapsed / colmapExpectedSec) * 21))
+          pushStep(`COLMAP bezig... (${colmapElapsed}s / ~${colmapExpectedSec}s verwacht)`, colmapPct)
+        }, 8000)
+        let colmapOut: string
+        try {
+          const result = await exec(`"${python}" "${scriptPath}" "${framesDir}" "${colmapDir}"`, { timeout: 300_000 })
+          colmapOut = result.stdout
+        } finally {
+          clearInterval(colmapInterval)
+        }
+        const raw = JSON.parse(colmapOut!.trim().split('\n').pop()!)
+        colmapResult = { ...raw, anchor_point: null, scale_factor: null }
+        pushStep(`COLMAP klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
+      }
 
       return {
         ok: true,
@@ -3886,7 +4018,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
       // Zoek Brush binary (gebundeld in app → local installs → BRUSH_BIN env)
       const { runBrush, findBrushBinary } = await import('./lib/brush-trainer')
-      const brushBinPath = findBrushBinary(args.brushBinPath)
+      const devBuildBin = join(app.getAppPath(), 'build', 'bin', 'brush')
+      const brushBinPath = findBrushBinary(args.brushBinPath ?? devBuildBin)
       if (!brushBinPath) {
         return {
           ok: false,

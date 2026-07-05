@@ -1,0 +1,11 @@
+fal>=0.15
+torch>=2.2
+torchvision
+transformers>=4.40
+vggt @ git+https://github.com/facebookresearch/vggt.git
+pycolmap>=0.6
+opencv-python-headless>=4.9
+httpx>=0.27
+numpy>=1.26
+trimesh
+pydantic>=2.0

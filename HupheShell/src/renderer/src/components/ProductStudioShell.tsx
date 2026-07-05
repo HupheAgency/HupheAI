@@ -179,8 +179,8 @@ type ProductStudioApi = {
     }
   }) => Promise<any>
   finalizeBake: (args: { projectId: string }) => Promise<any>
-  testOrbitSplat: (args: { projectId: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance' | 'minimax' | 'kling'; videoOnly?: boolean }) => Promise<any>
-  checkOrbitVideo: (args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling' }) => Promise<{ exists: boolean; videoUrl: string | null }>
+  testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance' | 'minimax' | 'kling'; videoOnly?: boolean }) => Promise<any>
+  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => Promise<{ exists: boolean; videoUrl: string | null }>
   loadSplat: () => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number }>
   getSplatPose: (args: { projectId: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
 }
@@ -856,17 +856,18 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const api = getProductStudioApi()
     if (!api || !project.backendProject?.id) return
     if (orbitTest.phase === 'running') return
-    api.checkOrbitVideo({ projectId: project.backendProject.id, model: orbitModel }).then((res) => {
+    const renderVersionId = project.finalRenderRecord?.id
+    api.checkOrbitVideo({ projectId: project.backendProject.id, renderVersionId, model: orbitModel }).then((res) => {
       if (res.exists && res.videoUrl) {
         setOrbitTest((prev) => prev.phase === 'idle' || prev.phase === 'done'
           ? { phase: 'done', step: '', videoUrl: res.videoUrl! }
           : prev
         )
       } else {
-        setOrbitTest((prev) => prev.phase === 'done' ? { phase: 'idle', step: '' } : prev)
+        setOrbitTest({ phase: 'idle', step: '', progress: 0 })
       }
     }).catch(() => {})
-  }, [orbitModel, project.backendProject?.id])
+  }, [orbitModel, project.backendProject?.id, project.finalRenderRecord?.id])
   // Auto-save splat alignment naar scene.json na elke wijziging (debounced 1.5s)
   useEffect(() => {
     if (!splatAlignment || !project.backendProject?.id) return
@@ -1649,8 +1650,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       setOrbitTest({ phase: 'error', step: '', error: 'Geen achtergrond foto geselecteerd.' })
       return
     }
+    const renderVersionId = project.finalRenderRecord?.id
     if (!force) {
-      const check = await api.checkOrbitVideo({ projectId: project.backendProject.id, model: orbitModel })
+      const check = await api.checkOrbitVideo({ projectId: project.backendProject.id, renderVersionId, model: orbitModel })
       if (check.exists) {
         setOrbitConfirmOpen(true)
         return
@@ -1659,7 +1661,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const modelLabel = orbitModel === 'minimax' ? 'MiniMax Hailuo' : orbitModel === 'kling' ? 'Kling v3' : 'Seedance 2.0'
     setOrbitTest({ phase: 'running', step: `Video genereren via ${modelLabel}...`, progress: 2 })
     try {
-      const result = await api.testOrbitSplat({ projectId: project.backendProject.id, imageUrl, arcDegrees: 270, force, model: orbitModel })
+      const result = await api.testOrbitSplat({ projectId: project.backendProject.id, renderVersionId, imageUrl, arcDegrees: 270, force, model: orbitModel })
       if (!result.ok) {
         setOrbitTest({ phase: 'error', step: '', progress: 0, error: result.error ?? 'Onbekende fout.' })
         return
