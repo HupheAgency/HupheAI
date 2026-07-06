@@ -2790,10 +2790,10 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         }
 
         async function callModel(messages: any[]): Promise<any> {
-          let r = await callOpenRouter({ model: PRODUCT_STUDIO_FINAL_RENDER_MODEL, modalities: ['image', 'text'], messages, stream: false }, jwt)
+          let r = await callOpenRouter({ model: PRODUCT_STUDIO_FINAL_RENDER_MODEL, modalities: ['image', 'text'], messages, stream: false }, jwt!)
           let raw = await r.text()
           if (r.status === 404 && raw.includes('output modalities: image, text')) {
-            r = await callOpenRouter({ model: PRODUCT_STUDIO_FINAL_RENDER_MODEL, modalities: ['image'], messages, stream: false }, jwt)
+            r = await callOpenRouter({ model: PRODUCT_STUDIO_FINAL_RENDER_MODEL, modalities: ['image'], messages, stream: false }, jwt!)
             raw = await r.text()
           }
           if (!r.ok) throw new Error(`OpenRouter ${r.status}: ${raw.slice(0, 300)}`)
@@ -3634,21 +3634,140 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
   })
 
+  // ─── Orbit-run helpers (Supabase) ─────────────────────────────────────────────
+  // Elke orbit-run krijgt een eigen UUID als primaire sleutel én als lokale mapnaam.
+  // Alle handlers gebruiken orbitRunId om de juiste map te vinden — nooit meer
+  // renderVersionId + model als mapsleutel.
+
+  const orbitRunsDir = (projectId: string, orbitRunId: string) =>
+    join(app.getPath('userData'), 'product-studio', 'splat-validation', projectId, orbitRunId)
+
+  const createOrbitRun = async (jwt: string, projectId: string, renderVersionId: string | undefined, model: string, poseMethod: string): Promise<string> => {
+    const sb = getUserClient(jwt)
+    const localPath = orbitRunsDir(projectId, 'PLACEHOLDER') // tijdelijk, wordt vervangen na insert
+    const { data, error } = await sb.from('orbit_runs').insert({
+      project_id: projectId,
+      render_version_id: renderVersionId ?? null,
+      model,
+      pose_method: poseMethod,
+      status: 'running',
+    }).select('id').single()
+    if (error || !data) throw new Error(`Orbit run aanmaken mislukt: ${error?.message}`)
+    const id: string = data.id
+    // Update local_path nu we het ID weten
+    await sb.from('orbit_runs').update({
+      local_path: orbitRunsDir(projectId, id),
+    }).eq('id', id)
+    return id
+  }
+
+  const updateOrbitRun = async (jwt: string, id: string, fields: Record<string, unknown>) => {
+    const sb = getUserClient(jwt)
+    await sb.from('orbit_runs').update({ ...fields, updated_at: new Date().toISOString() }).eq('id', id)
+  }
+
+  const getActiveOrbitRun = async (jwt: string, projectId: string): Promise<{ id: string; local_path: string; model: string; pose_method: string } | null> => {
+    const sb = getUserClient(jwt)
+    const { data } = await sb
+      .from('orbit_runs')
+      .select('id, local_path, model, pose_method')
+      .eq('project_id', projectId)
+      .eq('status', 'done')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    return data ?? null
+  }
+
+  const resolveWsDir = async (projectId: string, orbitRunId?: string, _model?: string): Promise<string> => {
+    const jwt = getJwt()
+    // Als orbitRunId meegegeven: opzoeken in Supabase voor local_path (kan afwijken van standaard pad bij gemigreerde data)
+    if (orbitRunId && jwt) {
+      try {
+        const sb = getUserClient(jwt)
+        const { data } = await sb.from('orbit_runs').select('local_path').eq('id', orbitRunId).maybeSingle()
+        if (data?.local_path) return data.local_path
+      } catch {}
+      // Supabase niet bereikbaar: fallback naar standaard pad op basis van ID
+      return orbitRunsDir(projectId, orbitRunId)
+    }
+    if (orbitRunId) return orbitRunsDir(projectId, orbitRunId)
+    // Geen orbitRunId: meest recente voltooide orbit run uit Supabase ophalen
+    if (jwt) {
+      const activeRun = await getActiveOrbitRun(jwt, projectId).catch(() => null)
+      if (activeRun?.local_path) return activeRun.local_path
+      if (activeRun?.id) return orbitRunsDir(projectId, activeRun.id)
+    }
+    // Fallback: active-version.json (legacy)
+    const { existsSync } = await import('fs')
+    const avPath = join(app.getPath('userData'), 'product-studio', 'splat-validation', projectId, 'active-version.json')
+    if (existsSync(avPath)) {
+      try {
+        const av = JSON.parse(await readFile(avPath, 'utf8'))
+        if (av.renderVersionId && av.model) {
+          return join(app.getPath('userData'), 'product-studio', 'splat-validation', projectId, av.renderVersionId, av.model)
+        }
+      } catch {}
+    }
+    // Laatste fallback: top-level model map
+    return join(app.getPath('userData'), 'product-studio', 'splat-validation', projectId, _model ?? 'kling')
+  }
+
   // --- Orbit-splat validatietest ---
   ipcMain.handle('product-studio:check-orbit-video', async (_e, args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => {
     const { existsSync } = await import('fs')
     const { rename, copyFile, unlink } = await import('fs/promises')
     const model = args.model ?? 'seedance'
+
+    // Bepaal de project-level workspace voor COLMAP/frames (altijd per project, niet per foto)
+    const projectWsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
+
     const primaryDir = args.renderVersionId
       ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId, model)
-      : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
+      : projectWsDir
     const primaryPath = join(primaryDir, 'orbit.mp4')
+
+    // Haal orbitRunId + local_path op uit Supabase voor persistente state na herstart
+    const jwt = getJwt()
+    const activeRun = jwt ? await getActiveOrbitRun(jwt, args.projectId).catch(() => null) : null
+    const orbitRunId = activeRun?.id ?? null
+    const activeLocalPath = activeRun?.local_path ?? null
+
+    // Helper: check of COLMAP sparse output op disk staat — zoek in actieve run pad én legacy pad
+    const checkColmap = (wsDir?: string) => {
+      const dirs = wsDir ? [wsDir, projectWsDir] : [projectWsDir]
+      for (const d of dirs) {
+        const sparse1 = join(d, 'colmap', 'sparse', '1', 'images.bin')
+        const sparse0 = join(d, 'colmap', 'sparse', '0', 'images.bin')
+        if (existsSync(sparse1) || existsSync(sparse0)) {
+          const framesDir = join(d, 'frames')
+          let total = 0
+          if (existsSync(framesDir)) {
+            try {
+              const { readdirSync } = require('fs')
+              total = readdirSync(framesDir).filter((f: string) => f.match(/^frame_\d+\.png$/)).length
+            } catch {}
+          }
+          return { registered: total, total, pct: 100, pass: true }
+        }
+      }
+      return null
+    }
+
+    // Eerst: check de local_path uit Supabase (meest betrouwbaar, ook voor gemigreerde data)
+    if (activeLocalPath) {
+      const orbitRunVideoPath = join(activeLocalPath, 'orbit.mp4')
+      if (existsSync(orbitRunVideoPath)) {
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: checkColmap(activeLocalPath), orbitRunId }
+      }
+    }
+
     if (existsSync(primaryPath)) {
-      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}` }
+      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: checkColmap(), orbitRunId }
     }
     // Migrate legacy project-level video to per-photo path
     if (args.renderVersionId) {
-      const legacyPath = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model, 'orbit.mp4')
+      const legacyPath = join(projectWsDir, 'orbit.mp4')
       if (existsSync(legacyPath)) {
         await mkdir(primaryDir, { recursive: true })
         try {
@@ -3657,10 +3776,10 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           await copyFile(legacyPath, primaryPath)
           await unlink(legacyPath).catch(() => {})
         }
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}` }
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: checkColmap(activeLocalPath ?? undefined), orbitRunId }
       }
     }
-    return { exists: false, videoUrl: null }
+    return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }
   })
 
   ipcMain.handle('product-studio:test-orbit-splat', async (_e, args: {
@@ -3671,6 +3790,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     force?: boolean
     model?: 'seedance' | 'minimax' | 'kling'
     videoOnly?: boolean
+    poseOnly?: boolean
+    poseMethod?: 'colmap' | 'replicate' | 'fal'
   }) => {
     const { exec: execCb } = await import('child_process')
     const { promisify } = await import('util')
@@ -3685,9 +3806,24 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
 
     const model = args.model ?? 'seedance'
-    const wsDir = args.renderVersionId
-      ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId, model)
-      : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, model)
+    const poseMethod = args.poseMethod ?? 'colmap'
+
+    // Maak een orbit_run record aan in Supabase — elke run krijgt een eigen ID + lokale map
+    let orbitRunId: string
+    let wsDir: string
+    if (args.poseOnly) {
+      // poseOnly: zoek de meest recente done orbit_run voor dit project
+      const activeRun = await getActiveOrbitRun(jwt, args.projectId)
+      if (!activeRun?.local_path) {
+        return { ok: false, error: 'Geen bestaande orbit-run gevonden. Genereer eerst een orbit-video.' }
+      }
+      orbitRunId = activeRun.id
+      wsDir = activeRun.local_path
+    } else {
+      orbitRunId = await createOrbitRun(jwt, args.projectId, args.renderVersionId, model, poseMethod)
+      wsDir = orbitRunsDir(args.projectId, orbitRunId)
+    }
+
     const videoPath = join(wsDir, 'orbit.mp4')
     const framesDir = join(wsDir, 'frames')
     const colmapDir = join(wsDir, 'colmap')
@@ -3696,6 +3832,164 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     await mkdir(colmapDir, { recursive: true })
 
     try {
+      // poseOnly: sla video + frames over, draai alleen pose opnieuw op bestaande frames
+      if (args.poseOnly) {
+        const { existsSync: existsSyncP0 } = await import('fs')
+        const { stdout: lsOutP } = await exec(`ls "${framesDir}" | grep -c 'frame_' || echo 0`)
+        const frameCountP = parseInt(lsOutP.trim()) || 0
+        if (frameCountP < 20) {
+          return { ok: false, error: `Geen bruikbare frames gevonden (${frameCountP}). Genereer eerst een orbit-video.` }
+        }
+        const videoFileUrlP = existsSyncP0(videoPath) ? `huphe://file/${encodeURIComponent(videoPath)}` : null
+
+        const python = '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3'
+        const poseMethod = args.poseMethod ?? 'colmap'
+        let colmapResultP: { registered: number; total: number; pct: number; pass: boolean; sparse_dir: string; anchor_point: number[] | null; scale_factor: number | null; method?: string }
+
+        pushStep(`Pose-analyse starten (${poseMethod === 'replicate' ? 'VGGT · Replicate' : poseMethod === 'fal' ? 'VGGT · fal.ai' : 'COLMAP'}, ${frameCountP} frames)...`, 10)
+
+        // Stap 4 inline voor poseOnly — zelfde logica, andere entry point
+        if (poseMethod === 'fal') {
+          return { ok: false, error: 'poseOnly + fal.ai: nog niet ondersteund. Gebruik Replicate of COLMAP.' }
+        } else if (poseMethod === 'replicate') {
+          const { existsSync: existsSyncP, readFileSync: readFileSyncP } = await import('fs')
+          const { safeStorage: safeStorageP } = await import('electron')
+          const replKeyPathP = join(app.getPath('userData'), 'replicate.enc')
+          if (!existsSyncP(replKeyPathP)) throw new Error('Geen Replicate API key. Voeg hem toe via Admin → Replicate.')
+          const replKeyP = safeStorageP.decryptString(readFileSyncP(replKeyPathP))
+
+          pushStep('Markerframe genereren...', 15)
+          const markerScriptPathP = join(__dirname, 'lib/generate_marker_frame.py')
+          const markerFramePathP = join(framesDir, 'frame_0000.png')
+          const firstOrbitFrameP = join(framesDir, 'frame_0001.png')
+          try { await exec(`"${python}" "${markerScriptPathP}" "${firstOrbitFrameP}" "${markerFramePathP}"`, { timeout: 30_000 }) } catch {}
+
+          pushStep('Frames voorbereiden...', 20)
+          const frameFilesP = (await import('fs/promises').then(m => m.readdir(framesDir)))
+            .filter(f => f.match(/^frame_\d+\.png$/)).sort()
+          const orbitFilesP = frameFilesP.filter(f => f !== 'frame_0000.png')
+          const stepP = orbitFilesP.length > 39 ? Math.ceil(orbitFilesP.length / 39) : 1
+          const sampledP = orbitFilesP.filter((_, i) => i % stepP === 0).slice(0, 39)
+          const hasMarkerP = existsSyncP(markerFramePathP)
+          const allSampledP = hasMarkerP ? ['frame_0000.png', ...sampledP] : sampledP
+          // Frames als base64 data URLs — geen externe opslag nodig
+          const frameUrlsP: string[] = []
+          for (let i = 0; i < allSampledP.length; i++) {
+            const framePath = join(framesDir, allSampledP[i])
+            // Verklein naar 640px breed JPEG via ffmpeg (minder payload, voldoende voor pose)
+            const { stdout: jpegBuf } = await exec(`ffmpeg -y -i "${framePath}" -vf scale=640:-2 -q:v 4 -f image2 pipe:1 2>/dev/null`, { encoding: 'buffer', timeout: 10_000 }) as any
+            const b64 = (jpegBuf as Buffer).toString('base64')
+            frameUrlsP.push(`data:image/jpeg;base64,${b64}`)
+            if (i % 5 === 0) pushStep(`Frames voorbereiden... (${i + 1}/${allSampledP.length})`, 20 + Math.round(i / allSampledP.length * 30))
+          }
+          pushStep('Replicate VGGT starten...', 51)
+          console.log('[orbit-splat/poseOnly] Replicate aanroepen met', frameUrlsP.length, 'frames')
+          // Haal de nieuwste versie van het model op (community modellen vereisen versie-hash)
+          const versionsResP = await fetch('https://api.replicate.com/v1/models/vufinder/vggt-1b/versions', { headers: { 'Authorization': `Bearer ${replKeyP}` } })
+          if (!versionsResP.ok) throw new Error(`Replicate model versie ophalen mislukt (${versionsResP.status}): ${(await versionsResP.text()).slice(0, 200)}`)
+          const versionsDataP = await versionsResP.json() as any
+          const latestVersionP: string = versionsDataP?.results?.[0]?.id
+          if (!latestVersionP) throw new Error('Geen Replicate versie gevonden voor vufinder/vggt-1b')
+          console.log('[orbit-splat/poseOnly] Replicate versie:', latestVersionP)
+          let replSubP: Response
+          try {
+            replSubP = await fetch('https://api.replicate.com/v1/predictions', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${replKeyP}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ version: latestVersionP, input: { inputs: frameUrlsP } }),
+            })
+          } catch (e: any) {
+            throw new Error(`Replicate netwerk fout: ${e?.message ?? e}`)
+          }
+          if (!replSubP.ok) {
+            const errText = await replSubP.text()
+            console.error('[orbit-splat/poseOnly] Replicate fout:', replSubP.status, errText)
+            throw new Error(`Replicate ${replSubP.status}: ${errText.slice(0, 300)}`)
+          }
+          let replPredP = await replSubP.json() as any
+          console.log('[orbit-splat/poseOnly] Replicate prediction:', JSON.stringify(replPredP).slice(0, 200))
+          let replElapsedP = 0
+          while (replPredP.status !== 'succeeded' && replPredP.status !== 'failed' && replPredP.status !== 'canceled') {
+            await new Promise(r => setTimeout(r, 5000))
+            replElapsedP += 5
+            pushStep(`Replicate bezig... (${replElapsedP}s)`, Math.min(90, 52 + Math.round(replElapsedP / 20)))
+            replPredP = await (await fetch(replPredP.urls.get, { headers: { 'Authorization': `Bearer ${replKeyP}` } })).json()
+            if (replElapsedP > 300) throw new Error('Replicate timeout (>5 min).')
+          }
+          if (replPredP.status !== 'succeeded') throw new Error(`Replicate mislukt: ${JSON.stringify(replPredP.error ?? replPredP).slice(0, 300)}`)
+          const replOutP = replPredP.output
+          console.log('[orbit-splat/poseOnly] Replicate output keys:', Object.keys(replOutP ?? {}))
+          const sparseDirP = join(colmapDir, 'sparse', '1')
+          await mkdir(sparseDirP, { recursive: true })
+
+          // vufinder/vggt-1b geeft { data: [url,...], point_cloud: url } terug
+          // data-URLs zijn JSON files met pose_enc per frame
+          if (replOutP?.data && Array.isArray(replOutP.data)) {
+            pushStep('Camera poses downloaden van Replicate...', 92)
+            const frameDataList: { name: string; pose_enc: number[]; width: number; height: number }[] = []
+            const dataUrls: string[] = replOutP.data
+            for (let j = 0; j < dataUrls.length; j++) {
+              const dataRes = await fetch(dataUrls[j], { headers: { 'Authorization': `Bearer ${replKeyP}` } })
+              if (!dataRes.ok) throw new Error(`Replicate data download mislukt (${dataRes.status})`)
+              const frameData = await dataRes.json() as any
+              const frameName = allSampledP[j] ?? `frame_${String(j).padStart(4, '0')}.png`
+              frameDataList.push({
+                name: frameName,
+                pose_enc: frameData.pose_enc,
+                width: frameData.original_image?.width ?? 1280,
+                height: frameData.original_image?.height ?? 720,
+              })
+            }
+            // Log eerste frame structuur voor debugging
+            if (frameDataList.length > 0) {
+              const f0 = frameDataList[0]
+              console.log('[orbit-splat/poseOnly] Eerste frame keys:', Object.keys(f0))
+              console.log('[orbit-splat/poseOnly] pose_enc type:', typeof f0.pose_enc, Array.isArray(f0.pose_enc) ? `len=${f0.pose_enc.length}` : '')
+              console.log('[orbit-splat/poseOnly] pose_enc[0]:', JSON.stringify(f0.pose_enc)?.slice(0, 200))
+              console.log('[orbit-splat/poseOnly] width/height:', f0.width, f0.height)
+            }
+            const vggtInputPath = join(colmapDir, 'vggt_input.json')
+            await writeFile(vggtInputPath, JSON.stringify({ frames: frameDataList }))
+            pushStep('Poses omzetten naar COLMAP formaat...', 95)
+            const vggtScript = join(__dirname, 'lib/vggt_to_colmap.py')
+            let vggtOut = ''
+            let vggtErr = ''
+            try {
+              const r = await exec(`"${python}" "${vggtScript}" "${vggtInputPath}" "${sparseDirP}"`, { timeout: 60_000 })
+              vggtOut = r.stdout
+              vggtErr = (r as any).stderr ?? ''
+            } catch (pyErr: any) {
+              vggtErr = pyErr?.stderr ?? pyErr?.message ?? String(pyErr)
+              vggtOut = pyErr?.stdout ?? ''
+              let pyErrMsg = vggtErr
+              try {
+                const pyOut = JSON.parse((vggtOut.trim().split('\n').pop()) || '{}')
+                if (pyOut?.error) pyErrMsg = pyOut.error
+              } catch {}
+              console.error('[orbit-splat/poseOnly] Python fout:', pyErrMsg)
+              throw new Error(`VGGT→COLMAP Python fout: ${pyErrMsg.slice(0, 500)}`)
+            }
+            if (vggtErr) console.warn('[orbit-splat/poseOnly] Python stderr:', vggtErr.slice(0, 300))
+            const vggtResult = JSON.parse(vggtOut.trim().split('\n').pop()!) as any
+            if (!vggtResult.ok) throw new Error(`VGGT→COLMAP conversie mislukt: ${vggtResult.error}`)
+            colmapResultP = { registered: vggtResult.registered, total: vggtResult.total, pct: vggtResult.pct, pass: vggtResult.pass, sparse_dir: sparseDirP, anchor_point: null, scale_factor: null, method: 'replicate' }
+          } else {
+            throw new Error(`Onverwacht Replicate output formaat: ${JSON.stringify(replOutP).slice(0, 300)}`)
+          }
+        } else {
+          const expSecP = Math.round(frameCountP * 2.5)
+          let elapsedP = 0
+          const iv = setInterval(() => { elapsedP += 8; pushStep(`COLMAP bezig... (${elapsedP}s / ~${expSecP}s)`, Math.min(90, 10 + Math.round(elapsedP / expSecP * 80))) }, 8000)
+          let outP: string
+          try { const r = await exec(`"${python}" "${join(__dirname, 'lib/colmap_sfm.py')}" "${framesDir}" "${colmapDir}"`, { timeout: 300_000 }); outP = r.stdout } finally { clearInterval(iv) }
+          const rawP = JSON.parse(outP!.trim().split('\n').pop()!)
+          colmapResultP = { ...rawP, anchor_point: null, scale_factor: null, method: 'colmap' }
+        }
+        pushStep(`Klaar: ${colmapResultP.registered}/${colmapResultP.total} frames (${colmapResultP.pct}%)`, 100)
+        await updateOrbitRun(jwt, orbitRunId, { status: 'done', pose_method: poseMethod, registered_frames: colmapResultP.registered, frame_count: frameCountP, registration_pct: colmapResultP.pct })
+        return { ok: true, orbitRunId, videoUrl: videoFileUrlP, framesDir, frameCount: frameCountP, colmap: colmapResultP, poseOnly: true }
+      }
+
       // Stap 1: laad afbeelding als data URL
       let imageDataUrl = args.imageUrl
       if (args.imageUrl.startsWith('huphe://file/')) {
@@ -3804,16 +4098,17 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         return { ok: false, error: `Te weinig frames (${frameCount}). Video te kort of fps te laag.`, videoUrl }
       }
 
-      // Stap 4: pose-estimatie — VGGT (als endpoint beschikbaar) of COLMAP fallback
-      const useVggt = !!process.env.VGGT_ENDPOINT_ID
+      // Stap 4: pose-estimatie — methode gekozen in UI: 'fal' | 'replicate' | 'colmap'
       const python = '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3'
+      const poseMethod = args.poseMethod ?? 'colmap'
 
       let colmapResult: {
         registered: number; total: number; pct: number; pass: boolean
         sparse_dir: string; anchor_point: number[] | null; scale_factor: number | null
+        method?: string
       }
 
-      if (useVggt) {
+      if (poseMethod === 'fal') {
         pushStep('Markerframe genereren...', 71)
         const markerScriptPath = join(__dirname, 'lib/generate_marker_frame.py')
         const markerFramePath = join(framesDir, 'frame_0000.png')
@@ -3915,10 +4210,145 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           }, null, 2), 'utf8')
         }
 
-        pushStep(`VGGT klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
+        colmapResult = { ...colmapResult!, method: 'fal' }
+        pushStep(`VGGT (fal.ai) klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
+
+      } else if (poseMethod === 'replicate') {
+        // ── VGGT via Replicate ────────────────────────────────────────────
+        const { existsSync: existsSync3, readFileSync: readFileSync3 } = await import('fs')
+        const { safeStorage: safeStorage3 } = await import('electron')
+
+        // Replicate API key — opgeslagen via key:set('replicate', ...) → userData/replicate.enc
+        const replKeyPath = join(app.getPath('userData'), 'replicate.enc')
+        if (!existsSync3(replKeyPath)) {
+          throw new Error('Geen Replicate API key gevonden. Voeg hem toe via Instellingen → API Keys → Replicate.')
+        }
+        const replKey = safeStorage3.decryptString(readFileSync3(replKeyPath))
+
+        // Markerframe genereren
+        pushStep('Markerframe genereren...', 71)
+        const markerScriptPath = join(__dirname, 'lib/generate_marker_frame.py')
+        const markerFramePath = join(framesDir, 'frame_0000.png')
+        const firstOrbitFrame = join(framesDir, 'frame_0001.png')
+        try {
+          await exec(`"${python}" "${markerScriptPath}" "${firstOrbitFrame}" "${markerFramePath}"`, { timeout: 30_000 })
+        } catch (markerErr: any) {
+          console.warn('[orbit-splat] Markerframe generatie mislukt:', markerErr?.message)
+        }
+
+        pushStep('Frames voorbereiden...', 72)
+        const { existsSync: existsSync4 } = await import('fs')
+
+        const allFrameFiles3 = (await import('fs/promises').then(m => m.readdir(framesDir)))
+          .filter(f => f.match(/^frame_\d+\.png$/)).sort()
+        const orbitFrames3 = allFrameFiles3.filter(f => f !== 'frame_0000.png')
+        const maxOrbit3 = 39
+        const sampleStep3 = orbitFrames3.length > maxOrbit3 ? Math.ceil(orbitFrames3.length / maxOrbit3) : 1
+        const sampledOrbit3 = orbitFrames3.filter((_, i) => i % sampleStep3 === 0).slice(0, maxOrbit3)
+        const hasMarker3 = existsSync4(markerFramePath)
+        const sampledFrames3 = hasMarker3 ? ['frame_0000.png', ...sampledOrbit3] : sampledOrbit3
+
+        // Frames als base64 data URLs — geen externe opslag nodig
+        const frameUrls3: string[] = []
+        for (let i = 0; i < sampledFrames3.length; i++) {
+          const framePath3 = join(framesDir, sampledFrames3[i])
+          const { stdout: jpegBuf3 } = await exec(`ffmpeg -y -i "${framePath3}" -vf scale=640:-2 -q:v 4 -f image2 pipe:1 2>/dev/null`, { encoding: 'buffer', timeout: 10_000 }) as any
+          const b64_3 = (jpegBuf3 as Buffer).toString('base64')
+          frameUrls3.push(`data:image/jpeg;base64,${b64_3}`)
+          if (i % 5 === 0) pushStep(`Frames voorbereiden... (${i + 1}/${sampledFrames3.length})`, 72 + Math.round((i / sampledFrames3.length) * 6))
+        }
+
+        pushStep(`${frameUrls3.length} frames geüpload, Replicate VGGT starten...`, 79)
+
+        // Haal de nieuwste versie van het model op (community modellen vereisen versie-hash)
+        const versionsRes3 = await fetch('https://api.replicate.com/v1/models/vufinder/vggt-1b/versions', { headers: { 'Authorization': `Bearer ${replKey}` } })
+        if (!versionsRes3.ok) throw new Error(`Replicate model versie ophalen mislukt (${versionsRes3.status})`)
+        const versionsData3 = await versionsRes3.json() as any
+        const latestVersion3: string = versionsData3?.results?.[0]?.id
+        if (!latestVersion3) throw new Error('Geen Replicate versie gevonden voor vufinder/vggt-1b')
+        console.log('[orbit-splat] Replicate versie:', latestVersion3)
+
+        // Replicate prediction aanmaken
+        console.log('[orbit-splat] Replicate aanroepen met', frameUrls3.length, 'frames')
+        let replSubmitRes: Response
+        try {
+          replSubmitRes = await fetch('https://api.replicate.com/v1/predictions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${replKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ version: latestVersion3, input: { inputs: frameUrls3 } }),
+          })
+        } catch (e: any) {
+          throw new Error(`Replicate netwerk fout: ${e?.message ?? e}`)
+        }
+        if (!replSubmitRes.ok) {
+          const errText = await replSubmitRes.text()
+          console.error('[orbit-splat] Replicate fout:', replSubmitRes.status, errText)
+          throw new Error(`Replicate ${replSubmitRes.status}: ${errText.slice(0, 300)}`)
+        }
+        let replPrediction = await replSubmitRes.json() as any
+
+        // Poll totdat klaar
+        let replElapsed = 0
+        while (replPrediction.status !== 'succeeded' && replPrediction.status !== 'failed' && replPrediction.status !== 'canceled') {
+          await new Promise((r) => setTimeout(r, 5000))
+          replElapsed += 5
+          pushStep(`Replicate VGGT bezig... (${replElapsed}s)`, Math.min(92, 80 + Math.round(replElapsed / 20)))
+          const pollRes = await fetch(replPrediction.urls.get, {
+            headers: { 'Authorization': `Bearer ${replKey}` },
+          })
+          replPrediction = await pollRes.json()
+          if (replElapsed > 300) throw new Error('Replicate VGGT timeout (>5 min).')
+        }
+
+        if (replPrediction.status !== 'succeeded') {
+          throw new Error(`Replicate VGGT mislukt: ${replPrediction.error ?? JSON.stringify(replPrediction).slice(0, 200)}`)
+        }
+
+        const replOut = replPrediction.output
+        console.log('[orbit-splat] Replicate output keys:', Object.keys(replOut ?? {}))
+        const replSparseDir = join(colmapDir, 'sparse', '1')
+        await mkdir(replSparseDir, { recursive: true })
+
+        // vufinder/vggt-1b geeft { data: [url,...] } terug — per-frame JSON met pose_enc
+        if (replOut?.data && Array.isArray(replOut.data)) {
+          pushStep('Camera poses downloaden van Replicate...', 92)
+          const frameDataList: { name: string; pose_enc: number[]; width: number; height: number }[] = []
+          for (let j = 0; j < replOut.data.length; j++) {
+            const dataRes = await fetch(replOut.data[j], { headers: { 'Authorization': `Bearer ${replKey}` } })
+            if (!dataRes.ok) throw new Error(`Replicate data download mislukt (${dataRes.status})`)
+            const frameData = await dataRes.json() as any
+            const frameName = sampledFrames3[j] ?? `frame_${String(j).padStart(4, '0')}.png`
+            frameDataList.push({
+              name: frameName,
+              pose_enc: frameData.pose_enc,
+              width: frameData.original_image?.width ?? 1280,
+              height: frameData.original_image?.height ?? 720,
+            })
+          }
+          const vggtInputPath = join(colmapDir, 'vggt_input.json')
+          await writeFile(vggtInputPath, JSON.stringify({ frames: frameDataList }))
+          pushStep('Poses omzetten naar COLMAP formaat...', 95)
+          const vggtScript = join(__dirname, 'lib/vggt_to_colmap.py')
+          const { stdout: vggtOut } = await exec(`"${python}" "${vggtScript}" "${vggtInputPath}" "${replSparseDir}"`, { timeout: 60_000 })
+          const vggtResult = JSON.parse(vggtOut.trim().split('\n').pop()!) as any
+          if (!vggtResult.ok) throw new Error(`VGGT→COLMAP conversie mislukt: ${vggtResult.error}`)
+          colmapResult = {
+            registered: vggtResult.registered,
+            total: vggtResult.total,
+            pct: vggtResult.pct,
+            pass: vggtResult.pass,
+            sparse_dir: replSparseDir,
+            anchor_point: null,
+            scale_factor: null,
+            method: 'replicate',
+          }
+        } else {
+          throw new Error(`Replicate VGGT: onverwacht output formaat. Raw: ${JSON.stringify(replOut).slice(0, 300)}`)
+        }
+        pushStep(`Replicate VGGT klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
 
       } else {
-        // COLMAP fallback (geen VGGT_ENDPOINT_ID gezet)
+        // ── COLMAP (standaard fallback) ───────────────────────────────────
         pushStep(`Frames analyseren met COLMAP (${frameCount} frames)...`, 72)
         const scriptPath = join(__dirname, 'lib/colmap_sfm.py')
         const colmapExpectedSec = Math.round(frameCount * 2.5)
@@ -3936,12 +4366,14 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           clearInterval(colmapInterval)
         }
         const raw = JSON.parse(colmapOut!.trim().split('\n').pop()!)
-        colmapResult = { ...raw, anchor_point: null, scale_factor: null }
+        colmapResult = { ...raw, anchor_point: null, scale_factor: null, method: 'colmap' }
         pushStep(`COLMAP klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
       }
 
+      await updateOrbitRun(jwt, orbitRunId, { status: 'done', registered_frames: colmapResult.registered, frame_count: frameCount, registration_pct: colmapResult.pct })
       return {
         ok: true,
+        orbitRunId,
         videoUrl: videoFileUrl,
         videoPath,
         framesDir,
@@ -3950,6 +4382,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
     } catch (err: any) {
       console.error('[orbit-splat]', err?.message ?? err)
+      await updateOrbitRun(jwt, orbitRunId, { status: 'error', error_message: err?.message ?? 'Onbekende fout' }).catch(() => {})
       return { ok: false, error: err?.message ?? 'Orbit splat test mislukt.' }
     }
   })
@@ -3970,14 +4403,13 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     return { ok: true, splatUrl, localFloorY }
   })
 
-  ipcMain.handle('product-studio:get-splat-pose', async (_e, args: { projectId: string }) => {
+  ipcMain.handle('product-studio:get-splat-pose', async (_e, args: { projectId: string; orbitRunId?: string; renderVersionId?: string; model?: string }) => {
     const { existsSync } = await import('fs')
-    const wsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+    const wsDir = await resolveWsDir(args.projectId, args.orbitRunId ?? args.renderVersionId, args.model)
 
-    // Try project-level colmap first, then model-specific kling subfolder
     let sparseDir = join(wsDir, 'colmap', 'sparse', '1')
     if (!existsSync(join(sparseDir, 'images.bin'))) {
-      sparseDir = join(wsDir, 'kling', 'colmap', 'sparse', '1')
+      sparseDir = join(wsDir, 'colmap', 'sparse', '0')
     }
     if (!existsSync(join(sparseDir, 'images.bin'))) {
       return { ok: false, error: 'COLMAP reconstructie niet gevonden' }
@@ -3996,13 +4428,13 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
   // ─── Brush CLI training ───────────────────────────────────────────────────────
   ipcMain.handle('product-studio:train-splat', async (_e, args: {
     projectId: string
+    orbitRunId?: string
+    renderVersionId?: string
     model?: 'seedance' | 'minimax' | 'kling'
     brushBinPath?: string
     maxSteps?: number
   }) => {
-    const model = args.model ?? 'seedance'
-    const baseWsDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
-    const wsDir = join(baseWsDir, model)
+    const wsDir = await resolveWsDir(args.projectId, args.orbitRunId ?? args.renderVersionId, args.model)
     const framesDir = join(wsDir, 'frames')
     const colmapDir = join(wsDir, 'colmap')
     const outputDir = join(wsDir, 'brush')
@@ -4032,8 +4464,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
       pushStep('Dataset klaarmaken...', 2)
 
-      const maxSteps = args.maxSteps ?? 10000
+      const maxSteps = args.maxSteps ?? 30000
       let lastProgress = 2
+      let brushLogCount = 0
 
       const result = await runBrush({
         framesDir,
@@ -4046,10 +4479,16 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           if (pct > lastProgress + 1) {
             lastProgress = pct
             const lossStr = loss != null ? ` · loss ${loss.toFixed(4)}` : ''
-            pushStep(`Brush training: stap ${step}/${totalSteps}${lossStr} (${elapsedSec}s)`, pct)
+            const label = `Stap ${step.toLocaleString()}/${totalSteps.toLocaleString()}${lossStr} (${elapsedSec}s)`
+            _e.sender.send('product-studio:training-progress', { step: label, progress: pct, currentStep: step, totalSteps })
           }
         },
-        onLog: (line) => console.log('[brush]', line),
+        onLog: (line) => {
+          console.log('[brush]', line)
+          // Eerste 20 regels altijd loggen zodat we het exacte output-formaat zien
+          if (!brushLogCount) brushLogCount = 0
+          if ((brushLogCount as number)++ < 20) console.log('[brush:raw]', JSON.stringify(line))
+        },
       })
 
       // Converteer PLY naar splat-formaat (floor detection etc.)

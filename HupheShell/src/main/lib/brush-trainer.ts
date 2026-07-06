@@ -1,5 +1,5 @@
 import { spawn } from 'child_process'
-import { copyFile, mkdir, readdir } from 'fs/promises'
+import { copyFile, mkdir, readdir, readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
 
@@ -26,20 +26,46 @@ export interface BrushResult {
  * Officiële Brush repo: https://github.com/ArthurBrussee/brush
  * Standaard binpad op Mac (na cargo install): ~/.cargo/bin/brush
  */
+async function readPosedFrameNames(imagesBinPath: string): Promise<Set<string> | null> {
+  try {
+    const buf = await readFile(imagesBinPath)
+    const names = new Set<string>()
+    let offset = 0
+    const n = Number(buf.readBigUInt64LE(offset)); offset += 8
+    for (let i = 0; i < n; i++) {
+      offset += 4 + 32 + 24 + 4  // image_id + qvec + tvec + cam_id
+      let end = offset
+      while (buf[end] !== 0) end++
+      names.add(buf.slice(offset, end).toString('utf8'))
+      offset = end + 1
+      const npts = Number(buf.readBigUInt64LE(offset)); offset += 8
+      offset += npts * 24
+    }
+    return names
+  } catch {
+    return null
+  }
+}
+
 async function prepareDataset(framesDir: string, colmapDir: string, datasetDir: string): Promise<void> {
   const imagesOut = join(datasetDir, 'images')
   const sparseOut = join(datasetDir, 'sparse', '0')
   await mkdir(imagesOut, { recursive: true })
   await mkdir(sparseOut, { recursive: true })
 
-  // Kopieer frames
-  const frames = (await readdir(framesDir)).filter((f) => /\.(png|jpg|jpeg)$/i.test(f))
-  if (frames.length === 0) throw new Error(`Geen frames gevonden in ${framesDir}`)
-  await Promise.all(frames.map((f) => copyFile(join(framesDir, f), join(imagesOut, f))))
-
   // Zoek COLMAP sparse output (1 heeft hogere prioriteit dan 0)
   const sparseSource = ['sparse/1', 'sparse/0', 'sparse'].map((s) => join(colmapDir, s)).find((p) => existsSync(join(p, 'images.bin')))
   if (!sparseSource) throw new Error(`Geen COLMAP sparse data gevonden in ${colmapDir}`)
+
+  // Lees welke frame-namen een pose hebben — kopieer alleen die frames
+  const posedNames = await readPosedFrameNames(join(sparseSource, 'images.bin'))
+  const allFrames = (await readdir(framesDir)).filter((f) => /\.(png|jpg|jpeg)$/i.test(f))
+  const frames = posedNames && posedNames.size > 0
+    ? allFrames.filter((f) => posedNames.has(f))
+    : allFrames
+  if (frames.length === 0) throw new Error(`Geen frames met COLMAP pose gevonden in ${framesDir}`)
+  await Promise.all(frames.map((f) => copyFile(join(framesDir, f), join(imagesOut, f))))
+  console.log(`[brush] Dataset: ${frames.length}/${allFrames.length} frames met pose gekopieerd`)
 
   for (const f of ['cameras.bin', 'images.bin', 'points3D.bin']) {
     const src = join(sparseSource, f)
@@ -120,41 +146,50 @@ export async function runBrush(options: {
     const proc = spawn(brushBinPath, args, { cwd: outputDir })
 
     const handleLine = (line: string) => {
-      if (!line.trim()) return
-      onLog?.(line)
+      const trimmed = line.trim()
+      if (!trimmed) return
+      onLog?.(trimmed)
 
-      // Brush logt voortgang als "Step 1234/10000 loss: 0.0234" of vergelijkbaar
-      const stepMatch = line.match(/[Ss]tep\s+(\d+)\s*(?:\/\s*(\d+))?/)
+      // Brush logt: "Step 1234/30000", "iter 1234/30000", "[00:01] 1234/30000 loss: 0.02"
+      const stepMatch = trimmed.match(/(?:[Ss]tep|iter(?:ation)?)\s+(\d+)\s*\/\s*(\d+)/)
+        ?? trimmed.match(/\b(\d+)\s*\/\s*(\d+)\b.*loss/i)
       if (stepMatch) {
         const step = parseInt(stepMatch[1])
-        const total = stepMatch[2] ? parseInt(stepMatch[2]) : maxSteps
-        const lossMatch = line.match(/loss[=:\s]+([0-9.eE+\-]+)/i)
-        onProgress?.({
-          step,
-          totalSteps: total,
-          loss: lossMatch ? parseFloat(lossMatch[1]) : undefined,
-          elapsedSec: Math.round((Date.now() - startTime) / 1000),
-        })
+        const total = parseInt(stepMatch[2])
+        if (step > 0 && total > 0 && step <= total) {
+          const lossMatch = trimmed.match(/loss[=:\s]+([0-9.eE+\-]+)/i)
+          onProgress?.({
+            step,
+            totalSteps: total,
+            loss: lossMatch ? parseFloat(lossMatch[1]) : undefined,
+            elapsedSec: Math.round((Date.now() - startTime) / 1000),
+          })
+        }
       }
 
       // Detecteer export-pad in output
-      const plyMatch = line.match(/(?:export(?:ed)?|saved|wrote)[^\n]*?([/\\][^\s"']+\.ply)/i)
+      const plyMatch = trimmed.match(/(?:export(?:ed)?|saved|wrote)[^\n]*?([/\\][^\s"']+\.ply)/i)
       if (plyMatch) lastPlyPath = plyMatch[1]
+    }
+
+    const splitLines = (buf: string, chunk: string): [string, string[]] => {
+      const combined = buf + chunk
+      // Brush gebruikt soms \r voor voortgang — behandel als regelscheiding
+      const lines = combined.split(/[\r\n]+/)
+      return [lines.pop() ?? '', lines]
     }
 
     let stdoutBuf = ''
     proc.stdout.on('data', (d: Buffer) => {
-      stdoutBuf += d.toString()
-      const lines = stdoutBuf.split('\n')
-      stdoutBuf = lines.pop() ?? ''
+      const [remaining, lines] = splitLines(stdoutBuf, d.toString())
+      stdoutBuf = remaining
       lines.forEach(handleLine)
     })
 
     let stderrBuf = ''
     proc.stderr.on('data', (d: Buffer) => {
-      stderrBuf += d.toString()
-      const lines = stderrBuf.split('\n')
-      stderrBuf = lines.pop() ?? ''
+      const [remaining, lines] = splitLines(stderrBuf, d.toString())
+      stderrBuf = remaining
       lines.forEach(handleLine)
     })
 

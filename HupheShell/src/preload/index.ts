@@ -343,11 +343,13 @@ contextBridge.exposeInMainWorld('api', {
       force?: boolean
       model?: 'seedance' | 'minimax' | 'kling'
       videoOnly?: boolean
+      poseOnly?: boolean
+      poseMethod?: 'colmap' | 'replicate' | 'fal'
     }) => ipcRenderer.invoke('product-studio:test-orbit-splat', args),
     checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => ipcRenderer.invoke('product-studio:check-orbit-video', args),
     loadSplat: () => ipcRenderer.invoke('product-studio:load-splat'),
     getSplatPose: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:get-splat-pose', args),
-    trainSplat: (args: { projectId: string; model?: 'seedance' | 'minimax' | 'kling'; brushBinPath?: string; maxSteps?: number }) =>
+    trainSplat: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling'; brushBinPath?: string; maxSteps?: number }) =>
       ipcRenderer.invoke('product-studio:train-splat', args),
     saveSceneAlignment: (args: { projectId: string; alignment: Record<string, unknown> }) =>
       ipcRenderer.invoke('product-studio:save-scene-alignment', args),

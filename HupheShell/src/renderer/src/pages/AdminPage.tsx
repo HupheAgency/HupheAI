@@ -193,6 +193,11 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
   const [falSaving, setFalSaving] = useState(false)
   const [falSaved, setFalSaved] = useState(false)
 
+  const [replicateKey, setReplicateKey] = useState('')
+  const [replicateHasKey, setReplicateHasKey] = useState(false)
+  const [replicateSaving, setReplicateSaving] = useState(false)
+  const [replicateSaved, setReplicateSaved] = useState(false)
+
   const [typekitId, setTypekitId] = useState('')
   const [typekitHasKey, setTypekitHasKey] = useState(false)
   const [typekitSaving, setTypekitSaving] = useState(false)
@@ -273,6 +278,7 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
     api().hasKey('stripe').then((has: boolean) => setStripeHasKey(has))
     api().hasKey('serper').then((has: boolean) => setSerperHasKey(has))
     api().hasKey('fal').then((has: boolean) => setFalHasKey(has))
+    api().hasKey('replicate').then((has: boolean) => setReplicateHasKey(has))
     api().hasKey('typekit').then((has: boolean) => setTypekitHasKey(has))
   }, [])
 
@@ -520,6 +526,18 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
     setTimeout(() => setSerperSaved(false), 2500)
   }
 
+  async function saveReplicateKey() {
+    if (!replicateKey.trim()) return
+    setReplicateSaving(true)
+    setReplicateSaved(false)
+    await api().setKey('replicate', replicateKey.trim())
+    setReplicateHasKey(true)
+    setReplicateKey('')
+    setReplicateSaving(false)
+    setReplicateSaved(true)
+    setTimeout(() => setReplicateSaved(false), 2500)
+  }
+
   async function saveTypekitId() {
     if (!typekitId.trim()) return
     setTypekitSaving(true)
@@ -616,7 +634,7 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
   const pendingCount = joinRequests.filter(r => r.status === 'pending').length
 
   return (
-    <div className="flex-1 flex min-h-0 overflow-hidden" style={{ background: 'radial-gradient(circle at 28% 12%, rgba(255,255,255,0.035), transparent 34%), radial-gradient(circle at 86% 0%, rgba(255,216,61,0.035), transparent 26%), #0A0A0A' }}>
+    <div className={`${embedded ? 'h-full' : 'h-screen'} flex min-h-0 overflow-hidden`} style={{ background: 'radial-gradient(circle at 28% 12%, rgba(255,255,255,0.035), transparent 34%), radial-gradient(circle at 86% 0%, rgba(255,216,61,0.035), transparent 26%), #0A0A0A' }}>
       <AdminSidebar activeTab={activeTab} onTabChange={setActiveTab} joinRequestCount={pendingCount} />
       <div className="w-[400px] flex-shrink-0" />
 
@@ -902,6 +920,25 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                     <path d="M12 2L2 7l10 5 10-5-10-5z" />
                     <path d="M2 17l10 5 10-5" />
                     <path d="M2 12l10 5 10-5" />
+                  </>
+                )}
+              />
+              <ApiKeyRow
+                label="Replicate"
+                description="API key voor VGGT camera pose-schatting via Replicate. Gebruik in Product Studio → Pose: VGGT · Replicate."
+                hasKey={replicateHasKey}
+                value={replicateKey}
+                placeholder={replicateHasKey ? '••••••••••••  (vervang bestaande sleutel)' : 'r8_…'}
+                saving={replicateSaving}
+                saved={replicateSaved}
+                iconBg="rgba(22,163,74,0.12)"
+                iconStroke="rgb(74,222,128)"
+                onChange={setReplicateKey}
+                onSave={saveReplicateKey}
+                icon={(
+                  <>
+                    <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" />
+                    <path d="M12 8v8M8 12h8" />
                   </>
                 )}
               />
