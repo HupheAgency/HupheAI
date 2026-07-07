@@ -3644,7 +3644,6 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
   const createOrbitRun = async (jwt: string, projectId: string, renderVersionId: string | undefined, model: string, poseMethod: string): Promise<string> => {
     const sb = getUserClient(jwt)
-    const localPath = orbitRunsDir(projectId, 'PLACEHOLDER') // tijdelijk, wordt vervangen na insert
     const { data, error } = await sb.from('orbit_runs').insert({
       project_id: projectId,
       render_version_id: renderVersionId ?? null,
@@ -4425,70 +4424,44 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
   })
 
-  // ─── Brush CLI training ───────────────────────────────────────────────────────
+  // ─── 2DGS training via RunPod ─────────────────────────────────────────────────
   ipcMain.handle('product-studio:train-splat', async (_e, args: {
     projectId: string
     orbitRunId?: string
     renderVersionId?: string
     model?: 'seedance' | 'minimax' | 'kling'
-    brushBinPath?: string
     maxSteps?: number
   }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+
     const wsDir = await resolveWsDir(args.projectId, args.orbitRunId ?? args.renderVersionId, args.model)
     const framesDir = join(wsDir, 'frames')
     const colmapDir = join(wsDir, 'colmap')
-    const outputDir = join(wsDir, 'brush')
+    const outputDir = join(wsDir, '2dgs')
 
-    const pushStep = (step: string, progress: number) => {
+    const pushStep = (step: string, progress: number, extra?: Record<string, unknown>) => {
       console.log(`[train-splat] (${progress}%) ${step}`)
-      _e.sender.send('product-studio:training-progress', { step, progress })
+      _e.sender.send('product-studio:training-progress', { step, progress, ...extra })
     }
 
     try {
       const { existsSync } = await import('fs')
       if (!existsSync(framesDir)) return { ok: false, error: 'Geen frames gevonden. Voer eerst de orbit-stap uit.' }
 
-      // Zoek Brush binary (gebundeld in app → local installs → BRUSH_BIN env)
-      const { runBrush, findBrushBinary } = await import('./lib/brush-trainer')
-      const devBuildBin = join(app.getAppPath(), 'build', 'bin', 'brush')
-      const brushBinPath = findBrushBinary(args.brushBinPath ?? devBuildBin)
-      if (!brushBinPath) {
-        return {
-          ok: false,
-          error:
-            'Brush binary niet gevonden. De binary hoort meegeleverd te zijn met de app.\n' +
-            'Als je de app opnieuw installeert lost dit zich vanzelf op.\n' +
-            'Of installeer Brush handmatig: https://github.com/ArthurBrussee/brush',
-        }
-      }
+      const maxSteps = args.maxSteps ?? 5000
 
-      pushStep('Dataset klaarmaken...', 2)
-
-      const maxSteps = args.maxSteps ?? 30000
-      let lastProgress = 2
-      let brushLogCount = 0
-
-      const result = await runBrush({
+      const { runRunPodTraining } = await import('./lib/runpod-trainer')
+      const result = await runRunPodTraining({
         framesDir,
         colmapDir,
         outputDir,
-        brushBinPath,
+        supabaseUrl: SUPABASE_URL,
+        supabaseAnonKey: SUPABASE_ANON_KEY,
+        jwt,
+        projectId: args.projectId,
         maxSteps,
-        onProgress: ({ step, totalSteps, loss, elapsedSec }) => {
-          const pct = Math.min(95, 5 + Math.round((step / totalSteps) * 90))
-          if (pct > lastProgress + 1) {
-            lastProgress = pct
-            const lossStr = loss != null ? ` · loss ${loss.toFixed(4)}` : ''
-            const label = `Stap ${step.toLocaleString()}/${totalSteps.toLocaleString()}${lossStr} (${elapsedSec}s)`
-            _e.sender.send('product-studio:training-progress', { step: label, progress: pct, currentStep: step, totalSteps })
-          }
-        },
-        onLog: (line) => {
-          console.log('[brush]', line)
-          // Eerste 20 regels altijd loggen zodat we het exacte output-formaat zien
-          if (!brushLogCount) brushLogCount = 0
-          if ((brushLogCount as number)++ < 20) console.log('[brush:raw]', JSON.stringify(line))
-        },
+        onProgress: ({ step, progress }) => pushStep(step, progress),
       })
 
       // Converteer PLY naar splat-formaat (floor detection etc.)
@@ -4501,8 +4474,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       pushStep('Camera-positie uitlezen...', 98)
       let pose = null
       try {
+        const { existsSync: es } = await import('fs')
         const { readColmapPose } = await import('./lib/colmap-reader')
-        const sparseDir = existsSync(join(colmapDir, 'sparse', '1', 'images.bin'))
+        const sparseDir = es(join(colmapDir, 'sparse', '1', 'images.bin'))
           ? join(colmapDir, 'sparse', '1')
           : join(colmapDir, 'sparse', '0')
         pose = await readColmapPose(sparseDir)
@@ -4514,7 +4488,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       return { ok: true, splatUrl, localFloorY, pose, plyPath: result.plyPath }
     } catch (err: any) {
       console.error('[train-splat]', err?.message ?? err)
-      return { ok: false, error: err?.message ?? 'Brush training mislukt.' }
+      return { ok: false, error: err?.message ?? '2DGS training mislukt.' }
     }
   })
 
