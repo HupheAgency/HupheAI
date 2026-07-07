@@ -26,7 +26,8 @@ RUN pip install --no-cache-dir \
     imageio-ffmpeg \
     opencv-python-headless \
     scikit-image \
-    lpips
+    lpips \
+    matplotlib
 
 # Compileer de CUDA differentiable rasterizer bij image build (niet bij cold start!)
 # Dit is de stap die de meeste tijd kost — daarna is de container snel cold-startbaar.
