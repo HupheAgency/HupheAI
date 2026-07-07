@@ -3665,11 +3665,11 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     await sb.from('orbit_runs').update({ ...fields, updated_at: new Date().toISOString() }).eq('id', id)
   }
 
-  const getActiveOrbitRun = async (jwt: string, projectId: string): Promise<{ id: string; local_path: string; model: string; pose_method: string } | null> => {
+  const getActiveOrbitRun = async (jwt: string, projectId: string): Promise<{ id: string; local_path: string; model: string; pose_method: string; registered_frames: number | null; frame_count: number | null; registration_pct: number | null } | null> => {
     const sb = getUserClient(jwt)
     const { data } = await sb
       .from('orbit_runs')
-      .select('id, local_path, model, pose_method')
+      .select('id, local_path, model, pose_method, registered_frames, frame_count, registration_pct')
       .eq('project_id', projectId)
       .eq('status', 'done')
       .order('created_at', { ascending: false })
@@ -3726,13 +3726,24 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       : projectWsDir
     const primaryPath = join(primaryDir, 'orbit.mp4')
 
-    // Haal orbitRunId + local_path op uit Supabase voor persistente state na herstart
+    // Haal orbitRunId + local_path + pose-resultaat op uit Supabase voor persistente state na herstart
     const jwt = getJwt()
     const activeRun = jwt ? await getActiveOrbitRun(jwt, args.projectId).catch(() => null) : null
     const orbitRunId = activeRun?.id ?? null
     const activeLocalPath = activeRun?.local_path ?? null
 
-    // Helper: check of COLMAP sparse output op disk staat — zoek in actieve run pad én legacy pad
+    // Bouw colmap-object uit Supabase-data (persistent, werkt ook na herstart/herinstall)
+    const colmapFromDb = (activeRun?.registered_frames != null && activeRun?.frame_count != null)
+      ? {
+          registered: activeRun.registered_frames,
+          total: activeRun.frame_count,
+          pct: activeRun.registration_pct ?? 100,
+          pass: (activeRun.registration_pct ?? 100) >= 80,
+          method: activeRun.pose_method === 'replicate' ? 'replicate' : activeRun.pose_method === 'fal' ? 'fal' : 'colmap',
+        }
+      : null
+
+    // Fallback: check COLMAP sparse output op disk (legacy / als Supabase leeg is)
     const checkColmap = (wsDir?: string) => {
       const dirs = wsDir ? [wsDir, projectWsDir] : [projectWsDir]
       for (const d of dirs) {
@@ -3752,17 +3763,18 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
       return null
     }
+    const resolvedColmap = (wsDir?: string) => colmapFromDb ?? checkColmap(wsDir)
 
     // Eerst: check de local_path uit Supabase (meest betrouwbaar, ook voor gemigreerde data)
     if (activeLocalPath) {
       const orbitRunVideoPath = join(activeLocalPath, 'orbit.mp4')
       if (existsSync(orbitRunVideoPath)) {
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: checkColmap(activeLocalPath), orbitRunId }
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId }
       }
     }
 
     if (existsSync(primaryPath)) {
-      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: checkColmap(), orbitRunId }
+      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId }
     }
     // Migrate legacy project-level video to per-photo path
     if (args.renderVersionId) {
@@ -3775,7 +3787,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           await copyFile(legacyPath, primaryPath)
           await unlink(legacyPath).catch(() => {})
         }
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: checkColmap(activeLocalPath ?? undefined), orbitRunId }
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(activeLocalPath ?? primaryDir), orbitRunId }
       }
     }
     return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }
