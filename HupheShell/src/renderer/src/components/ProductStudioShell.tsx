@@ -2051,9 +2051,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const scene = result.scene as StudioSceneVersion | null
       const manifest = packet.scene_manifest as any
 
-      // Restore camera orbit position
+      // Restore camera orbit position + FOV (inclusief fovScale zodat 3D view overeenkomt met de foto)
       if (manifest?.camera?.position && manifest?.camera?.target) {
-        studioRef.current?.setCameraOrbit(manifest.camera.position, manifest.camera.target)
+        let effectiveFov: number | undefined = manifest.camera.fov
+        const fovScale: number | undefined = manifest.viewport?.fovScale
+        if (effectiveFov !== undefined && fovScale !== undefined && fovScale > 0 && fovScale < 1) {
+          const halfRad = (effectiveFov * Math.PI) / 360
+          effectiveFov = (Math.atan(Math.tan(halfRad) * fovScale) * 360) / Math.PI
+        }
+        studioRef.current?.setCameraOrbit(manifest.camera.position, manifest.camera.target, effectiveFov)
       }
 
       // Restore model transform: eerst uit lokale cache, dan uit database

@@ -112,7 +112,7 @@ export interface Scene3DViewportHandle {
   captureAllPasses: (fovScale?: number) => RenderPasses | null
   captureRenderManifest: () => Scene3DRenderManifest | null
   getCanvasElement: () => HTMLCanvasElement | null
-  setCameraOrbit: (position: [number, number, number], target: [number, number, number]) => void
+  setCameraOrbit: (position: [number, number, number], target: [number, number, number], fov?: number) => void
 }
 
 const EDITOR_ONLY_USER_DATA = { __editorOnly: true, __helper: true }
@@ -905,7 +905,7 @@ function SceneContent({
   onDeactivateCamera: () => void
   onViewChanged?: () => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
-  setCameraOrbitRef: React.MutableRefObject<((pos: [number, number, number], tgt: [number, number, number]) => void) | null>
+  setCameraOrbitRef: React.MutableRefObject<((pos: [number, number, number], tgt: [number, number, number], fov?: number) => void) | null>
   debugRings?: { spacing: number; width: number }
   environmentMeshUrls?: string[]
   transparentCanvas?: boolean
@@ -928,10 +928,14 @@ function SceneContent({
 
   // Expose setCameraOrbit to parent via ref
   useEffect(() => {
-    setCameraOrbitRef.current = (pos: [number, number, number], tgt: [number, number, number]) => {
+    setCameraOrbitRef.current = (pos: [number, number, number], tgt: [number, number, number], fov?: number) => {
       if (!orbitRef.current) return
       threeCamera.position.set(pos[0], pos[1], pos[2])
       orbitRef.current.target.set(tgt[0], tgt[1], tgt[2])
+      if (fov !== undefined && 'fov' in threeCamera) {
+        (threeCamera as THREE.PerspectiveCamera).fov = fov;
+        (threeCamera as THREE.PerspectiveCamera).updateProjectionMatrix()
+      }
       orbitRef.current.update()
     }
     return () => { setCameraOrbitRef.current = null }
@@ -1073,7 +1077,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
   const manifestRef = useRef<(() => Scene3DRenderManifest | null) | null>(null)
-  const setCameraOrbitRef = useRef<((pos: [number, number, number], tgt: [number, number, number]) => void) | null>(null)
+  const setCameraOrbitRef = useRef<((pos: [number, number, number], tgt: [number, number, number], fov?: number) => void) | null>(null)
 
   useImperativeHandle(ref, () => ({
     captureScreenshot() {
@@ -1092,9 +1096,9 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     getCanvasElement() {
       return canvasRef.current
     },
-    setCameraOrbit(position: [number, number, number], target: [number, number, number]) {
+    setCameraOrbit(position: [number, number, number], target: [number, number, number], fov?: number) {
       orbitStateRef.current = { position, target }
-      setCameraOrbitRef.current?.(position, target)
+      setCameraOrbitRef.current?.(position, target, fov)
     },
   }))
 

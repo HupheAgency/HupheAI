@@ -24,7 +24,7 @@ export interface Scene3DEditorHandle {
   getScene: () => Scene3DState
   addModelFromUrl: (url: string, name?: string) => void
   getSceneControls: () => Scene3DSceneControls | null
-  setCameraOrbit: (position: [number, number, number], target: [number, number, number]) => void
+  setCameraOrbit: (position: [number, number, number], target: [number, number, number], fov?: number) => void
 }
 
 export interface Scene3DSceneControls {
@@ -271,8 +271,8 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
         setSelectedLightId,
       }
     },
-    setCameraOrbit(position: [number, number, number], target: [number, number, number]) {
-      viewportRef.current?.setCameraOrbit(position, target)
+    setCameraOrbit(position: [number, number, number], target: [number, number, number], fov?: number) {
+      viewportRef.current?.setCameraOrbit(position, target, fov)
     },
   }), [addDirtyObject, addDirtyLight, addCamera, clearAllGltfObjects, clearNonGltfObjects, deleteObject, deleteLight, deleteDirtySelected, markSceneDirty, resetScene, scene, selectedObjectId, selectedLightId, setSelectedObjectId, setSelectedLightId, setActiveCameraId, transformMode, setTransformMode, updateBackground, updateCamera, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, transformDirtyObject, showFrame])
 
