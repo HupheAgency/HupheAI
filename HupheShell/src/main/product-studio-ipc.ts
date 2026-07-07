@@ -3665,17 +3665,21 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     await sb.from('orbit_runs').update({ ...fields, updated_at: new Date().toISOString() }).eq('id', id)
   }
 
-  const getActiveOrbitRun = async (jwt: string, projectId: string): Promise<{ id: string; local_path: string; model: string; pose_method: string; registered_frames: number | null; frame_count: number | null; registration_pct: number | null } | null> => {
+  const getActiveOrbitRun = async (jwt: string, projectId: string, renderVersionId?: string | null): Promise<{ id: string; local_path: string; model: string; pose_method: string; registered_frames: number | null; frame_count: number | null; registration_pct: number | null; render_version_id: string | null } | null> => {
     const sb = getUserClient(jwt)
     const { data } = await sb
       .from('orbit_runs')
-      .select('id, local_path, model, pose_method, registered_frames, frame_count, registration_pct')
+      .select('id, local_path, model, pose_method, registered_frames, frame_count, registration_pct, render_version_id')
       .eq('project_id', projectId)
       .eq('status', 'done')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle()
-    return data ?? null
+    if (!data) return null
+    // Verwerp de run als die bij een ANDERE render_version_id hoort (orbit van vorige foto)
+    // Legacy runs zonder render_version_id worden altijd geaccepteerd
+    if (renderVersionId && data.render_version_id && data.render_version_id !== renderVersionId) return null
+    return data
   }
 
   const resolveWsDir = async (projectId: string, orbitRunId?: string, _model?: string): Promise<string> => {
@@ -3728,7 +3732,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
     // Haal orbitRunId + local_path + pose-resultaat op uit Supabase voor persistente state na herstart
     const jwt = getJwt()
-    const activeRun = jwt ? await getActiveOrbitRun(jwt, args.projectId).catch(() => null) : null
+    const activeRun = jwt ? await getActiveOrbitRun(jwt, args.projectId, args.renderVersionId).catch(() => null) : null
     const orbitRunId = activeRun?.id ?? null
     const activeLocalPath = activeRun?.local_path ?? null
 
