@@ -1,10 +1,10 @@
 import { copyFile, mkdir, readdir, readFile, writeFile, rm } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
-import { exec as execCb } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 
-const exec = promisify(execCb)
+const execFile = promisify(execFileCb)
 
 export interface RunPodProgress {
   step: string
@@ -65,7 +65,7 @@ async function buildDatasetTar(framesDir: string, colmapDir: string, tarPath: st
     if (existsSync(src)) await copyFile(src, join(sparseOut, f))
   }
 
-  await exec(`tar -czf "${tarPath}" -C "${stagingDir}" .`)
+  await execFile('tar', ['-czf', tarPath, '-C', stagingDir, '.'])
   await rm(stagingDir, { recursive: true, force: true })
   return frames.length
 }

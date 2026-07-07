@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, shell } from 'electron'
-import { exec, spawn } from 'child_process'
+import { exec, execFile, spawn } from 'child_process'
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import mammoth from 'mammoth'
 import { tmpdir } from 'os'
@@ -3291,7 +3291,7 @@ ipcMain.handle('document:import-file', async () => {
       return { ok: true, html: result.value, title }
     } else if (ext === 'pages') {
       const html = await new Promise<string>((resolve, reject) => {
-        exec(`textutil -convert html -stdout "${filePath.replace(/"/g, '\\"')}"`, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+        execFile('textutil', ['-convert', 'html', '-stdout', filePath], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
           if (err) reject(err)
           else resolve(stdout)
         })
