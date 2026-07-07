@@ -14,6 +14,9 @@ RUN git clone --recursive https://github.com/hbb1/2d-gaussian-splatting /2d-gaus
 
 WORKDIR /2d-gaussian-splatting
 
+# CUDA arch targets — nodig bij GPU-loze build (CI). Dekt A100 (8.0), A40/RTX30xx (8.6), H100 (9.0)
+ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;9.0+PTX"
+
 # Python afhankelijkheden van 2DGS zelf
 RUN pip install --no-cache-dir \
     plyfile \
