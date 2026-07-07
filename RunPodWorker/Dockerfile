@@ -18,7 +18,8 @@ WORKDIR /2d-gaussian-splatting
 ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;9.0+PTX"
 
 # Python afhankelijkheden van 2DGS zelf
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir "numpy<2" && \
+    pip install --no-cache-dir \
     plyfile \
     tqdm \
     pillow \
