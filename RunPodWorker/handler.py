@@ -16,6 +16,9 @@ Output (fout):
   error        – foutmelding
 """
 
+import subprocess as _sp
+_sp.run(["pip", "install", "-q", "--force-reinstall", "numpy<2"], check=False)
+
 import runpod
 import os
 import subprocess

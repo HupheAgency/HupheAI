@@ -3,7 +3,7 @@ import { json, handleOptions } from '../_shared/response.ts'
 
 const RUNPOD_API_KEY = Deno.env.get('RUNPOD_API_KEY')!
 const RUNPOD_ENDPOINT_ID = Deno.env.get('RUNPOD_ENDPOINT_ID')!
-const RUNPOD_BASE = `https://api.runpod.io/v2/${RUNPOD_ENDPOINT_ID}`
+const RUNPOD_BASE = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return handleOptions()

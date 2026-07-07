@@ -86,7 +86,7 @@ async function uploadDataset(
     headers: {
       'Authorization': `Bearer ${jwt}`,
       'apikey': supabaseKey,
-      'Content-Type': 'application/gzip',
+      'Content-Type': 'application/octet-stream',
       'x-upsert': 'true',
     },
     body: buf,
@@ -106,7 +106,12 @@ async function uploadDataset(
 
   const signJson = await signRes.json() as any
   const signed = signJson.signedURL as string
-  return signed.startsWith('http') ? signed : `${supabaseUrl}${signed}`
+  if (signed.startsWith('http')) {
+    // Volledige URL maar Supabase laat soms /storage/v1 weg
+    return signed.includes('/storage/v1/') ? signed : signed.replace('/object/sign/', '/storage/v1/object/sign/')
+  }
+  const prefix = signed.startsWith('/storage/v1') ? '' : '/storage/v1'
+  return `${supabaseUrl}${prefix}${signed}`
 }
 
 async function deleteDataset(supabaseUrl: string, supabaseKey: string, jwt: string, storagePath: string): Promise<void> {

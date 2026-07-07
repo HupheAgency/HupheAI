@@ -3717,7 +3717,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
   }
 
   // --- Orbit-splat validatietest ---
-  ipcMain.handle('product-studio:check-orbit-video', async (_e, args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => {
+  ipcMain.handle('product-studio:check-orbit-video', async (_e, args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => {
     const { existsSync } = await import('fs')
     const { rename, copyFile, unlink } = await import('fs/promises')
     const model = args.model ?? 'seedance'
@@ -3803,7 +3803,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     imageUrl: string
     arcDegrees?: number
     force?: boolean
-    model?: 'seedance' | 'minimax' | 'kling'
+    model?: 'seedance'
     videoOnly?: boolean
     poseOnly?: boolean
     poseMethod?: 'colmap' | 'replicate' | 'fal'
@@ -4038,16 +4038,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
         const orbitPrompt = `Technical reference video of a room with a stationary central product. Single continuous orbit shot. The camera must complete exactly 320 degrees of clockwise rotation around the central product. It must begin on the front view, pass the side view, fully reveal the back view, and end at the rear-side angle after completing the full 270-degree arc. Do not stop early and do not perform a shorter orbit. Constant orbit radius, constant camera height, constant speed, and perfectly level horizon. No tilt, no roll, no vertical movement, no zoom, and no shake. The camera remains locked on the center product at all times. The surrounding room remains rigid and spatially consistent in every frame, including walls, floor, ceiling, corners, furniture, and background elements. Sharp, highly detailed frames, deep depth of field, everything in focus, no motion blur, neutral lighting, and stable exposure. No cuts, no morphing, no warping, no flicker, no geometry drift, and no changes to the room layout or product geometry.`
 
-        const modelEndpoint = model === 'minimax'
-          ? 'fal-ai/minimax/hailuo-02/standard/image-to-video'
-          : model === 'kling'
-            ? 'fal-ai/kling-video/v3/standard/image-to-video'
-            : 'bytedance/seedance-2.0/image-to-video'
-        const modelBody = model === 'minimax'
-          ? { image_url: imageDataUrl, prompt: orbitPrompt, duration: '6', resolution: '768P' }
-          : model === 'kling'
-            ? { image_url: imageDataUrl, prompt: orbitPrompt, duration: 10, aspect_ratio: '16:9', resolution: '720p', enable_audio: false }
-            : { image_url: imageDataUrl, prompt: orbitPrompt, duration: 10, aspect_ratio: '16:9', resolution: '720p' }
+        const modelEndpoint = 'bytedance/seedance-2.0/image-to-video'
+        const modelBody = { image_url: imageDataUrl, prompt: orbitPrompt, duration: 10, aspect_ratio: '16:9', resolution: '720p', enable_audio: false }
 
         pushStep(`Video aanmelden bij fal.ai (${model})...`, 3)
         const submitRes = await fetch(`https://queue.fal.run/${modelEndpoint}`, {
@@ -4078,7 +4070,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           } else if (statusResult.status === 'IN_PROGRESS') {
             if (generationStartAttempt.value < 0) generationStartAttempt.value = attempt
             const elapsed = (attempt - generationStartAttempt.value) * 5
-            const expectedSec = model === 'minimax' ? 90 : 150
+            const expectedSec = 150
             const genProgress = Math.min(55, Math.round((elapsed / expectedSec) * 55))
             pushStep(`Video genereren... (${elapsed}s)`, 5 + genProgress)
           }
@@ -4445,7 +4437,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     projectId: string
     orbitRunId?: string
     renderVersionId?: string
-    model?: 'seedance' | 'minimax' | 'kling'
+    model?: 'seedance'
     maxSteps?: number
   }) => {
     const jwt = getJwt()

@@ -179,8 +179,8 @@ type ProductStudioApi = {
     }
   }) => Promise<any>
   finalizeBake: (args: { projectId: string }) => Promise<any>
-  testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance' | 'minimax' | 'kling'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' }) => Promise<any>
-  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any }>
+  testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' }) => Promise<any>
+  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any }>
   loadSplat: () => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number }>
   getSplatPose: (args: { projectId: string; orbitRunId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
 }
@@ -581,7 +581,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [bakeProgress, setBakeProgress] = useState<{ phase: 'idle' | 'baking' | 'done' | 'error'; currentFrame: number; totalFrames: number; error?: string }>({ phase: 'idle', currentFrame: 0, totalFrames: 12 })
   const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
-  const [orbitModel, setOrbitModel] = useState<'seedance' | 'minimax' | 'kling'>('seedance')
+  const orbitModel = 'seedance' as const
   const [poseMethod, setPoseMethod] = useState<'colmap' | 'replicate' | 'fal'>('colmap')
   const [orbitConfirmOpen, setOrbitConfirmOpen] = useState(false)
   const [orbitVideoExpanded, setOrbitVideoExpanded] = useState(false)
@@ -887,6 +887,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   // Per-version local cache: model transform per archive photo (session only)
   const archiveTransformCache = useRef<Record<string, { position: [number,number,number]; rotation: [number,number,number]; scale: [number,number,number] }>>({})
   const activeArchiveVersionId = useRef<string | null>(null)
+  const prevOverlayRef = useRef<'light' | 'productLayer' | 'composite' | 'bgComposite' | '__depth' | null>(null)
+  const renderManifestRef = useRef<typeof renderManifest>(undefined)
   const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
   const [viewportOverlay, setViewportOverlay] = useState<'light' | 'productLayer' | 'composite' | 'bgComposite' | '__depth' | null>(null)
   const [debugRings, setDebugRings] = useState<{ spacing: number; width: number } | undefined>({ spacing: 0.04, width: 0.002 })
@@ -985,6 +987,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     })
   }
   const renderManifest = project.renderPacket?.manifest ?? project.renderPacketRecord?.scene_manifest
+  renderManifestRef.current = renderManifest
   const manifestStatus = [
     { label: 'Camera', ready: Boolean(renderManifest?.camera?.position?.length && renderManifest?.camera?.target?.length) },
     { label: 'Ground', ready: Boolean(renderManifest?.groundPlane?.screenLine) },
@@ -1129,6 +1132,22 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }, 3000)
     return () => window.clearInterval(timer)
   }, [textureInProgress, project.reconstruction?.id, project.backendProject?.id, project.id])
+
+  // Sync camera when entering/leaving bgComposite mode so 3D aligns with the render photo
+  useEffect(() => {
+    const prev = prevOverlayRef.current
+    prevOverlayRef.current = viewportOverlay
+
+    const manifest = renderManifestRef.current as any
+    if (!manifest?.camera?.position || !manifest?.camera?.target || !studioRef.current) return
+
+    if (viewportOverlay === 'bgComposite') {
+      // Herstel camera naar render-positie met originele FOV.
+      // fovScale compenseert frame vs canvas, maar die effecten heffen elkaar op:
+      // background-pixel-positie = 3D-canvas-pixel-positie bij originele FOV + originele positie.
+      studioRef.current.setCameraOrbit(manifest.camera.position, manifest.camera.target, manifest.camera.fov)
+    }
+  }, [viewportOverlay])
 
   async function hydrateLatestState(projectId = getStoredProjectId(project), showBusy = true) {
     if (!projectId) return
@@ -1661,7 +1680,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         return
       }
     }
-    const modelLabel = orbitModel === 'minimax' ? 'MiniMax Hailuo' : orbitModel === 'kling' ? 'Kling v3' : 'Seedance 2.0'
+    const modelLabel = 'Seedance 2.0'
     setOrbitTest({ phase: 'running', step: `Video genereren via ${modelLabel}...`, progress: 2 })
     try {
       const result = await api.testOrbitSplat({ projectId: project.backendProject.id, renderVersionId, imageUrl, arcDegrees: 270, force, model: orbitModel, poseMethod })
@@ -2051,15 +2070,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const scene = result.scene as StudioSceneVersion | null
       const manifest = packet.scene_manifest as any
 
-      // Restore camera orbit position + FOV (inclusief fovScale zodat 3D view overeenkomt met de foto)
+      // Restore camera orbit position + FOV
+      // fovScale is een render-time correctie (frame vs canvas), geen scene camera parameter — NIET toepassen op live camera
       if (manifest?.camera?.position && manifest?.camera?.target) {
-        let effectiveFov: number | undefined = manifest.camera.fov
-        const fovScale: number | undefined = manifest.viewport?.fovScale
-        if (effectiveFov !== undefined && fovScale !== undefined && fovScale > 0 && fovScale < 1) {
-          const halfRad = (effectiveFov * Math.PI) / 360
-          effectiveFov = (Math.atan(Math.tan(halfRad) * fovScale) * 360) / Math.PI
-        }
-        studioRef.current?.setCameraOrbit(manifest.camera.position, manifest.camera.target, effectiveFov)
+        studioRef.current?.setCameraOrbit(manifest.camera.position, manifest.camera.target, manifest.camera.fov)
       }
 
       // Restore model transform: eerst uit lokale cache, dan uit database
@@ -2853,23 +2867,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </button>
               </div>
             </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {(['seedance', 'minimax', 'kling'] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setOrbitModel(m)}
-                  disabled={orbitTest.phase === 'running'}
-                  className={`rounded-full border px-2.5 py-1 text-[10px] font-medium disabled:cursor-not-allowed ${
-                    orbitModel === m
-                      ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300'
-                      : 'border-white/10 text-white/40 hover:border-white/20 hover:text-white/60'
-                  }`}
-                >
-                  {m === 'seedance' ? 'Seedance 2.0 (10s, 720p)' : m === 'minimax' ? 'MiniMax Hailuo (6s, 768p)' : 'Kling v3 (10s, 16:9)'}
-                </button>
-              ))}
-            </div>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               <span className="self-center text-[9px] font-medium uppercase tracking-wider text-white/20">Pose:</span>
               {(['colmap', 'replicate', 'fal'] as const).map((m) => (
@@ -2935,7 +2932,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               </div>
             )}
 
-            {/* Brush training knop + voortgang */}
+            {/* RunPod training knop + voortgang */}
             {(orbitTest.phase === 'done' && orbitTest.colmap?.pass) && (
               <div className="mt-2">
                 {splatTraining.phase !== 'running' && (
@@ -2945,13 +2942,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                     onClick={startSplatTraining}
                     className="w-full rounded-md border border-emerald-400/25 bg-emerald-500/10 py-1.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40"
                   >
-                    {splatTraining.phase === 'done' ? '✓ Splat trainen (opnieuw)' : '▶ Splat trainen met Brush'}
+                    {splatTraining.phase === 'done' ? '✓ Train via RunPod (opnieuw)' : '▶ Train via RunPod'}
                   </button>
                 )}
                 {splatTraining.phase === 'running' && (
                   <div className="rounded-md border border-emerald-400/15 bg-emerald-500/8 p-2">
                     <div className="mb-1.5 flex items-center justify-between">
-                      <span className="text-[10px] font-medium text-emerald-300">Brush training...</span>
+                      <span className="text-[10px] font-medium text-emerald-300">RunPod training...</span>
                       <span className="text-[10px] tabular-nums text-emerald-400/80">
                         {splatTraining.currentStep != null
                           ? `${splatTraining.currentStep.toLocaleString()} / ${(splatTraining.totalSteps ?? 30000).toLocaleString()}`
