@@ -3861,11 +3861,71 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         const poseMethod = args.poseMethod ?? 'colmap'
         let colmapResultP: { registered: number; total: number; pct: number; pass: boolean; sparse_dir: string; anchor_point: number[] | null; scale_factor: number | null; method?: string }
 
-        pushStep(`Pose-analyse starten (${poseMethod === 'replicate' ? 'VGGT · Replicate' : poseMethod === 'fal' ? 'VGGT · fal.ai' : 'COLMAP'}, ${frameCountP} frames)...`, 10)
+        pushStep(`Pose-analyse starten (${poseMethod === 'replicate' ? 'VGGT · Replicate' : poseMethod === 'fal' ? 'VGGT · RunPod' : 'COLMAP'}, ${frameCountP} frames)...`, 10)
 
         // Stap 4 inline voor poseOnly — zelfde logica, andere entry point
         if (poseMethod === 'fal') {
-          return { ok: false, error: 'poseOnly + fal.ai: nog niet ondersteund. Gebruik Replicate of COLMAP.' }
+          // ── VGGT via RunPod serverless ─────────────────────────────────────
+          const { runVggtPoseEstimation } = await import('./lib/runpod-vggt')
+
+          pushStep('Markerframe genereren...', 15)
+          const markerScriptPathF = join(__dirname, 'lib/generate_marker_frame.py')
+          const markerFramePathF = join(framesDir, 'frame_0000.png')
+          const firstOrbitFrameF = join(framesDir, 'frame_0001.png')
+          try { await exec(`"${python}" "${markerScriptPathF}" "${firstOrbitFrameF}" "${markerFramePathF}"`, { timeout: 30_000 }) } catch {}
+
+          pushStep('Frames voorbereiden...', 20)
+          const { existsSync: existsSyncF } = await import('fs')
+          const frameFilesF = (await import('fs/promises').then(m => m.readdir(framesDir)))
+            .filter(f => f.match(/^frame_\d+\.png$/)).sort()
+          const orbitFilesF = frameFilesF.filter(f => f !== 'frame_0000.png')
+          const stepF = orbitFilesF.length > 39 ? Math.ceil(orbitFilesF.length / 39) : 1
+          const sampledF = orbitFilesF.filter((_, i) => i % stepF === 0).slice(0, 39)
+          const hasMarkerF = existsSyncF(markerFramePathF)
+          const allSampledF = hasMarkerF ? ['frame_0000.png', ...sampledF] : sampledF
+          const frameNamesF = allSampledF.filter(f => f !== 'frame_0000.png')
+
+          const imageB64F: string[] = []
+          for (let i = 0; i < allSampledF.length; i++) {
+            const framePath = join(framesDir, allSampledF[i])
+            const { stdout: jpegBuf } = await exec(`ffmpeg -y -i "${framePath}" -vf scale=640:-2 -q:v 4 -f image2 pipe:1 2>/dev/null`, { encoding: 'buffer', timeout: 10_000 }) as any
+            imageB64F.push((jpegBuf as Buffer).toString('base64'))
+            if (i % 5 === 0) pushStep(`Frames voorbereiden... (${i + 1}/${allSampledF.length})`, 20 + Math.round(i / allSampledF.length * 25))
+          }
+
+          pushStep(`${imageB64F.length} frames klaar, VGGT starten op RunPod...`, 46)
+          let vggtResF: Awaited<ReturnType<typeof runVggtPoseEstimation>>
+          try {
+            vggtResF = await runVggtPoseEstimation({
+              supabaseUrl: SUPABASE_URL,
+              jwt,
+              image_b64: imageB64F,
+              orig_w: 640,
+              orig_h: 360,
+              frame_names: frameNamesF,
+              onProgress: ({ step, progress }) => pushStep(step, 46 + Math.round(progress * 0.46)),
+            })
+          } catch (vggtErrF: any) {
+            return { ok: false, error: `VGGT RunPod mislukt: ${vggtErrF?.message ?? vggtErrF}` }
+          }
+
+          const sparseDirF = join(colmapDir, 'sparse', '1')
+          await mkdir(sparseDirF, { recursive: true })
+          await writeFile(join(sparseDirF, 'cameras.bin'), Buffer.from(vggtResF.cameras_b64, 'base64'))
+          await writeFile(join(sparseDirF, 'images.bin'), Buffer.from(vggtResF.images_b64, 'base64'))
+          await writeFile(join(sparseDirF, 'points3D.bin'), Buffer.from(vggtResF.points3d_b64, 'base64'))
+
+          console.log(`[orbit-splat/poseOnly] VGGT RunPod: ${vggtResF.registered}/${vggtResF.total} frames, ${vggtResF.point_count} punten`)
+          colmapResultP = {
+            registered: vggtResF.registered,
+            total: vggtResF.total,
+            pct: vggtResF.pct,
+            pass: vggtResF.pct >= 80,
+            sparse_dir: sparseDirF,
+            anchor_point: null,
+            scale_factor: null,
+            method: 'runpod-vggt',
+          }
         } else if (poseMethod === 'replicate') {
           const { existsSync: existsSyncP, readFileSync: readFileSyncP } = await import('fs')
           const { safeStorage: safeStorageP } = await import('electron')
@@ -4140,6 +4200,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
 
       if (poseMethod === 'fal') {
+        // ── VGGT via RunPod serverless ────────────────────────────────────
+        const { runVggtPoseEstimation } = await import('./lib/runpod-vggt')
+
         pushStep('Markerframe genereren...', 71)
         const markerScriptPath = join(__dirname, 'lib/generate_marker_frame.py')
         const markerFramePath = join(framesDir, 'frame_0000.png')
@@ -4150,13 +4213,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           console.warn('[orbit-splat] Markerframe generatie mislukt (doorgaan zonder marker):', markerErr?.message)
         }
 
-        pushStep('Frames uploaden naar fal.ai...', 72)
-        const { existsSync: existsSync2, readFileSync: readFileSync2 } = await import('fs')
-        const { safeStorage: safeStorage2 } = await import('electron')
-        const falKeyFile2 = join(app.getPath('userData'), 'fal.enc')
-        if (!existsSync2(falKeyFile2)) return { ok: false, error: 'Geen fal.ai API key gevonden voor VGGT.', videoUrl: videoFileUrl }
-        const falKey2 = safeStorage2.decryptString(readFileSync2(falKeyFile2))
-
+        pushStep('Frames voorbereiden voor RunPod...', 72)
+        const { existsSync: existsSync2 } = await import('fs')
         const allFrameFiles = (await import('fs/promises').then(m => m.readdir(framesDir)))
           .filter(f => f.match(/^frame_\d+\.png$/)).sort()
         const orbitFrames = allFrameFiles.filter(f => f !== 'frame_0000.png')
@@ -4165,54 +4223,26 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         const sampledOrbit = orbitFrames.filter((_, i) => i % sampleStep === 0).slice(0, maxOrbit)
         const hasMarker = existsSync2(markerFramePath)
         const sampledFrames = hasMarker ? ['frame_0000.png', ...sampledOrbit] : sampledOrbit
-        const markerFrameIdx = hasMarker ? 0 : -1
+        const frameNamesForColmap = sampledFrames.filter(f => f !== 'frame_0000.png')
 
-        const frameUrls: string[] = []
+        const imageB64Arr: string[] = []
         for (let i = 0; i < sampledFrames.length; i++) {
-          const frameData = await readFile(join(framesDir, sampledFrames[i]))
-          const uploadRes = await fetch('https://storage.fal.ai/upload', {
-            method: 'POST',
-            headers: { 'Authorization': `Key ${falKey2}`, 'Content-Type': 'image/png' },
-            body: frameData,
-          })
-          if (!uploadRes.ok) throw new Error(`Frame upload mislukt: ${uploadRes.status}`)
-          const { url } = await (uploadRes.json() as Promise<{ url: string }>)
-          frameUrls.push(url)
-          if (i % 5 === 0) pushStep(`Frames uploaden... (${i + 1}/${sampledFrames.length})`, 72 + Math.round((i / sampledFrames.length) * 8))
+          const framePath = join(framesDir, sampledFrames[i])
+          const { stdout: jpegBuf } = await exec(`ffmpeg -y -i "${framePath}" -vf scale=640:-2 -q:v 4 -f image2 pipe:1 2>/dev/null`, { encoding: 'buffer', timeout: 10_000 }) as any
+          imageB64Arr.push((jpegBuf as Buffer).toString('base64'))
+          if (i % 5 === 0) pushStep(`Frames voorbereiden... (${i + 1}/${sampledFrames.length})`, 72 + Math.round((i / sampledFrames.length) * 8))
         }
-        pushStep(`${frameUrls.length} frames geüpload, VGGT starten...`, 81)
 
-        const vggtEndpointId = process.env.VGGT_ENDPOINT_ID
-        const vggtSubmitRes = await fetch(`https://queue.fal.run/${vggtEndpointId}`, {
-          method: 'POST',
-          headers: { 'Authorization': `Key ${falKey2}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ frame_urls: frameUrls, marker_frame_idx: markerFrameIdx, marker_size_m: 0.10, conf_thres: 5.0 }),
+        pushStep(`${imageB64Arr.length} frames klaar, VGGT starten op RunPod...`, 81)
+        const vggtResult = await runVggtPoseEstimation({
+          supabaseUrl: SUPABASE_URL,
+          jwt,
+          image_b64: imageB64Arr,
+          orig_w: 640,
+          orig_h: 360,
+          frame_names: frameNamesForColmap,
+          onProgress: ({ step, progress }) => pushStep(step, 81 + Math.round(progress * 0.13)),
         })
-        if (!vggtSubmitRes.ok) {
-          const errText = await vggtSubmitRes.text()
-          throw new Error(`VGGT submit mislukt ${vggtSubmitRes.status}: ${errText.slice(0, 300)}`)
-        }
-        const vggtSubmit = await vggtSubmitRes.json() as { status_url: string; response_url: string }
-
-        let vggtResult: any = null
-        let vggtElapsed = 0
-        for (let attempt = 0; attempt < 60; attempt++) {
-          await new Promise((r) => setTimeout(r, 5000))
-          vggtElapsed += 5
-          const statusRes = await fetch(vggtSubmit.status_url, { headers: { 'Authorization': `Key ${falKey2}` } })
-          const status = await statusRes.json() as any
-          if (status.status === 'FAILED') throw new Error(`VGGT mislukt: ${JSON.stringify(status).slice(0, 300)}`)
-          if (status.status === 'IN_PROGRESS' || status.status === 'IN_QUEUE') {
-            pushStep(`VGGT bezig... (${vggtElapsed}s)`, Math.min(92, 82 + Math.round(vggtElapsed / 15)))
-          }
-          if (status.status === 'COMPLETED') {
-            const finalRes = await fetch(vggtSubmit.response_url, { headers: { 'Authorization': `Key ${falKey2}` } })
-            vggtResult = await finalRes.json()
-            break
-          }
-        }
-        if (!vggtResult) throw new Error('VGGT timeout (>5 min).')
-        if (!vggtResult.ok) throw new Error(`VGGT fout: ${vggtResult.error ?? 'Onbekend'}`)
 
         const sparseDir = join(colmapDir, 'sparse', '1')
         await mkdir(sparseDir, { recursive: true })
@@ -4221,28 +4251,16 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         await writeFile(join(sparseDir, 'points3D.bin'), Buffer.from(vggtResult.points3d_b64, 'base64'))
 
         colmapResult = {
-          registered: vggtResult.registered ?? sampledFrames.length,
-          total: vggtResult.total ?? sampledFrames.length,
-          pct: vggtResult.pct ?? 100,
-          pass: (vggtResult.pct ?? 100) >= 80,
+          registered: vggtResult.registered,
+          total: vggtResult.total,
+          pct: vggtResult.pct,
+          pass: vggtResult.pct >= 80,
           sparse_dir: sparseDir,
-          anchor_point: vggtResult.anchor_point ?? null,
-          scale_factor: vggtResult.scale_factor ?? null,
+          anchor_point: null,
+          scale_factor: null,
+          method: 'runpod-vggt',
         }
-
-        if (colmapResult.anchor_point || colmapResult.scale_factor) {
-          await writeFile(join(wsDir, 'vggt.json'), JSON.stringify({
-            savedAt: new Date().toISOString(),
-            anchor_point: colmapResult.anchor_point,
-            scale_factor: colmapResult.scale_factor,
-            registered: colmapResult.registered,
-            total: colmapResult.total,
-            pct: colmapResult.pct,
-          }, null, 2), 'utf8')
-        }
-
-        colmapResult = { ...colmapResult!, method: 'fal' }
-        pushStep(`VGGT (fal.ai) klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
+        pushStep(`VGGT (RunPod) klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 95)
 
       } else if (poseMethod === 'replicate') {
         // ── VGGT via Replicate ────────────────────────────────────────────

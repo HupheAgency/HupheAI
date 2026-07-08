@@ -1,0 +1,40 @@
+# VGGT pose-estimatie worker voor RunPod serverless
+# Bouwt op PyTorch 2.1 + CUDA 11.8 base image
+
+FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
+
+# Systeem dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git libgl1-mesa-glx libglib2.0-0 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python deps — numpy<2 eerst om conflicten te voorkomen
+RUN pip install --no-cache-dir "numpy<2"
+
+RUN pip install --no-cache-dir \
+    pillow \
+    requests \
+    runpod \
+    einops \
+    huggingface_hub \
+    "transformers>=4.40.0"
+
+# VGGT installeren vanuit GitHub (inclusief dependencies)
+RUN pip install --no-cache-dir \
+    "git+https://github.com/facebookresearch/vggt.git"
+
+# Model weights inbakken zodat cold start geen HuggingFace download nodig heeft (~2.4 GB)
+ENV HF_HOME=/hf_cache
+RUN python -c "
+from vggt.models.vggt import VGGT
+import os
+print('Downloading VGGT-1B weights...')
+model = VGGT.from_pretrained('facebook/VGGT-1B', cache_dir='/hf_cache')
+print('Done.')
+del model
+"
+
+# Handler kopiëren
+COPY handler_vggt.py /handler_vggt.py
+
+CMD ["python", "-u", "/handler_vggt.py"]
