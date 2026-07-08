@@ -75,8 +75,8 @@ def decode_pose_enc(pose_enc_raw, W, H):
       t_w2c = -R_w2c * C   (C = cameracentrum)
     """
     pose_enc = unpack_pose_enc(pose_enc_raw)
-    C = pose_enc[0:3]          # cameracentrum in wereld
-    qw, qx, qy, qz = pose_enc[3:7]
+    C = pose_enc[0:3]          # cameracentrum in wereld (absT)
+    qx, qy, qz, qw = pose_enc[3:7]   # VGGT gebruikt (x,y,z,w) volgorde, scalar achteraan
     fov_h = pose_enc[7]
     fov_w = pose_enc[8]
 
