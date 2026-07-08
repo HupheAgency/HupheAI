@@ -106,9 +106,42 @@ def write_images_bin(path, images):
             f.write(struct.pack('<Q', 0))  # 0 points2D
 
 
-def write_points3d_bin(path):
+def write_points3d_bin(path, camera_centers=None, n_points=2000):
+    """Schrijf synthetische points3D.bin zodat 2DGS Gaussians kan initialiseren.
+
+    VGGT geeft geen 3D puntenwolk terug — alleen camera poses. 2DGS vereist
+    echter minstens enkele beginpunten: met 0 punten is P=0 bij de CUDA kernel
+    en crasht hij op 'invalid configuration argument'. We genereren daarom een
+    synthetische puntenwolk rond het scène-centrum.
+    """
+    import random as _rnd
+    rng = _rnd.Random(42)
+
+    if camera_centers and len(camera_centers) > 0:
+        cx = sum(c[0] for c in camera_centers) / len(camera_centers)
+        cy = sum(c[1] for c in camera_centers) / len(camera_centers)
+        cz = sum(c[2] for c in camera_centers) / len(camera_centers)
+        dists = [((c[0]-cx)**2 + (c[1]-cy)**2 + (c[2]-cz)**2)**0.5
+                 for c in camera_centers]
+        scale = max(sum(dists) / max(len(dists), 1), 0.05) * 0.5
+    else:
+        cx, cy, cz, scale = 0.0, 0.0, 0.0, 0.5
+
     with open(path, 'wb') as f:
-        f.write(struct.pack('<Q', 0))
+        f.write(struct.pack('<Q', n_points))
+        for i in range(n_points):
+            theta = rng.uniform(0, 2 * math.pi)
+            phi = rng.uniform(0, math.pi)
+            r = rng.uniform(0, scale)
+            x = cx + r * math.sin(phi) * math.cos(theta)
+            y = cy + r * math.sin(phi) * math.sin(theta)
+            z = cz + r * math.cos(phi)
+            # COLMAP points3D binary: id(Q) xyz(3d) rgb(3B) error(d) track_len(Q)
+            f.write(struct.pack('<Q', i + 1))
+            f.write(struct.pack('<3d', x, y, z))
+            f.write(struct.pack('<3B', 128, 128, 128))
+            f.write(struct.pack('<d', 1.0))
+            f.write(struct.pack('<Q', 0))
 
 
 def main():
@@ -127,6 +160,7 @@ def main():
     cameras = {}
     images = {}
 
+    camera_centers = []
     for i, frame in enumerate(frames):
         img_id = i + 1
         cam_id = i + 1
@@ -138,12 +172,17 @@ def main():
         R, t, fx, fy, cx, cy = decode_pose_enc(pose_enc, W, H)
         qvec = rotmat_to_quat(R)
 
+        # Camera center in world space: C = -R^T * t
+        Rt = [[R[j][i] for j in range(3)] for i in range(3)]  # transpose
+        cam_c = [-(Rt[r][0]*t[0] + Rt[r][1]*t[1] + Rt[r][2]*t[2]) for r in range(3)]
+        camera_centers.append(cam_c)
+
         cameras[cam_id] = (W, H, fx, fy, cx, cy)
         images[img_id] = (qvec, t, cam_id, name)
 
     write_cameras_bin(str(sparse_dir / 'cameras.bin'), cameras)
     write_images_bin(str(sparse_dir / 'images.bin'), images)
-    write_points3d_bin(str(sparse_dir / 'points3D.bin'))
+    write_points3d_bin(str(sparse_dir / 'points3D.bin'), camera_centers=camera_centers)
 
     print(json.dumps({
         'ok': True,
