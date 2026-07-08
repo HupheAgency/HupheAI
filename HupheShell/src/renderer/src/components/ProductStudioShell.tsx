@@ -582,7 +582,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const orbitModel = 'seedance' as const
-  const [poseMethod, setPoseMethod] = useState<'colmap' | 'replicate' | 'fal'>('colmap')
+  const [poseMethod, setPoseMethod] = useState<'replicate' | 'fal'>('replicate')
   const [orbitConfirmOpen, setOrbitConfirmOpen] = useState(false)
   const [orbitVideoExpanded, setOrbitVideoExpanded] = useState(false)
   const [splatViewerUrl, setSplatViewerUrl] = useState<string | null>(null)
@@ -1699,7 +1699,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!api || !project.backendProject) return
     const imageUrl = backgroundPlateUrl ?? project.sourceImage?.src ?? ''
     const renderVersionId = project.finalRenderRecord?.id
-    const methodLabel = poseMethod === 'replicate' ? 'VGGT · Replicate' : poseMethod === 'fal' ? 'VGGT · fal.ai' : 'COLMAP'
+    const methodLabel = poseMethod === 'fal' ? 'VGGT · fal.ai' : 'VGGT · Replicate'
     setOrbitTest((prev) => ({ ...prev, phase: 'running', step: `Pose-analyse starten (${methodLabel})...`, progress: 2, colmap: undefined }))
     try {
       const result = await api.testOrbitSplat({ projectId: project.backendProject.id, renderVersionId, imageUrl, model: orbitModel, poseOnly: true, poseMethod })
@@ -2844,10 +2844,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold text-white/70">Orbit splat test</p>
-                <p className="mt-1 text-xs text-white/36">Genereert een orbit-video van de achtergrond en test of COLMAP de frames kan reconstrueren. Diagnose: ≥80% = bruikbaar voor splat-training.</p>
+                <p className="mt-1 text-xs text-white/36">Genereert een orbit-video van de achtergrond en test of VGGT de frames kan reconstrueren. Diagnose: ≥80% = bruikbaar voor splat-training.</p>
               </div>
               <div className="flex shrink-0 flex-col gap-1.5">
-                {orbitTest.phase === 'done' && orbitTest.videoUrl && poseMethod !== 'colmap' && (
+                {orbitTest.phase === 'done' && orbitTest.videoUrl && (
                   <button
                     type="button"
                     onClick={() => void runPoseOnly()}
@@ -2869,11 +2869,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             </div>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               <span className="self-center text-[9px] font-medium uppercase tracking-wider text-white/20">Pose:</span>
-              {(['colmap', 'replicate', 'fal'] as const).map((m) => (
+              {(['replicate', 'fal'] as const).map((m) => (
                 <button
                   key={m}
                   type="button"
-                  onClick={() => { setPoseMethod(m); setOrbitTest((prev) => prev.phase === 'done' ? { ...prev, colmap: undefined } : prev) }}
+                  onClick={() => setPoseMethod(m)}
                   disabled={orbitTest.phase === 'running'}
                   className={`rounded-full border px-2 py-0.5 text-[9px] font-medium disabled:cursor-not-allowed ${
                     poseMethod === m
@@ -2881,7 +2881,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                       : 'border-white/10 text-white/30 hover:border-white/20 hover:text-white/50'
                   }`}
                 >
-                  {m === 'colmap' ? 'COLMAP' : m === 'replicate' ? 'VGGT · Replicate' : 'VGGT · fal.ai'}
+                  {m === 'replicate' ? 'VGGT · Replicate' : 'VGGT · fal.ai'}
                 </button>
               ))}
             </div>
