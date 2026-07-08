@@ -6,7 +6,7 @@ import { resolve, dirname } from 'path'
 // Vite plugin: copy Python scripts next to the compiled main bundle
 // so __dirname/<script>.py resolves correctly at runtime.
 function copyPythonScripts(): import('vite').Plugin {
-  const scripts = ['parse_key.py', 'write_key.py', 'parse_key_slides.py', 'lib/colmap_sfm.py', 'lib/generate_marker_frame.py', 'lib/vggt_to_colmap.py']
+  const scripts = ['parse_key.py', 'write_key.py', 'parse_key_slides.py', 'lib/colmap_sfm.py', 'lib/generate_marker_frame.py', 'lib/vggt_to_colmap.py', 'lib/ply_to_colmap_points.py']
   return {
     name: 'copy-python-scripts',
     closeBundle() {

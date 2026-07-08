@@ -3987,6 +3987,30 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
             if (vggtErr) console.warn('[orbit-splat/poseOnly] Python stderr:', vggtErr.slice(0, 300))
             const vggtResult = JSON.parse(vggtOut.trim().split('\n').pop()!) as any
             if (!vggtResult.ok) throw new Error(`VGGT→COLMAP conversie mislukt: ${vggtResult.error}`)
+
+            // Download VGGT point cloud en converteer naar COLMAP points3D.bin
+            if (replOutP?.point_cloud) {
+              try {
+                pushStep('Point cloud downloaden van VGGT...', 97)
+                const pcRes = await fetch(replOutP.point_cloud, { headers: { 'Authorization': `Bearer ${replKeyP}` } })
+                if (pcRes.ok) {
+                  const plyPath = join(sparseDirP, '_vggt.ply')
+                  await writeFile(plyPath, Buffer.from(await pcRes.arrayBuffer()))
+                  const plyScript = join(__dirname, 'lib/ply_to_colmap_points.py')
+                  const points3dPath = join(sparseDirP, 'points3D.bin')
+                  const { stdout: plyOut } = await exec(`"${python}" "${plyScript}" "${plyPath}" "${points3dPath}"`, { timeout: 30_000 })
+                  const plyResult = JSON.parse(plyOut.trim().split('\n').pop()!) as any
+                  if (plyResult.ok) {
+                    console.log(`[orbit-splat/poseOnly] VGGT point cloud: ${plyResult.points} punten`)
+                  } else {
+                    console.warn('[orbit-splat/poseOnly] PLY conversie mislukt:', plyResult.error)
+                  }
+                }
+              } catch (pcErr: any) {
+                console.warn('[orbit-splat/poseOnly] Point cloud download mislukt (doorgaan zonder):', pcErr?.message)
+              }
+            }
+
             colmapResultP = { registered: vggtResult.registered, total: vggtResult.total, pct: vggtResult.pct, pass: vggtResult.pass, sparse_dir: sparseDirP, anchor_point: null, scale_factor: null, method: 'replicate' }
           } else {
             throw new Error(`Onverwacht Replicate output formaat: ${JSON.stringify(replOutP).slice(0, 300)}`)
@@ -4339,6 +4363,29 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           const { stdout: vggtOut } = await exec(`"${python}" "${vggtScript}" "${vggtInputPath}" "${replSparseDir}"`, { timeout: 60_000 })
           const vggtResult = JSON.parse(vggtOut.trim().split('\n').pop()!) as any
           if (!vggtResult.ok) throw new Error(`VGGT→COLMAP conversie mislukt: ${vggtResult.error}`)
+
+          // Download VGGT point cloud en converteer naar COLMAP points3D.bin
+          if (replOut?.point_cloud) {
+            try {
+              pushStep('Point cloud downloaden van VGGT...', 97)
+              const pcRes = await fetch(replOut.point_cloud, { headers: { 'Authorization': `Bearer ${replKey}` } })
+              if (pcRes.ok) {
+                const plyPath = join(replSparseDir, '_vggt.ply')
+                await writeFile(plyPath, Buffer.from(await pcRes.arrayBuffer()))
+                const plyScript = join(__dirname, 'lib/ply_to_colmap_points.py')
+                const { stdout: plyOut } = await exec(`"${python}" "${plyScript}" "${plyPath}" "${join(replSparseDir, 'points3D.bin')}"`, { timeout: 30_000 })
+                const plyResult = JSON.parse(plyOut.trim().split('\n').pop()!) as any
+                if (plyResult.ok) {
+                  console.log(`[orbit-splat] VGGT point cloud: ${plyResult.points} punten`)
+                } else {
+                  console.warn('[orbit-splat] PLY conversie mislukt:', plyResult.error)
+                }
+              }
+            } catch (pcErr: any) {
+              console.warn('[orbit-splat] Point cloud download mislukt (doorgaan zonder):', pcErr?.message)
+            }
+          }
+
           colmapResult = {
             registered: vggtResult.registered,
             total: vggtResult.total,
