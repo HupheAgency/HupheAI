@@ -44,6 +44,19 @@ export default function App() {
   const [livePresentationId, setLivePresentationId] = useState<string | undefined>(undefined)
   const [returnModule, setReturnModule] = useState<string>('home')
 
+  // Proactieve JWT refresh zodat het main-process token nooit verloopt.
+  // Supabase tokens zijn ~1 uur geldig; elke 25 min een stille refresh.
+  useEffect(() => {
+    if (!session || !supabase) return
+    const timer = setInterval(async () => {
+      const { data } = await supabase.auth.refreshSession()
+      if (data.session?.access_token) {
+        void (window as any).api?.setJwt(data.session.access_token)
+      }
+    }, 25 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, [session?.user?.id])
+
   useEffect(() => {
     if (!supabaseConfigured || !supabase) {
       setLoading(false)
