@@ -30,17 +30,41 @@ import requests
 
 def run_training(dataset_dir: str, output_dir: str, max_steps: int) -> str:
     """Draai 2DGS training en geef het pad naar het gegenereerde .ply terug."""
+    # Log beeldafmetingen voor diagnostics
+    images_dir = os.path.join(dataset_dir, "images")
+    frames = sorted(f for f in os.listdir(images_dir) if f.endswith((".png", ".jpg")))
+    if frames:
+        import struct as _s
+        first = os.path.join(images_dir, frames[0])
+        size_kb = os.path.getsize(first) // 1024
+        # Lees PNG/JPEG afmetingen zonder PIL
+        with open(first, "rb") as fh:
+            header = fh.read(24)
+        if header[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = _s.unpack(">II", header[16:24])
+        elif header[:2] == b"\xff\xd8":
+            w, h = 0, 0  # JPEG: niet triviaal zonder PIL
+        else:
+            w, h = 0, 0
+        print(f"[2dgs] Eerste frame: {frames[0]}, {w}x{h}, {size_kb}KB")
+
+    cameras_bin = os.path.join(dataset_dir, "sparse", "0", "cameras.bin")
+    points_bin = os.path.join(dataset_dir, "sparse", "0", "points3D.bin")
+    print(f"[2dgs] cameras.bin: {os.path.getsize(cameras_bin) if os.path.exists(cameras_bin) else 'MISSING'} bytes")
+    print(f"[2dgs] points3D.bin: {os.path.getsize(points_bin) if os.path.exists(points_bin) else 'MISSING'} bytes")
+
     cmd = [
         "python", "/2d-gaussian-splatting/train.py",
         "-s", dataset_dir,
         "-m", output_dir,
         "--iterations", str(max_steps),
         "--save_iterations", str(max_steps),
-        "--test_iterations", "-1",   # geen test tussendoor
         "--densify_until_iter", str(min(max_steps, 3000)),
         "--position_lr_max_steps", str(max_steps),
-        "--quiet",
     ]
+
+    import os as _os
+    train_env = {**_os.environ, "CUDA_LAUNCH_BLOCKING": "1"}
 
     proc = subprocess.run(
         cmd,
@@ -48,6 +72,7 @@ def run_training(dataset_dir: str, output_dir: str, max_steps: int) -> str:
         text=True,
         cwd="/2d-gaussian-splatting",
         timeout=1800,   # max 30 min als vangnet
+        env=train_env,
     )
 
     if proc.returncode != 0:
