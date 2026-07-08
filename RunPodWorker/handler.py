@@ -26,6 +26,77 @@ import tarfile
 import tempfile
 import base64
 import requests
+import struct
+import math
+import random
+
+
+def fix_empty_point_cloud(sparse_dir: str, n_points: int = 2000) -> int:
+    """Als points3D.bin 0 punten heeft, vul hem met synthetische punten.
+
+    2DGS/3DGS crasht (CUDA invalid configuration) bij P=0 Gaussians.
+    VGGT geeft alleen cameraposities, geen 3D puntenwolk — vandaar.
+    """
+    pts_path = os.path.join(sparse_dir, "points3D.bin")
+    if not os.path.exists(pts_path):
+        return 0
+    with open(pts_path, "rb") as f:
+        existing = struct.unpack("<Q", f.read(8))[0]
+    if existing > 0:
+        return existing
+
+    # Lees cameracentra uit images.bin voor betere puntplaatsing
+    camera_centers = []
+    images_path = os.path.join(sparse_dir, "images.bin")
+    if os.path.exists(images_path):
+        with open(images_path, "rb") as f:
+            n_img = struct.unpack("<Q", f.read(8))[0]
+            for _ in range(n_img):
+                f.read(4)  # image_id
+                qw, qx, qy, qz = struct.unpack("<4d", f.read(32))
+                tx, ty, tz = struct.unpack("<3d", f.read(24))
+                f.read(4)  # camera_id
+                while f.read(1) != b"\x00":  # null-terminated name
+                    pass
+                n_pts2d = struct.unpack("<Q", f.read(8))[0]
+                f.read(n_pts2d * 24)  # 2×float64 + int64 per punt
+                # Cameracentrum in wereldcoördinaten: C = -R^T * t
+                R = [
+                    [1-2*qy*qy-2*qz*qz, 2*qx*qy-2*qw*qz,   2*qx*qz+2*qw*qy],
+                    [2*qx*qy+2*qw*qz,   1-2*qx*qx-2*qz*qz, 2*qy*qz-2*qw*qx],
+                    [2*qx*qz-2*qw*qy,   2*qy*qz+2*qw*qx,   1-2*qx*qx-2*qy*qy],
+                ]
+                t = [tx, ty, tz]
+                c = [-(R[0][r]*t[0]+R[1][r]*t[1]+R[2][r]*t[2]) for r in range(3)]
+                camera_centers.append(c)
+
+    if camera_centers:
+        cx = sum(c[0] for c in camera_centers) / len(camera_centers)
+        cy = sum(c[1] for c in camera_centers) / len(camera_centers)
+        cz = sum(c[2] for c in camera_centers) / len(camera_centers)
+        dists = [math.sqrt((c[0]-cx)**2+(c[1]-cy)**2+(c[2]-cz)**2) for c in camera_centers]
+        scale = max(sum(dists) / len(dists), 0.05) * 0.5
+    else:
+        cx, cy, cz, scale = 0.0, 0.0, 0.0, 0.5
+
+    rng = random.Random(42)
+    with open(pts_path, "wb") as f:
+        f.write(struct.pack("<Q", n_points))
+        for i in range(n_points):
+            theta = rng.uniform(0, 2 * math.pi)
+            phi = rng.uniform(0, math.pi)
+            r = rng.uniform(0, scale)
+            x = cx + r * math.sin(phi) * math.cos(theta)
+            y = cy + r * math.sin(phi) * math.sin(theta)
+            z = cz + r * math.cos(phi)
+            f.write(struct.pack("<Q", i + 1))
+            f.write(struct.pack("<3d", x, y, z))
+            f.write(struct.pack("<3B", 128, 128, 128))
+            f.write(struct.pack("<d", 1.0))
+            f.write(struct.pack("<Q", 0))
+
+    print(f"[2dgs] Synthetische puntenwolk: {n_points} punten rond ({cx:.3f}, {cy:.3f}, {cz:.3f}), schaal={scale:.3f}")
+    return n_points
 
 
 def run_training(dataset_dir: str, output_dir: str, max_steps: int) -> str:
@@ -140,6 +211,11 @@ def handler(job: dict) -> dict:
 
         frame_count = len([f for f in os.listdir(images_dir) if f.endswith((".png", ".jpg"))])
         print(f"[2dgs] {frame_count} frames, {max_steps} stappen, dataset: {dataset_dir}")
+
+        # Zorg dat points3D.bin niet leeg is — 2DGS crasht bij P=0 Gaussians
+        sparse_dir = os.path.join(dataset_dir, "sparse", "0")
+        n_pts = fix_empty_point_cloud(sparse_dir)
+        print(f"[2dgs] Initialisatiepunten: {n_pts}")
 
         # 4. Training
         output_dir = os.path.join(tmpdir, "output")
