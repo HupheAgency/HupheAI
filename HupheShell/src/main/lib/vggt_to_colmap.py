@@ -62,26 +62,37 @@ def unpack_pose_enc(pe_obj):
 
 def decode_pose_enc(pose_enc_raw, W, H):
     """
-    Decode 9-dim VGGT pose encoding (absT_quaT_fovHW) to R, t, fx, fy, cx, cy.
-    - pose_enc[0:3] = world-to-camera translation t
-    - pose_enc[3:7] = quaternion (w, x, y, z)
-    - pose_enc[7]   = fov_h (field of view height, radians)
-    - pose_enc[8]   = fov_w (field of view width, radians)
-    Extrinsic [R|t] is OpenCV world-to-camera: P_cam = R * P_world + t
+    Decode 9-dim VGGT pose encoding (absT_quaT_fovHW) naar COLMAP extrinsics.
+
+    VGGT geeft camera-to-world informatie:
+      pose_enc[0:3] = absT = cameracentrum in wereldcoördinaten (NIET w2c-translatie)
+      pose_enc[3:7] = quaT = quaternion (w, x, y, z) camera-to-world rotatie
+      pose_enc[7]   = fov_h (radians, totale hoogte-FOV)
+      pose_enc[8]   = fov_w (radians, totale breedte-FOV)
+
+    COLMAP verwacht world-to-camera:
+      R_w2c = R_c2w^T
+      t_w2c = -R_w2c * C   (C = cameracentrum)
     """
     pose_enc = unpack_pose_enc(pose_enc_raw)
-    t = pose_enc[0:3]
+    C = pose_enc[0:3]          # cameracentrum in wereld
     qw, qx, qy, qz = pose_enc[3:7]
     fov_h = pose_enc[7]
     fov_w = pose_enc[8]
 
-    R = quat_to_rotmat(qw, qx, qy, qz)
+    # Camera-to-world rotatie
+    R_c2w = quat_to_rotmat(qw, qx, qy, qz)
 
-    # Avoid division by zero for degenerate FOVs
+    # Omzetten naar world-to-camera: R_w2c = R_c2w^T
+    R_w2c = [[R_c2w[j][i] for j in range(3)] for i in range(3)]
+
+    # t_w2c = -R_w2c * C
+    t = [-(R_w2c[r][0]*C[0] + R_w2c[r][1]*C[1] + R_w2c[r][2]*C[2]) for r in range(3)]
+
     fy = (H / 2.0) / math.tan(max(abs(fov_h), 1e-4) / 2.0)
     fx = (W / 2.0) / math.tan(max(abs(fov_w), 1e-4) / 2.0)
 
-    return R, list(t), fx, fy, W / 2.0, H / 2.0
+    return R_w2c, t, fx, fy, W / 2.0, H / 2.0
 
 
 def write_cameras_bin(path, cameras):
@@ -172,10 +183,9 @@ def main():
         R, t, fx, fy, cx, cy = decode_pose_enc(pose_enc, W, H)
         qvec = rotmat_to_quat(R)
 
-        # Camera center in world space: C = -R^T * t
-        Rt = [[R[j][i] for j in range(3)] for i in range(3)]  # transpose
-        cam_c = [-(Rt[r][0]*t[0] + Rt[r][1]*t[1] + Rt[r][2]*t[2]) for r in range(3)]
-        camera_centers.append(cam_c)
+        # pose_enc[0:3] is het cameracentrum (absT) in wereldcoördinaten
+        raw = unpack_pose_enc(pose_enc)
+        camera_centers.append(raw[:3])
 
         cameras[cam_id] = (W, H, fx, fy, cx, cy)
         images[img_id] = (qvec, t, cam_id, name)
