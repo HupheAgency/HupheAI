@@ -174,6 +174,7 @@ def handler(job: dict) -> dict:
     inp = job.get("input", {})
     dataset_url: str = inp.get("dataset_url", "")
     max_steps: int = int(inp.get("max_steps", 5000))
+    upload_url: str = inp.get("upload_url", "")  # signed PUT URL voor Supabase Storage
 
     if not dataset_url:
         return {"error": "dataset_url ontbreekt in input"}
@@ -225,19 +226,37 @@ def handler(job: dict) -> dict:
         except Exception as exc:
             return {"error": str(exc)}
 
-        # 5. Lees en encodeer .ply
+        # 5. PLY uploaden naar Supabase Storage via signed URL, of als base64 (kleine bestanden)
         ply_size = os.path.getsize(ply_path)
         print(f"[2dgs] .ply klaar: {ply_path} ({ply_size / 1024 / 1024:.1f} MB)")
 
-        with open(ply_path, "rb") as fh:
-            ply_b64 = base64.b64encode(fh.read()).decode("utf-8")
-
-        return {
-            "ply_b64": ply_b64,
-            "ply_size_mb": round(ply_size / 1024 / 1024, 2),
-            "steps": max_steps,
-            "frame_count": frame_count,
-        }
+        if upload_url:
+            print(f"[2dgs] PLY uploaden naar Supabase Storage...")
+            with open(ply_path, "rb") as fh:
+                up = requests.put(
+                    upload_url,
+                    data=fh,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=300,
+                )
+            if not up.ok:
+                return {"error": f"PLY upload mislukt ({up.status_code}): {up.text[:200]}"}
+            print(f"[2dgs] PLY geüpload ({ply_size / 1024 / 1024:.1f} MB)")
+            return {
+                "ply_uploaded": True,
+                "ply_size_mb": round(ply_size / 1024 / 1024, 2),
+                "steps": max_steps,
+                "frame_count": frame_count,
+            }
+        else:
+            with open(ply_path, "rb") as fh:
+                ply_b64 = base64.b64encode(fh.read()).decode("utf-8")
+            return {
+                "ply_b64": ply_b64,
+                "ply_size_mb": round(ply_size / 1024 / 1024, 2),
+                "steps": max_steps,
+                "frame_count": frame_count,
+            }
 
 
 runpod.serverless.start({"handler": handler})

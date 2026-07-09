@@ -1,7 +1,7 @@
 import { requireUserId, AuthError } from '../_shared/auth.ts'
 import { json, handleOptions } from '../_shared/response.ts'
 
-const RUNPOD_API_KEY = Deno.env.get('RUNPOD_API_KEY')!
+const RUNPOD_API_KEY = Deno.env.get('VGGT_RUNPOD_API_KEY')!
 const VGGT_RUNPOD_ENDPOINT_ID = Deno.env.get('VGGT_RUNPOD_ENDPOINT_ID')!
 const RUNPOD_BASE = `https://api.runpod.ai/v2/${VGGT_RUNPOD_ENDPOINT_ID}`
 

@@ -16,7 +16,7 @@ Deno.serve(async (req: Request) => {
 
     // ── Submit een nieuwe trainingsjob ────────────────────────────────────────
     if (action === 'submit') {
-      const { dataset_url, max_steps = 5000 } = body
+      const { dataset_url, max_steps = 5000, upload_url } = body
       if (!dataset_url) return json({ error: 'dataset_url ontbreekt' }, 400)
 
       const res = await fetch(`${RUNPOD_BASE}/run`, {
@@ -25,7 +25,7 @@ Deno.serve(async (req: Request) => {
           'Authorization': `Bearer ${RUNPOD_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ input: { dataset_url, max_steps } }),
+        body: JSON.stringify({ input: { dataset_url, max_steps, upload_url: upload_url ?? '' } }),
       })
 
       if (!res.ok) {
@@ -56,9 +56,10 @@ Deno.serve(async (req: Request) => {
 
       // Geef alleen wat de client nodig heeft terug
       return json({
-        status: data.status,            // IN_QUEUE | IN_PROGRESS | COMPLETED | FAILED | CANCELLED
-        ply_b64: data.output?.ply_b64,  // aanwezig als status === COMPLETED
-        ply_size_mb: data.output?.ply_size_mb,
+        status: data.status,
+        ply_b64: data.output?.ply_b64 ?? null,
+        ply_uploaded: data.output?.ply_uploaded ?? false,
+        ply_size_mb: data.output?.ply_size_mb ?? null,
         error: data.output?.error ?? data.error ?? null,
       })
     }
