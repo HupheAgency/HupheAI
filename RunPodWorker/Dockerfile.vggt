@@ -25,14 +25,7 @@ RUN pip install --no-cache-dir \
 
 # Model weights inbakken zodat cold start geen HuggingFace download nodig heeft (~2.4 GB)
 ENV HF_HOME=/hf_cache
-RUN python -c "
-from vggt.models.vggt import VGGT
-import os
-print('Downloading VGGT-1B weights...')
-model = VGGT.from_pretrained('facebook/VGGT-1B', cache_dir='/hf_cache')
-print('Done.')
-del model
-"
+RUN python -c "from vggt.models.vggt import VGGT; print('Downloading VGGT-1B...'); VGGT.from_pretrained('facebook/VGGT-1B', cache_dir='/hf_cache'); print('Done.')"
 
 # Handler kopiëren
 COPY handler_vggt.py /handler_vggt.py
