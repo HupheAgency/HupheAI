@@ -121,24 +121,6 @@ async function deleteDataset(supabaseUrl: string, supabaseKey: string, jwt: stri
   }).catch(() => {})
 }
 
-// Maak een signed upload URL aan zodat RunPod de PLY direct naar Supabase kan uploaden
-async function createPlyUploadUrl(
-  supabaseUrl: string,
-  supabaseKey: string,
-  jwt: string,
-  storagePath: string,
-): Promise<string> {
-  const res = await fetch(
-    `${supabaseUrl}/storage/v1/object/sign/upload/atelier-assets/${storagePath}`,
-    { method: 'POST', headers: { 'Authorization': `Bearer ${jwt}`, 'apikey': supabaseKey } },
-  )
-  if (!res.ok) throw new Error(`PLY upload URL aanmaken mislukt (${res.status}): ${(await res.text()).slice(0, 200)}`)
-  const json = await res.json() as any
-  const path: string = json.url ?? json.signedUrl ?? ''
-  if (!path) throw new Error('Geen upload URL ontvangen van Supabase')
-  return path.startsWith('http') ? path : `${supabaseUrl}${path}`
-}
-
 // Download de PLY die RunPod naar Supabase heeft geüpload via een signed download URL
 async function downloadPly(
   supabaseUrl: string,
@@ -166,17 +148,17 @@ async function downloadPly(
 // ─── Proxy calls ──────────────────────────────────────────────────────────────
 
 async function proxySubmit(
-  supabaseFnUrl: string, jwt: string, datasetUrl: string, maxSteps: number, uploadUrl: string,
-): Promise<string> {
+  supabaseFnUrl: string, jwt: string, datasetUrl: string, maxSteps: number, projectId: string,
+): Promise<{ jobId: string; plyStoragePath: string }> {
   const res = await fetch(`${supabaseFnUrl}/proxy-runpod`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'submit', dataset_url: datasetUrl, max_steps: maxSteps, upload_url: uploadUrl }),
+    body: JSON.stringify({ action: 'submit', dataset_url: datasetUrl, max_steps: maxSteps, project_id: projectId }),
   })
   if (!res.ok) throw new Error(`RunPod submit mislukt (${res.status}): ${(await res.text()).slice(0, 300)}`)
   const json = await res.json() as any
   if (!json.job_id) throw new Error(`Geen job_id ontvangen: ${JSON.stringify(json).slice(0, 200)}`)
-  return json.job_id as string
+  return { jobId: json.job_id as string, plyStoragePath: json.ply_storage_path as string }
 }
 
 async function proxyStatus(supabaseFnUrl: string, jwt: string, jobId: string): Promise<{ status: string; ply_b64?: string; ply_uploaded?: boolean; ply_size_mb?: number; error?: string }> {
@@ -191,19 +173,46 @@ async function proxyStatus(supabaseFnUrl: string, jwt: string, jobId: string): P
 
 // ─── Polling ──────────────────────────────────────────────────────────────────
 
+async function plyExistsInStorage(supabaseUrl: string, supabaseKey: string, jwt: string, storagePath: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${supabaseUrl}/storage/v1/object/info/atelier-assets/${storagePath}`, {
+      headers: { 'Authorization': `Bearer ${jwt}`, 'apikey': supabaseKey },
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 async function pollUntilDone(
   supabaseFnUrl: string,
   jwt: string,
   jobId: string,
   maxSteps: number,
   onProgress: (p: RunPodProgress) => void,
+  plyStoragePath: string,
+  supabaseUrl: string,
+  supabaseKey: string,
 ): Promise<{ ply_b64?: string; ply_uploaded?: boolean; ply_size_mb?: number }> {
   const started = Date.now()
   const estimatedSec = 30 + Math.round(maxSteps / 1000) * 8
 
   while (true) {
     await new Promise((r) => setTimeout(r, 5000))
-    const s = await proxyStatus(supabaseFnUrl, jwt, jobId)
+
+    let s: Awaited<ReturnType<typeof proxyStatus>>
+    try {
+      s = await proxyStatus(supabaseFnUrl, jwt, jobId)
+    } catch (err: any) {
+      // RunPod verwijdert job-resultaten na een tijdje → 401/404 op status-poll.
+      // Als de PLY al in Supabase staat, is de training geslaagd.
+      const is401or404 = /\b(401|404)\b/.test(err?.message ?? '')
+      if (is401or404 && await plyExistsInStorage(supabaseUrl, supabaseKey, jwt, plyStoragePath)) {
+        console.log('[runpod] Status 401/404 maar PLY staat al in Supabase — training succesvol.')
+        return { ply_uploaded: true }
+      }
+      throw err
+    }
 
     if (s.status === 'COMPLETED') {
       if (s.error) throw new Error(`Worker fout: ${s.error}`)
@@ -249,7 +258,6 @@ export async function runRunPodTraining(options: {
   const tarPath = join(outputDir, 'dataset.tar.gz')
   const ts = Date.now()
   const datasetStoragePath = `splat-temp/${projectId}/${ts}/dataset.tar.gz`
-  const plyStoragePath = `splat-temp/${projectId}/${ts}/point_cloud.ply`
 
   try {
     onProgress({ step: 'Dataset verpakken...', progress: 2 })
@@ -261,19 +269,17 @@ export async function runRunPodTraining(options: {
     await rm(tarPath, { force: true })
 
     onProgress({ step: 'Trainingsjob starten...', progress: 10 })
-    const uploadUrl = await createPlyUploadUrl(supabaseUrl, supabaseAnonKey, jwt, plyStoragePath)
-    const jobId = await proxySubmit(supabaseFnUrl, jwt, datasetUrl, maxSteps, uploadUrl)
+    const { jobId, plyStoragePath } = await proxySubmit(supabaseFnUrl, jwt, datasetUrl, maxSteps, projectId)
     console.log(`[runpod] Job gestart: ${jobId}`)
 
     onProgress({ step: 'Wachten op GPU...', progress: 12 })
-    const result = await pollUntilDone(supabaseFnUrl, jwt, jobId, maxSteps, onProgress)
+    const result = await pollUntilDone(supabaseFnUrl, jwt, jobId, maxSteps, onProgress, plyStoragePath, supabaseUrl, supabaseAnonKey)
     console.log(`[runpod] Training klaar (${result.ply_size_mb ?? '?'} MB)`)
 
     onProgress({ step: 'PLY opslaan...', progress: 95 })
     const plyPath = join(outputDir, 'point_cloud.ply')
 
     if (result.ply_uploaded) {
-      // RunPod heeft PLY direct naar Supabase geüpload — download het van daar
       console.log('[runpod] PLY downloaden van Supabase Storage...')
       await downloadPly(supabaseUrl, supabaseAnonKey, jwt, plyStoragePath, plyPath)
       deleteDataset(supabaseUrl, supabaseAnonKey, jwt, plyStoragePath).catch(() => {})

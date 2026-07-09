@@ -246,9 +246,11 @@ export async function readColmapPose(sparseDir: string): Promise<ColmapPose> {
 
   if (images.length === 0) throw new Error('Geen frames gevonden in COLMAP images.bin')
 
-  // Sort images by name and pick the first (frame_0000 or similar)
+  // Sort images by name en kies een orbit-frame als referentie.
+  // frame_0000 is de markerframe die VGGT op (0,0,0) plaatst — niet bruikbaar als camera.
   images.sort((a, b) => a.name.localeCompare(b.name))
-  const firstImage = images.find((img) => img.name.includes('frame_0000')) ?? images[0]
+  const orbitImages = images.filter((img) => !img.name.includes('frame_0000'))
+  const firstImage = orbitImages[Math.floor(orbitImages.length / 2)] ?? images[Math.floor(images.length / 2)]
 
   const cam = cameras.get(firstImage.cameraId)
   if (!cam) throw new Error(`Camera ${firstImage.cameraId} niet gevonden in cameras.bin`)

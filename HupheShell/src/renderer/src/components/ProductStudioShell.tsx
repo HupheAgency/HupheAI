@@ -181,8 +181,9 @@ type ProductStudioApi = {
   finalizeBake: (args: { projectId: string }) => Promise<any>
   testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' | 'runpod-vggt' }) => Promise<any>
   checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any }>
-  loadSplat: () => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number }>
+  loadSplat: (args?: { defaultDir?: string }) => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number; plyPath?: string }>
   getSplatPose: (args: { projectId: string; orbitRunId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
+  loadSceneAlignment: (args: { projectId: string }) => Promise<{ ok: boolean; renderVersionId?: string | null; alignment?: SplatAlignment; error?: string }>
 }
 
 function getProductStudioApi(): ProductStudioApi | null {
@@ -784,10 +785,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     resetPuntMode()
   }
 
-  const saveSceneAlignment = (alignment: SplatAlignment) => {
+  const saveSceneAlignment = (alignment: SplatAlignment, renderVersionId?: string) => {
     const api = getProductStudioApi()
     if (!api || !project.backendProject?.id) return
-    api.saveSceneAlignment?.({ projectId: project.backendProject.id, alignment: alignment as unknown as Record<string, unknown> })
+    api.saveSceneAlignment?.({ projectId: project.backendProject.id, renderVersionId, alignment: alignment as unknown as Record<string, unknown> })
       .catch((e: unknown) => console.warn('[scene.json] opslaan mislukt:', e))
   }
 
@@ -830,7 +831,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       setSplatViewerUrl(null)
       setSplatBaseAlignment(nextAlignment)
       setSplatAlignment(nextAlignment)
-      saveSceneAlignment(nextAlignment)
+      saveSceneAlignment(nextAlignment, project.finalRenderRecord?.id)
       setSplatTraining({ phase: 'done', step: 'Training klaar!', progress: 100 })
     } catch (err: any) {
       setSplatTraining({ phase: 'error', step: err?.message ?? 'Training mislukt', progress: 0, error: err?.message })
@@ -1080,6 +1081,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     hydratedProjectIdRef.current = projectId
     void hydrateLatestState(projectId, false)
   }, [project.backendProject?.id, project.id])
+
 
   const activeStudioMeshBase = activeStudioMeshUrl?.split('?')[0] ?? null
   useEffect(() => {
@@ -2148,6 +2150,21 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       // Trigger depth extraction for env mesh
       const depthSource = (version.background_plate_url ?? version.output_url) as string
       if (depthSource) triggerAiDepthExtraction(depthSource)
+
+      // Laad splat alleen als deze archieffoto gekoppeld is aan de getrainde 3D omgeving
+      const projectId = project.backendProject?.id
+      if (projectId) {
+        const splatApi = getProductStudioApi()
+        splatApi?.loadSceneAlignment?.({ projectId }).then((res) => {
+          if (res?.ok && res.alignment?.splatUrl && (res.renderVersionId == null || res.renderVersionId === version.id)) {
+            setSplatAlignment(res.alignment)
+            setSplatBaseAlignment(res.alignment)
+          } else {
+            setSplatAlignment(null)
+            setSplatBaseAlignment(null)
+          }
+        }).catch(() => {})
+      }
     } catch (err: any) {
       console.error('[restore] Failed:', err.message)
     }
@@ -2976,7 +2993,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               onClick={async () => {
                 const api = getProductStudioApi()
                 if (!api) return
-                const result = await api.loadSplat()
+                const defaultDir = splatAlignment?.plyPath
+                  ? splatAlignment.plyPath.replace(/\/[^/]+$/, '')
+                  : undefined
+                const result = await api.loadSplat({ defaultDir })
                 if (result.ok && result.splatUrl) setSplatViewerUrl(result.splatUrl)
               }}
               className="mt-2 w-full rounded-md border border-violet-400/25 bg-violet-500/10 py-1.5 text-[11px] font-medium text-violet-300 hover:bg-violet-500/20"
@@ -2988,7 +3008,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               onClick={async () => {
                 const api = getProductStudioApi()
                 if (!api || !project.backendProject?.id) return
-                const splatResult = await api.loadSplat()
+                const defaultDir = splatAlignment?.plyPath
+                  ? splatAlignment.plyPath.replace(/\/[^/]+$/, '')
+                  : undefined
+                const splatResult = await api.loadSplat({ defaultDir })
                 if (!splatResult.ok || !splatResult.splatUrl) return
                 const poseResult = await api.getSplatPose({ projectId: project.backendProject.id, orbitRunId: orbitTest.orbitRunId })
                 if (!poseResult.ok || !poseResult.pose) {

@@ -163,6 +163,7 @@ export function GaussianSplatBackground({
       >
         <Suspense fallback={null}>
           <Splat
+            key={blobUrl}
             src={blobUrl}
             onUpdate={(mesh) => {
               try {

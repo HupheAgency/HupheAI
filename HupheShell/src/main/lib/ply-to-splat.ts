@@ -112,6 +112,14 @@ export async function plyToSplat(
     return readFloat(data, off, littleEndian)
   }
 
+  // 2DGS PLY heeft alleen scale_0 en scale_1 (platte disc, geen dikte).
+  // Als scale_2 ontbreekt, is get() = 0 → Math.exp(0) = 1 → ster-explosie.
+  // Gebruik een zeer dunne fallback zodat de disc plat blijft.
+  const hasScale2 = properties.some((p) => p.name === 'scale_2')
+  const getScale2 = hasScale2
+    ? (row: number) => get(row, 'scale_2')
+    : (row: number) => Math.min(get(row, 'scale_0'), get(row, 'scale_1')) - 5  // ~1% van de kleinste schaal
+
   // ── Pass 1: verzamel statistieken voor alle alpha-valide vertices ──────────
   const xs: number[] = [], ys: number[] = [], zs: number[] = []
   const maxScales: number[] = []
@@ -127,7 +135,7 @@ export async function plyToSplat(
     const s = Math.max(
       Math.exp(get(i, 'scale_0')),
       Math.exp(get(i, 'scale_1')),
-      Math.exp(get(i, 'scale_2')),
+      Math.exp(getScale2(i)),
     )
     maxScales.push(s)
   }
@@ -176,7 +184,7 @@ export async function plyToSplat(
     // Schaalfilter
     const sx = Math.exp(get(i, 'scale_0'))
     const sy = Math.exp(get(i, 'scale_1'))
-    const sz = Math.exp(get(i, 'scale_2'))
+    const sz = Math.exp(getScale2(i))
     if (Math.max(sx, sy, sz) > maxScaleAllowed) {
       filteredScale++
       continue

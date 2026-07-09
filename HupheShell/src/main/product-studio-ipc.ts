@@ -3886,15 +3886,13 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           try { await exec(`"${python}" "${markerScriptPathF}" "${firstOrbitFrameF}" "${markerFramePathF}"`, { timeout: 30_000 }) } catch {}
 
           pushStep('Frames voorbereiden...', 20)
-          const { existsSync: existsSyncF } = await import('fs')
           const frameFilesF = (await import('fs/promises').then(m => m.readdir(framesDir)))
             .filter(f => f.match(/^frame_\d+\.png$/)).sort()
           const orbitFilesF = frameFilesF.filter(f => f !== 'frame_0000.png')
           const stepF = orbitFilesF.length > 39 ? Math.ceil(orbitFilesF.length / 39) : 1
           const sampledF = orbitFilesF.filter((_, i) => i % stepF === 0).slice(0, 39)
-          const hasMarkerF = existsSyncF(markerFramePathF)
-          const allSampledF = hasMarkerF ? ['frame_0000.png', ...sampledF] : sampledF
-          const frameNamesF = allSampledF.filter(f => f !== 'frame_0000.png')
+          const allSampledF = sampledF  // marker niet naar VGGT: levert geen nieuwe viewpoint, trekt puntwolk naar objectplek
+          const frameNamesF = allSampledF
 
           const imageB64F: string[] = []
           for (let i = 0; i < allSampledF.length; i++) {
@@ -4225,16 +4223,14 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         }
 
         pushStep('Frames voorbereiden voor RunPod...', 72)
-        const { existsSync: existsSync2 } = await import('fs')
         const allFrameFiles = (await import('fs/promises').then(m => m.readdir(framesDir)))
           .filter(f => f.match(/^frame_\d+\.png$/)).sort()
         const orbitFrames = allFrameFiles.filter(f => f !== 'frame_0000.png')
         const maxOrbit = 39
         const sampleStep = orbitFrames.length > maxOrbit ? Math.ceil(orbitFrames.length / maxOrbit) : 1
         const sampledOrbit = orbitFrames.filter((_, i) => i % sampleStep === 0).slice(0, maxOrbit)
-        const hasMarker = existsSync2(markerFramePath)
-        const sampledFrames = hasMarker ? ['frame_0000.png', ...sampledOrbit] : sampledOrbit
-        const frameNamesForColmap = sampledFrames.filter(f => f !== 'frame_0000.png')
+        const sampledFrames = sampledOrbit  // marker niet naar VGGT: levert geen nieuwe viewpoint, trekt puntwolk naar objectplek
+        const frameNamesForColmap = sampledFrames
 
         const imageB64Arr: string[] = []
         for (let i = 0; i < sampledFrames.length; i++) {
@@ -4297,7 +4293,6 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         }
 
         pushStep('Frames voorbereiden...', 72)
-        const { existsSync: existsSync4 } = await import('fs')
 
         const allFrameFiles3 = (await import('fs/promises').then(m => m.readdir(framesDir)))
           .filter(f => f.match(/^frame_\d+\.png$/)).sort()
@@ -4305,8 +4300,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         const maxOrbit3 = 39
         const sampleStep3 = orbitFrames3.length > maxOrbit3 ? Math.ceil(orbitFrames3.length / maxOrbit3) : 1
         const sampledOrbit3 = orbitFrames3.filter((_, i) => i % sampleStep3 === 0).slice(0, maxOrbit3)
-        const hasMarker3 = existsSync4(markerFramePath)
-        const sampledFrames3 = hasMarker3 ? ['frame_0000.png', ...sampledOrbit3] : sampledOrbit3
+        const sampledFrames3 = sampledOrbit3  // marker niet naar VGGT: levert geen nieuwe viewpoint, trekt puntwolk naar objectplek
 
         // Frames als base64 data URLs — geen externe opslag nodig
         const frameUrls3: string[] = []
@@ -4470,12 +4464,15 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
   })
 
-  ipcMain.handle('product-studio:load-splat', async () => {
+  ipcMain.handle('product-studio:load-splat', async (_e, args?: { defaultDir?: string }) => {
     const { dialog } = await import('electron')
+    const { existsSync } = await import('fs')
+    const defaultPath = args?.defaultDir && existsSync(args.defaultDir) ? args.defaultDir : undefined
     const { canceled, filePaths } = await dialog.showOpenDialog({
       title: 'Kies een Gaussian Splat .ply bestand',
       filters: [{ name: 'PLY Gaussian Splat', extensions: ['ply'] }],
       properties: ['openFile'],
+      ...(defaultPath ? { defaultPath } : {}),
     })
     if (canceled || !filePaths[0]) return { ok: false }
 
@@ -4483,7 +4480,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const { plyToSplat } = await import('./lib/ply-to-splat')
     const { splatPath, localFloorY } = await plyToSplat(plyPath)
     const splatUrl = `huphe://file/${encodeURIComponent(splatPath)}`
-    return { ok: true, splatUrl, localFloorY }
+    return { ok: true, splatUrl, localFloorY, plyPath }
   })
 
   ipcMain.handle('product-studio:get-splat-pose', async (_e, args: { projectId: string; orbitRunId?: string; renderVersionId?: string; model?: string }) => {
@@ -4579,6 +4576,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
   // ─── Scene.json opslaan en laden ──────────────────────────────────────────────
   ipcMain.handle('product-studio:save-scene-alignment', async (_e, args: {
     projectId: string
+    renderVersionId?: string
     alignment: Record<string, unknown>
   }) => {
     try {
@@ -4586,7 +4584,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const dir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
       await mkdir(dir, { recursive: true })
       const scenePath = join(dir, 'scene.json')
-      const data = JSON.stringify({ version: 1, savedAt: new Date().toISOString(), alignment: args.alignment }, null, 2)
+      const data = JSON.stringify({ version: 1, savedAt: new Date().toISOString(), renderVersionId: args.renderVersionId ?? null, alignment: args.alignment }, null, 2)
       await writeFile(scenePath, data, 'utf8')
       return { ok: true }
     } catch (err: any) {
@@ -4602,7 +4600,15 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       if (!existsSync(scenePath)) return { ok: false, error: 'Geen opgeslagen uitlijning gevonden.' }
       const raw = await readFile(scenePath, 'utf8')
       const { alignment } = JSON.parse(raw)
-      return { ok: true, alignment }
+      if (!alignment?.plyPath || !existsSync(alignment.plyPath)) {
+        return { ok: false, error: 'PLY bestand niet gevonden.' }
+      }
+      // Herconverteer altijd het PLY zodat het .splat up-to-date is met de huidige converter
+      const { plyToSplat } = await import('./lib/ply-to-splat')
+      const { splatPath } = await plyToSplat(alignment.plyPath)
+      const splatUrl = `huphe://file/${encodeURIComponent(splatPath)}`
+      const parsed = JSON.parse(raw)
+      return { ok: true, renderVersionId: parsed.renderVersionId ?? null, alignment: { ...alignment, splatUrl } }
     } catch (err: any) {
       return { ok: false, error: err?.message }
     }
