@@ -179,7 +179,7 @@ type ProductStudioApi = {
     }
   }) => Promise<any>
   finalizeBake: (args: { projectId: string }) => Promise<any>
-  testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' }) => Promise<any>
+  testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' | 'runpod-vggt' }) => Promise<any>
   checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any }>
   loadSplat: () => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number }>
   getSplatPose: (args: { projectId: string; orbitRunId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
@@ -582,7 +582,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const orbitModel = 'seedance' as const
-  const [poseMethod, setPoseMethod] = useState<'replicate' | 'fal'>('replicate')
+  const [poseMethod, setPoseMethod] = useState<'fal'>('fal')
   const [orbitConfirmOpen, setOrbitConfirmOpen] = useState(false)
   const [orbitVideoExpanded, setOrbitVideoExpanded] = useState(false)
   const [splatViewerUrl, setSplatViewerUrl] = useState<string | null>(null)
@@ -1699,7 +1699,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!api || !project.backendProject) return
     const imageUrl = backgroundPlateUrl ?? project.sourceImage?.src ?? ''
     const renderVersionId = project.finalRenderRecord?.id
-    const methodLabel = poseMethod === 'fal' ? 'VGGT · fal.ai' : 'VGGT · Replicate'
+    const methodLabel = 'VGGT · RunPod'
     setOrbitTest((prev) => ({ ...prev, phase: 'running', step: `Pose-analyse starten (${methodLabel})...`, progress: 2, colmap: undefined }))
     try {
       const result = await api.testOrbitSplat({ projectId: project.backendProject.id, renderVersionId, imageUrl, model: orbitModel, poseOnly: true, poseMethod })
@@ -2869,21 +2869,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             </div>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               <span className="self-center text-[9px] font-medium uppercase tracking-wider text-white/20">Pose:</span>
-              {(['replicate', 'fal'] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setPoseMethod(m)}
-                  disabled={orbitTest.phase === 'running'}
-                  className={`rounded-full border px-2 py-0.5 text-[9px] font-medium disabled:cursor-not-allowed ${
-                    poseMethod === m
-                      ? 'border-violet-400/40 bg-violet-400/10 text-violet-300'
-                      : 'border-white/10 text-white/30 hover:border-white/20 hover:text-white/50'
-                  }`}
-                >
-                  {m === 'replicate' ? 'VGGT · Replicate' : 'VGGT · fal.ai'}
-                </button>
-              ))}
+              <button
+                type="button"
+                disabled={orbitTest.phase === 'running'}
+                className="rounded-full border px-2 py-0.5 text-[9px] font-medium border-violet-400/40 bg-violet-400/10 text-violet-300 disabled:cursor-not-allowed"
+              >
+                VGGT · RunPod
+              </button>
             </div>
             {orbitTest.phase === 'running' && (
               <div className="mt-3">
@@ -2925,7 +2917,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             )}
             {orbitTest.phase === 'done' && orbitTest.colmap && (
               <div className={`mt-2 rounded-md border px-2 py-1.5 text-[10px] ${orbitTest.colmap.pass ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200' : 'border-red-400/20 bg-red-500/10 text-red-200'}`}>
-                {orbitTest.colmap.pass ? '✓ Geslaagd' : '✗ Gezakt'} — {orbitTest.colmap.method === 'replicate' ? 'VGGT · Replicate' : orbitTest.colmap.method === 'fal' ? 'VGGT · fal.ai' : 'COLMAP'}: {orbitTest.colmap.registered}/{orbitTest.colmap.total} frames ({orbitTest.colmap.pct}%)
+                {orbitTest.colmap.pass ? '✓ Geslaagd' : '✗ Gezakt'} — {orbitTest.colmap.method === 'runpod-vggt' ? 'VGGT · RunPod' : orbitTest.colmap.method === 'replicate' ? 'VGGT · Replicate' : 'COLMAP'}: {orbitTest.colmap.registered}/{orbitTest.colmap.total} frames ({orbitTest.colmap.pct}%)
                 {orbitTest.colmap.pass
                   ? ' — Video is geometrisch consistent. Splat training mogelijk.'
                   : ' — Video te inconsistent. Ander videomodel of meer camera-sturing nodig.'}
