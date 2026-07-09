@@ -3834,6 +3834,17 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
       orbitRunId = activeRun.id
       wsDir = activeRun.local_path
+    } else if (!args.force) {
+      // force=false: hergebruik bestaande run als video al op schijf staat
+      const { existsSync: existsSyncEarly } = await import('fs')
+      const existingRun = await getActiveOrbitRun(jwt, args.projectId).catch(() => null)
+      if (existingRun?.local_path && existsSyncEarly(join(existingRun.local_path, 'orbit.mp4'))) {
+        orbitRunId = existingRun.id
+        wsDir = existingRun.local_path
+      } else {
+        orbitRunId = await createOrbitRun(jwt, args.projectId, args.renderVersionId, model, poseMethod)
+        wsDir = orbitRunsDir(args.projectId, orbitRunId)
+      }
     } else {
       orbitRunId = await createOrbitRun(jwt, args.projectId, args.renderVersionId, model, poseMethod)
       wsDir = orbitRunsDir(args.projectId, orbitRunId)
