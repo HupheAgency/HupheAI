@@ -49,6 +49,10 @@ ipcRenderer.on('product-studio:orbit-step', (_event, step) => {
   g.dispatchEvent(new g.CustomEvent('product-studio:orbit-step', { detail: step }))
 })
 
+ipcRenderer.on('product-studio:assets-step', (_event, step) => {
+  g.dispatchEvent(new g.CustomEvent('product-studio:assets-step', { detail: step }))
+})
+
 // Forward Engine push events
 ipcRenderer.on('engine:message-added', (_event, data) => {
   g.dispatchEvent(new g.CustomEvent('engine:message-added', { detail: data }))
@@ -347,13 +351,14 @@ contextBridge.exposeInMainWorld('api', {
       poseMethod?: 'colmap' | 'replicate' | 'fal'
     }) => ipcRenderer.invoke('product-studio:test-orbit-splat', args),
     checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => ipcRenderer.invoke('product-studio:check-orbit-video', args),
+    prepareAssets: (args: { projectId: string; renderVersionId?: string }) => ipcRenderer.invoke('product-studio:prepare-assets', args),
     loadSplat: (args?: { defaultDir?: string }) => ipcRenderer.invoke('product-studio:load-splat', args),
-    getSplatPose: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:get-splat-pose', args),
+    getSplatPose: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string }) => ipcRenderer.invoke('product-studio:get-splat-pose', args),
     trainSplat: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling'; brushBinPath?: string; maxSteps?: number }) =>
       ipcRenderer.invoke('product-studio:train-splat', args),
     saveSceneAlignment: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown> }) =>
       ipcRenderer.invoke('product-studio:save-scene-alignment', args),
-    loadSceneAlignment: (args: { projectId: string }) =>
+    loadSceneAlignment: (args: { projectId: string; renderVersionId?: string }) =>
       ipcRenderer.invoke('product-studio:load-scene-alignment', args),
     reconvertSplat: (args: { plyPath: string; alphaThreshold?: number; scaleIqrFactor?: number; positionSigma?: number }) =>
       ipcRenderer.invoke('product-studio:reconvert-splat', args),

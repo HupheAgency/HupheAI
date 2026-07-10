@@ -182,8 +182,8 @@ type ProductStudioApi = {
   testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' | 'runpod-vggt' }) => Promise<any>
   checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any }>
   loadSplat: (args?: { defaultDir?: string }) => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number; plyPath?: string }>
-  getSplatPose: (args: { projectId: string; orbitRunId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
-  loadSceneAlignment: (args: { projectId: string }) => Promise<{ ok: boolean; renderVersionId?: string | null; alignment?: SplatAlignment; error?: string }>
+  getSplatPose: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
+  loadSceneAlignment: (args: { projectId: string; renderVersionId?: string }) => Promise<{ ok: boolean; renderVersionId?: string | null; alignment?: SplatAlignment; error?: string }>
 }
 
 function getProductStudioApi(): ProductStudioApi | null {
@@ -580,8 +580,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [envPanoramaUrl, setEnvPanoramaUrl] = useState<string | null>(null)
   const [envMappingEnabled, setEnvMappingEnabled] = useState(false)
   const [bakeProgress, setBakeProgress] = useState<{ phase: 'idle' | 'baking' | 'done' | 'error'; currentFrame: number; totalFrames: number; error?: string }>({ phase: 'idle', currentFrame: 0, totalFrames: 12 })
-  const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
+  const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; renderVersionId?: string | null; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
+  const [assetsPrep, setAssetsPrep] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; sampleClayUrls?: string[]; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
+  const orbitBelongsToCurrentRender = Boolean(project.finalRenderRecord?.id && orbitTest.renderVersionId === project.finalRenderRecord.id)
   const orbitModel = 'seedance' as const
   const [poseMethod, setPoseMethod] = useState<'fal'>('fal')
   const [orbitConfirmOpen, setOrbitConfirmOpen] = useState(false)
@@ -787,20 +789,47 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
   const saveSceneAlignment = (alignment: SplatAlignment, renderVersionId?: string) => {
     const api = getProductStudioApi()
-    if (!api || !project.backendProject?.id) return
+    if (!api || !project.backendProject?.id || !renderVersionId) return
     api.saveSceneAlignment?.({ projectId: project.backendProject.id, renderVersionId, alignment: alignment as unknown as Record<string, unknown> })
       .catch((e: unknown) => console.warn('[scene.json] opslaan mislukt:', e))
+  }
+
+  const linkLegacySceneAlignmentToCurrentRender = async () => {
+    const api = getProductStudioApi()
+    const projectId = project.backendProject?.id
+    const renderVersionId = project.finalRenderRecord?.id
+    if (!api || !projectId || !renderVersionId) return
+
+    try {
+      const res = await api.loadSceneAlignment({ projectId })
+      if (!res?.ok || !res.alignment?.splatUrl) {
+        console.warn('[scene.json] legacy uitlijning niet gevonden:', res?.error)
+        return
+      }
+      await api.saveSceneAlignment?.({
+        projectId,
+        renderVersionId,
+        alignment: res.alignment as unknown as Record<string, unknown>,
+      })
+      setSplatAlignment(res.alignment)
+      setSplatBaseAlignment(res.alignment)
+    } catch (e) {
+      console.warn('[scene.json] legacy uitlijning koppelen mislukt:', e)
+    }
   }
 
   const startSplatTraining = async () => {
     const api = getProductStudioApi()
     if (!api || !project.backendProject?.id) return
+    const renderVersionId = project.finalRenderRecord?.id
+    if (!renderVersionId || orbitTest.renderVersionId !== renderVersionId) return
+    if (!assetsPrep.colmap?.pass) return
     setSplatTraining({ phase: 'running', step: 'Brush training starten...', progress: 0 })
     try {
       const result = await api.trainSplat({
         projectId: project.backendProject.id,
         orbitRunId: orbitTest.orbitRunId,
-        renderVersionId: project.finalRenderRecord?.id,
+        renderVersionId,
         model: orbitModel,
       })
       if (!result.ok || !result.splatUrl) {
@@ -831,7 +860,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       setSplatViewerUrl(null)
       setSplatBaseAlignment(nextAlignment)
       setSplatAlignment(nextAlignment)
-      saveSceneAlignment(nextAlignment, project.finalRenderRecord?.id)
+      saveSceneAlignment(nextAlignment, renderVersionId)
       setSplatTraining({ phase: 'done', step: 'Training klaar!', progress: 100 })
     } catch (err: any) {
       setSplatTraining({ phase: 'error', step: err?.message ?? 'Training mislukt', progress: 0, error: err?.message })
@@ -848,6 +877,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }, [])
 
   useEffect(() => {
+    const handler = (e: Event) => {
+      const { step, progress } = (e as CustomEvent<{ step: string; progress: number }>).detail
+      setAssetsPrep((prev) => prev.phase === 'running' ? { ...prev, step, progress } : prev)
+    }
+    window.addEventListener('product-studio:assets-step', handler)
+    return () => window.removeEventListener('product-studio:assets-step', handler)
+  }, [])
+
+  useEffect(() => {
     const api = getProductStudioApi()
     if (!api) return
     const unsub = api.onTrainingProgress?.((data) => {
@@ -861,28 +899,35 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!api || !project.backendProject?.id) return
     if (orbitTest.phase === 'running') return
     const renderVersionId = project.finalRenderRecord?.id
+    setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
+    setAssetsPrep({ phase: 'idle', step: '', progress: 0 })
+    setSplatTraining({ phase: 'idle', step: '', progress: 0 })
     api.checkOrbitVideo({ projectId: project.backendProject.id, renderVersionId, model: orbitModel }).then((res) => {
       if (res.exists && res.videoUrl) {
         setOrbitTest((prev) => prev.phase === 'idle' || prev.phase === 'done'
-          ? { phase: 'done', step: '', videoUrl: res.videoUrl!, colmap: res.colmap ?? prev.colmap, orbitRunId: res.orbitRunId ?? prev.orbitRunId }
+          ? { phase: 'done', step: '', progress: 100, renderVersionId, videoUrl: res.videoUrl!, orbitRunId: res.orbitRunId ?? prev.orbitRunId }
           : prev
         )
+        // Herstel assetsPrep colmap vanuit opgeslagen DB-data (na herstart)
+        if (res.colmap) {
+          setAssetsPrep({ phase: 'done', step: '', progress: 100, colmap: res.colmap })
+        }
       } else {
-        setOrbitTest({ phase: 'idle', step: '', progress: 0 })
+        setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
       }
     }).catch(() => {})
   }, [orbitModel, project.backendProject?.id, project.finalRenderRecord?.id])
   // Auto-save splat alignment naar scene.json na elke wijziging (debounced 1.5s)
   useEffect(() => {
-    if (!splatAlignment || !project.backendProject?.id) return
+    if (!splatAlignment || !project.backendProject?.id || !project.finalRenderRecord?.id) return
     const api = getProductStudioApi()
     if (!api) return
     const tid = setTimeout(() => {
-      api.saveSceneAlignment?.({ projectId: project.backendProject!.id, alignment: splatAlignment as unknown as Record<string, unknown> })
+      api.saveSceneAlignment?.({ projectId: project.backendProject!.id, renderVersionId: project.finalRenderRecord?.id, alignment: splatAlignment as unknown as Record<string, unknown> })
         .catch((e: unknown) => console.warn('[scene.json] auto-save mislukt:', e))
     }, 1500)
     return () => clearTimeout(tid)
-  }, [splatAlignment, project.backendProject?.id])
+  }, [splatAlignment, project.backendProject?.id, project.finalRenderRecord?.id])
 
   const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number; fovScale?: number } | null>(null)
   // Per-version local cache: model transform per archive photo (session only)
@@ -1671,7 +1716,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!api || !project.backendProject) return
     const imageUrl = backgroundPlateUrl ?? project.sourceImage?.src
     if (!imageUrl) {
-      setOrbitTest({ phase: 'error', step: '', error: 'Geen achtergrond foto geselecteerd.' })
+      setOrbitTest({ phase: 'error', step: '', progress: 0, renderVersionId: project.finalRenderRecord?.id, error: 'Geen achtergrond foto geselecteerd.' })
       return
     }
     const renderVersionId = project.finalRenderRecord?.id
@@ -1683,16 +1728,18 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       }
     }
     const modelLabel = 'Seedance 2.0'
-    setOrbitTest({ phase: 'running', step: `Video genereren via ${modelLabel}...`, progress: 2 })
+    setOrbitTest({ phase: 'running', step: `Video genereren via ${modelLabel}...`, progress: 2, renderVersionId })
+    setAssetsPrep({ phase: 'idle', step: '', progress: 0 })
+    setSplatTraining({ phase: 'idle', step: '', progress: 0 })
     try {
-      const result = await api.testOrbitSplat({ projectId: project.backendProject.id, renderVersionId, imageUrl, arcDegrees: 270, force, model: orbitModel, poseMethod })
+      const result = await api.testOrbitSplat({ projectId: project.backendProject.id, renderVersionId, imageUrl, arcDegrees: 270, force, model: orbitModel, poseMethod, videoOnly: true })
       if (!result.ok) {
-        setOrbitTest({ phase: 'error', step: '', progress: 0, error: result.error ?? 'Onbekende fout.' })
+        setOrbitTest({ phase: 'error', step: '', progress: 0, renderVersionId, error: result.error ?? 'Onbekende fout.' })
         return
       }
-      setOrbitTest({ phase: 'done', step: '', progress: 100, colmap: result.colmap, videoUrl: result.videoUrl, orbitRunId: result.orbitRunId })
+      setOrbitTest({ phase: 'done', step: '', progress: 100, renderVersionId, videoUrl: result.videoUrl, orbitRunId: result.orbitRunId })
     } catch (err: any) {
-      setOrbitTest({ phase: 'error', step: '', progress: 0, error: err?.message ?? 'Orbit test mislukt.' })
+      setOrbitTest({ phase: 'error', step: '', progress: 0, renderVersionId, error: err?.message ?? 'Orbit test mislukt.' })
     }
   }
 
@@ -1702,16 +1749,38 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const imageUrl = backgroundPlateUrl ?? project.sourceImage?.src ?? ''
     const renderVersionId = project.finalRenderRecord?.id
     const methodLabel = 'VGGT · RunPod'
-    setOrbitTest((prev) => ({ ...prev, phase: 'running', step: `Pose-analyse starten (${methodLabel})...`, progress: 2, colmap: undefined }))
+    setOrbitTest({ phase: 'running', step: `Pose-analyse starten (${methodLabel})...`, progress: 2, renderVersionId })
     try {
       const result = await api.testOrbitSplat({ projectId: project.backendProject.id, renderVersionId, imageUrl, model: orbitModel, poseOnly: true, poseMethod })
       if (!result.ok) {
-        setOrbitTest((prev) => ({ ...prev, phase: 'error', step: '', progress: 0, error: result.error ?? 'Onbekende fout.' }))
+        setOrbitTest({ phase: 'error', step: '', progress: 0, renderVersionId, error: result.error ?? 'Onbekende fout.' })
         return
       }
-      setOrbitTest((prev) => ({ ...prev, phase: 'done', step: '', progress: 100, colmap: result.colmap, videoUrl: result.videoUrl ?? prev.videoUrl, orbitRunId: result.orbitRunId ?? prev.orbitRunId }))
+      setOrbitTest({ phase: 'done', step: '', progress: 100, renderVersionId, colmap: result.colmap, videoUrl: result.videoUrl ?? undefined, orbitRunId: result.orbitRunId })
     } catch (err: any) {
-      setOrbitTest((prev) => ({ ...prev, phase: 'error', step: '', progress: 0, error: err?.message ?? 'Pose-analyse mislukt.' }))
+      setOrbitTest({ phase: 'error', step: '', progress: 0, renderVersionId, error: err?.message ?? 'Pose-analyse mislukt.' })
+    }
+  }
+
+  async function runPrepareAssets() {
+    const api = getProductStudioApi()
+    if (!api || !project.backendProject) return
+    const renderVersionId = project.finalRenderRecord?.id
+    setAssetsPrep({ phase: 'running', step: 'Assets voorbereiden...', progress: 0 })
+    setSplatTraining({ phase: 'idle', step: '', progress: 0 })
+    try {
+      const result = await api.prepareAssets({ projectId: project.backendProject.id, renderVersionId })
+      if (!result.ok) {
+        setAssetsPrep({ phase: 'error', step: '', progress: 0, error: result.error ?? 'Voorbereiding mislukt.' })
+        return
+      }
+      setAssetsPrep({ phase: 'done', step: '', progress: 100, colmap: result.colmap, sampleClayUrls: result.sampleClayUrls })
+      // Zet orbitRunId over naar orbitTest als die er al stond
+      if (result.orbitRunId) {
+        setOrbitTest((prev) => ({ ...prev, orbitRunId: result.orbitRunId }))
+      }
+    } catch (err: any) {
+      setAssetsPrep({ phase: 'error', step: '', progress: 0, error: err?.message ?? 'Assets voorbereiding mislukt.' })
     }
   }
 
@@ -2063,6 +2132,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       }
     }
     activeArchiveVersionId.current = version.id
+    setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId: version.id })
+    setSplatTraining({ phase: 'idle', step: '', progress: 0 })
+    setOrbitVideoExpanded(false)
 
     try {
       const result = await (api as any).restoreRenderState({ renderPacketId: version.render_packet_id })
@@ -2155,8 +2227,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const projectId = project.backendProject?.id
       if (projectId) {
         const splatApi = getProductStudioApi()
-        splatApi?.loadSceneAlignment?.({ projectId }).then((res) => {
-          if (res?.ok && res.alignment?.splatUrl && (res.renderVersionId == null || res.renderVersionId === version.id)) {
+        splatApi?.loadSceneAlignment?.({ projectId, renderVersionId: version.id }).then((res) => {
+          if (res?.ok && res.alignment?.splatUrl && res.renderVersionId === version.id) {
             setSplatAlignment(res.alignment)
             setSplatBaseAlignment(res.alignment)
           } else {
@@ -2864,11 +2936,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <p className="mt-1 text-xs text-white/36">Genereert een orbit-video van de achtergrond en test of VGGT de frames kan reconstrueren. Diagnose: ≥80% = bruikbaar voor splat-training.</p>
               </div>
               <div className="flex shrink-0 flex-col gap-1.5">
-                {orbitTest.phase === 'done' && orbitTest.videoUrl && (
+                {orbitBelongsToCurrentRender && orbitTest.phase === 'done' && orbitTest.videoUrl && (
                   <button
                     type="button"
                     onClick={() => void runPoseOnly()}
-                    disabled={orbitTest.phase === 'running'}
+                    disabled={orbitTest.phase === 'running' || !orbitBelongsToCurrentRender}
                     className="rounded-full border border-violet-400/25 px-3 py-1 text-[10px] font-medium text-violet-400 hover:bg-violet-400/10 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:text-white/24"
                   >
                     Pose opnieuw
@@ -2880,7 +2952,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   disabled={orbitTest.phase === 'running' || !project.backendProject || (!backgroundPlateUrl && !project.sourceImage?.src)}
                   className="rounded-full border border-emerald-400/25 px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-400/10 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:text-white/24"
                 >
-                  {orbitTest.phase === 'running' ? 'Bezig...' : orbitTest.phase === 'done' ? 'Opnieuw' : 'Starten'}
+                  {orbitTest.phase === 'running' ? 'Bezig...' : orbitBelongsToCurrentRender && orbitTest.phase === 'done' ? 'Opnieuw' : 'Starten'}
                 </button>
               </div>
             </div>
@@ -2911,7 +2983,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             {orbitTest.phase === 'error' && (
               <p className="mt-2 rounded-md border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-200">{orbitTest.error}</p>
             )}
-            {orbitTest.videoUrl && (
+            {/* Stap 1 resultaat: orbit video */}
+            {orbitBelongsToCurrentRender && orbitTest.videoUrl && (
               <div className="mt-3">
                 <div className="relative cursor-pointer group" onClick={() => setOrbitVideoExpanded(true)}>
                   <video
@@ -2927,22 +3000,59 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                     <span className="opacity-0 group-hover:opacity-100 transition-opacity rounded-full bg-black/60 px-3 py-1.5 text-[11px] font-medium text-white">Vergroot</span>
                   </div>
                 </div>
-                {orbitTest.phase === 'done' && !orbitTest.colmap && (
-                  <p className="mt-1.5 text-[10px] text-amber-300/70">Video klaar, pose-analyse nog niet gedraaid.</p>
-                )}
-              </div>
-            )}
-            {orbitTest.phase === 'done' && orbitTest.colmap && (
-              <div className={`mt-2 rounded-md border px-2 py-1.5 text-[10px] ${orbitTest.colmap.pass ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200' : 'border-red-400/20 bg-red-500/10 text-red-200'}`}>
-                {orbitTest.colmap.pass ? '✓ Geslaagd' : '✗ Gezakt'} — {orbitTest.colmap.method === 'runpod-vggt' ? 'VGGT · RunPod' : orbitTest.colmap.method === 'replicate' ? 'VGGT · Replicate' : 'COLMAP'}: {orbitTest.colmap.registered}/{orbitTest.colmap.total} frames ({orbitTest.colmap.pct}%)
-                {orbitTest.colmap.pass
-                  ? ' — Video is geometrisch consistent. Splat training mogelijk.'
-                  : ' — Video te inconsistent. Ander videomodel of meer camera-sturing nodig.'}
               </div>
             )}
 
-            {/* RunPod training knop + voortgang */}
-            {(orbitTest.phase === 'done' && orbitTest.colmap?.pass) && (
+            {/* Stap 2: "Maak 3D assets" knop */}
+            {orbitBelongsToCurrentRender && orbitTest.phase === 'done' && orbitTest.videoUrl && assetsPrep.phase !== 'running' && (
+              <button
+                type="button"
+                onClick={runPrepareAssets}
+                className="mt-2 w-full rounded-md border border-blue-400/25 bg-blue-500/10 py-1.5 text-[11px] font-medium text-blue-300 hover:bg-blue-500/20"
+              >
+                {assetsPrep.phase === 'done' ? '↻ 3D assets opnieuw voorbereiden' : '▶ Maak 3D assets'}
+              </button>
+            )}
+
+            {/* Stap 2 voortgang */}
+            {assetsPrep.phase === 'running' && (
+              <div className="mt-2 rounded-md border border-blue-400/15 bg-blue-500/8 p-2">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-[10px] font-medium text-blue-300">3D assets voorbereiden...</span>
+                  <span className="text-[10px] tabular-nums text-blue-400/80">{assetsPrep.progress}%</span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full rounded-full bg-blue-400 transition-all duration-500" style={{ width: `${assetsPrep.progress}%` }} />
+                </div>
+                <p className="mt-1 truncate text-[9px] text-blue-300/50">{assetsPrep.step}</p>
+              </div>
+            )}
+
+            {assetsPrep.phase === 'error' && (
+              <p className="mt-2 rounded-md border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-200">{assetsPrep.error}</p>
+            )}
+
+            {/* Stap 2 resultaat: clay frame grid */}
+            {assetsPrep.phase === 'done' && assetsPrep.sampleClayUrls && assetsPrep.sampleClayUrls.length > 0 && (
+              <div className="mt-2 grid grid-cols-3 gap-1">
+                {assetsPrep.sampleClayUrls.map((url, i) => (
+                  <img key={i} src={url} className="w-full rounded aspect-video object-cover opacity-90" />
+                ))}
+              </div>
+            )}
+
+            {/* COLMAP kwaliteitsindicator */}
+            {assetsPrep.phase === 'done' && assetsPrep.colmap && (
+              <div className={`mt-2 rounded-md border px-2 py-1.5 text-[10px] ${assetsPrep.colmap.pass ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200' : 'border-red-400/20 bg-red-500/10 text-red-200'}`}>
+                {assetsPrep.colmap.pass ? '✓ Geslaagd' : '✗ Gezakt'} — VGGT · RunPod: {assetsPrep.colmap.registered}/{assetsPrep.colmap.total} frames ({assetsPrep.colmap.pct}%)
+                {assetsPrep.colmap.pass
+                  ? ' — Poses kloppen. .ply training mogelijk.'
+                  : ' — Te inconsistent voor training.'}
+              </div>
+            )}
+
+            {/* Stap 3: .ply training */}
+            {orbitBelongsToCurrentRender && assetsPrep.phase === 'done' && assetsPrep.colmap?.pass && (
               <div className="mt-2">
                 {splatTraining.phase !== 'running' && (
                   <button
@@ -2951,7 +3061,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                     onClick={startSplatTraining}
                     className="w-full rounded-md border border-emerald-400/25 bg-emerald-500/10 py-1.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40"
                   >
-                    {splatTraining.phase === 'done' ? '✓ Train via RunPod (opnieuw)' : '▶ Train via RunPod'}
+                    {splatTraining.phase === 'done' ? '✓ Maak .ply (opnieuw)' : '▶ Maak .ply'}
                   </button>
                 )}
                 {splatTraining.phase === 'running' && (
@@ -2976,11 +3086,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 {splatTraining.phase === 'error' && (
                   <div className="mt-1 rounded-md border border-red-400/20 bg-red-500/8 p-2">
                     <p className="text-[10px] text-red-300">✗ {splatTraining.error}</p>
-                    <button
-                      type="button"
-                      onClick={startSplatTraining}
-                      className="mt-1 text-[9px] text-red-300/60 underline hover:text-red-300"
-                    >
+                    <button type="button" onClick={startSplatTraining} className="mt-1 text-[9px] text-red-300/60 underline hover:text-red-300">
                       Opnieuw proberen
                     </button>
                   </div>
@@ -3005,6 +3111,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             </button>
             <button
               type="button"
+              onClick={() => void linkLegacySceneAlignmentToCurrentRender()}
+              disabled={!project.backendProject?.id || !project.finalRenderRecord?.id}
+              className="mt-1.5 w-full rounded-md border border-amber-400/25 bg-amber-500/10 py-1.5 text-[11px] font-medium text-amber-300 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.02] disabled:text-white/24"
+            >
+              Koppel bestaande 3D render aan deze afbeelding
+            </button>
+            <button
+              type="button"
               onClick={async () => {
                 const api = getProductStudioApi()
                 if (!api || !project.backendProject?.id) return
@@ -3013,7 +3127,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   : undefined
                 const splatResult = await api.loadSplat({ defaultDir })
                 if (!splatResult.ok || !splatResult.splatUrl) return
-                const poseResult = await api.getSplatPose({ projectId: project.backendProject.id, orbitRunId: orbitTest.orbitRunId })
+                const poseResult = await api.getSplatPose({
+                  projectId: project.backendProject.id,
+                  orbitRunId: orbitBelongsToCurrentRender ? orbitTest.orbitRunId : undefined,
+                  renderVersionId: project.finalRenderRecord?.id,
+                })
                 if (!poseResult.ok || !poseResult.pose) {
                   console.error('[splatAlignment] pose ophalen mislukt:', poseResult.error)
                   return
@@ -4241,7 +4359,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   >
                     <button
                       type="button"
-                      onClick={() => setArchivePreviewId(version.id)}
+                      onClick={() => void restoreRenderState(version)}
                       className="w-full"
                     >
                       {version.output_url ? (
@@ -4475,7 +4593,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     return loadingState
   }
 
-  const orbitVideoModal = orbitVideoExpanded && orbitTest.videoUrl ? (
+  const orbitVideoModal = orbitVideoExpanded && orbitBelongsToCurrentRender && orbitTest.videoUrl ? (
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 backdrop-blur-sm"
       onClick={() => setOrbitVideoExpanded(false)}

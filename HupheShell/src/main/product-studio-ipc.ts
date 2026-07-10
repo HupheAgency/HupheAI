@@ -3667,22 +3667,23 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
   const getActiveOrbitRun = async (jwt: string, projectId: string, renderVersionId?: string | null): Promise<{ id: string; local_path: string; model: string; pose_method: string; registered_frames: number | null; frame_count: number | null; registration_pct: number | null; render_version_id: string | null } | null> => {
     const sb = getUserClient(jwt)
-    const { data } = await sb
+    let query = sb
       .from('orbit_runs')
       .select('id, local_path, model, pose_method, registered_frames, frame_count, registration_pct, render_version_id')
       .eq('project_id', projectId)
       .eq('status', 'done')
       .order('created_at', { ascending: false })
       .limit(1)
+
+    if (renderVersionId) query = query.eq('render_version_id', renderVersionId)
+
+    const { data } = await query
       .maybeSingle()
     if (!data) return null
-    // Verwerp de run als die bij een ANDERE render_version_id hoort (orbit van vorige foto)
-    // Legacy runs zonder render_version_id worden altijd geaccepteerd
-    if (renderVersionId && data.render_version_id && data.render_version_id !== renderVersionId) return null
     return data
   }
 
-  const resolveWsDir = async (projectId: string, orbitRunId?: string, _model?: string): Promise<string> => {
+  const resolveWsDir = async (projectId: string, orbitRunId?: string, _model?: string, renderVersionId?: string): Promise<string> => {
     const jwt = getJwt()
     // Als orbitRunId meegegeven: opzoeken in Supabase voor local_path (kan afwijken van standaard pad bij gemigreerde data)
     if (orbitRunId && jwt) {
@@ -3697,7 +3698,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (orbitRunId) return orbitRunsDir(projectId, orbitRunId)
     // Geen orbitRunId: meest recente voltooide orbit run uit Supabase ophalen
     if (jwt) {
-      const activeRun = await getActiveOrbitRun(jwt, projectId).catch(() => null)
+      const activeRun = await getActiveOrbitRun(jwt, projectId, renderVersionId).catch(() => null)
       if (activeRun?.local_path) return activeRun.local_path
       if (activeRun?.id) return orbitRunsDir(projectId, activeRun.id)
     }
@@ -3719,7 +3720,6 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
   // --- Orbit-splat validatietest ---
   ipcMain.handle('product-studio:check-orbit-video', async (_e, args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => {
     const { existsSync } = await import('fs')
-    const { rename, copyFile, unlink } = await import('fs/promises')
     const model = args.model ?? 'seedance'
 
     // Bepaal de project-level workspace voor COLMAP/frames (altijd per project, niet per foto)
@@ -3780,20 +3780,6 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (existsSync(primaryPath)) {
       return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId }
     }
-    // Migrate legacy project-level video to per-photo path
-    if (args.renderVersionId) {
-      const legacyPath = join(projectWsDir, 'orbit.mp4')
-      if (existsSync(legacyPath)) {
-        await mkdir(primaryDir, { recursive: true })
-        try {
-          await rename(legacyPath, primaryPath)
-        } catch {
-          await copyFile(legacyPath, primaryPath)
-          await unlink(legacyPath).catch(() => {})
-        }
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(activeLocalPath ?? primaryDir), orbitRunId }
-      }
-    }
     return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }
   })
 
@@ -3827,8 +3813,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     let orbitRunId: string
     let wsDir: string
     if (args.poseOnly) {
-      // poseOnly: zoek de meest recente done orbit_run voor dit project
-      const activeRun = await getActiveOrbitRun(jwt, args.projectId)
+      // poseOnly: zoek de meest recente done orbit_run voor deze archive-render
+      const activeRun = await getActiveOrbitRun(jwt, args.projectId, args.renderVersionId)
       if (!activeRun?.local_path) {
         return { ok: false, error: 'Geen bestaande orbit-run gevonden. Genereer eerst een orbit-video.' }
       }
@@ -3837,7 +3823,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     } else if (!args.force) {
       // force=false: hergebruik bestaande run als video al op schijf staat
       const { existsSync: existsSyncEarly } = await import('fs')
-      const existingRun = await getActiveOrbitRun(jwt, args.projectId).catch(() => null)
+      const existingRun = await getActiveOrbitRun(jwt, args.projectId, args.renderVersionId).catch(() => null)
       if (existingRun?.local_path && existsSyncEarly(join(existingRun.local_path, 'orbit.mp4'))) {
         orbitRunId = existingRun.id
         wsDir = existingRun.local_path
@@ -4187,19 +4173,42 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
       const videoFileUrl = `huphe://file/${encodeURIComponent(videoPath)}`
 
+      // videoOnly: stop na video download — frames/clay/VGGT via prepare-assets
+      if (args.videoOnly) {
+        await updateOrbitRun(jwt, orbitRunId, { status: 'done' })
+        return { ok: true, orbitRunId, videoUrl: videoFileUrl, videoPath }
+      }
+
       // Stap 3: frames extraheren met ffmpeg
       pushStep('Frames extraheren uit video...', 65)
       await exec(`ffmpeg -y -i "${videoPath}" -vf fps=12 "${join(framesDir, 'frame_%04d.png')}"`)
       const { stdout: lsOut } = await exec(`ls "${framesDir}" | wc -l`)
       const frameCount = parseInt(lsOut.trim())
-      pushStep(`${frameCount} frames geëxtraheerd`, 70)
+      pushStep(`${frameCount} frames geëxtraheerd`, 68)
 
       if (frameCount < 20) {
         return { ok: false, error: `Te weinig frames (${frameCount}). Video te kort of fps te laag.`, videoUrl }
       }
 
-      // Stap 4: pose-estimatie — methode gekozen in UI: 'fal' | 'replicate' | 'colmap'
+      // Stap 3b: clay conversie — verwijder speculaire highlights voor betere VGGT/2DGS reconstructie
       const python = '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3'
+      pushStep('Clay conversie (matte frames)...', 69)
+      try {
+        const clayScript = join(__dirname, 'lib/clay_convert.py')
+        const { stdout: clayOut } = await exec(`"${python}" "${clayScript}" "${framesDir}"`, { timeout: 120_000 })
+        const clayResult = JSON.parse(clayOut.trim().split('\n').pop()!)
+        if (clayResult.ok) {
+          pushStep(`Clay conversie klaar (${clayResult.converted} frames)`, 70)
+        } else {
+          console.warn('[orbit-splat] Clay conversie mislukt (doorgaan zonder):', clayResult.error)
+          pushStep('Clay conversie overgeslagen (doorgaan)', 70)
+        }
+      } catch (clayErr: any) {
+        console.warn('[orbit-splat] Clay conversie mislukt (doorgaan zonder):', clayErr?.message)
+        pushStep('Clay conversie overgeslagen (doorgaan)', 70)
+      }
+
+      // Stap 4: pose-estimatie — methode gekozen in UI: 'fal' | 'replicate' | 'colmap'
       const poseMethod = args.poseMethod ?? 'colmap'
 
       let colmapResult: {
@@ -4464,6 +4473,136 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
   })
 
+  // ─── prepare-assets: frames extraheren + clay + VGGT (tussenstap na video) ────
+  ipcMain.handle('product-studio:prepare-assets', async (_e, args: {
+    projectId: string
+    renderVersionId?: string
+  }) => {
+    const { exec: execCb } = await import('child_process')
+    const { promisify } = await import('util')
+    const exec = promisify(execCb)
+
+    const pushStep = (step: string, progress: number) => {
+      console.log(`[prepare-assets] (${progress}%) ${step}`)
+      _e.sender.send('product-studio:assets-step', { step, progress })
+    }
+
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+
+    const activeRun = await getActiveOrbitRun(jwt, args.projectId, args.renderVersionId).catch(() => null)
+    if (!activeRun?.local_path) return { ok: false, error: 'Geen orbit run gevonden. Genereer eerst een video.' }
+
+    const wsDir = activeRun.local_path
+    const orbitRunId = activeRun.id
+    const videoPath = join(wsDir, 'orbit.mp4')
+    const framesDir = join(wsDir, 'frames')
+    const colmapDir = join(wsDir, 'colmap')
+
+    const { existsSync } = await import('fs')
+    if (!existsSync(videoPath)) return { ok: false, error: 'Geen video gevonden. Genereer eerst een orbit-video.' }
+
+    await mkdir(framesDir, { recursive: true })
+    await mkdir(colmapDir, { recursive: true })
+
+    const python = '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3'
+
+    try {
+      // Stap 1: frames extraheren als ze er nog niet zijn
+      const { stdout: lsCheck } = await exec(`ls "${framesDir}" | grep -c 'frame_' || echo 0`)
+      let frameCount = parseInt(lsCheck.trim()) || 0
+
+      if (frameCount < 20) {
+        pushStep('Frames extraheren uit video...', 5)
+        await exec(`ffmpeg -y -i "${videoPath}" -vf fps=12 "${join(framesDir, 'frame_%04d.png')}"`)
+        const { stdout: lsOut2 } = await exec(`ls "${framesDir}" | wc -l`)
+        frameCount = parseInt(lsOut2.trim())
+      }
+      pushStep(`${frameCount} frames`, 10)
+      if (frameCount < 20) return { ok: false, error: `Te weinig frames (${frameCount}).` }
+
+      // Stap 2: clay conversie
+      pushStep('Clay conversie (matte frames)...', 15)
+      try {
+        const clayScript = join(__dirname, 'lib/clay_convert.py')
+        const { stdout: clayOut } = await exec(`"${python}" "${clayScript}" "${framesDir}"`, { timeout: 120_000 })
+        const clayResult = JSON.parse(clayOut.trim().split('\n').pop()!)
+        pushStep(`Clay klaar (${clayResult.converted} frames)`, 28)
+      } catch (e: any) {
+        console.warn('[prepare-assets] Clay mislukt:', e?.message)
+        pushStep('Clay overgeslagen', 28)
+      }
+
+      // Stap 3: sample URLs voor clay preview (9 evenly-spaced frames)
+      const allFrameFiles = (await import('fs/promises').then(m => m.readdir(framesDir)))
+        .filter(f => /^frame_\d+\.png$/.test(f) && f !== 'frame_0000.png').sort()
+      const sampleStep = Math.max(1, Math.floor(allFrameFiles.length / 9))
+      const sampleFrames9 = allFrameFiles.filter((_, i) => i % sampleStep === 0).slice(0, 9)
+      const sampleClayUrls = sampleFrames9.map(f => `huphe://file/${encodeURIComponent(join(framesDir, f))}`)
+
+      // Stap 4: VGGT pose-estimatie via RunPod
+      const { runVggtPoseEstimation } = await import('./lib/runpod-vggt')
+
+      pushStep('Markerframe genereren...', 30)
+      const markerScriptPath = join(__dirname, 'lib/generate_marker_frame.py')
+      const markerFramePath = join(framesDir, 'frame_0000.png')
+      const firstOrbitFrame = join(framesDir, 'frame_0001.png')
+      try {
+        await exec(`"${python}" "${markerScriptPath}" "${firstOrbitFrame}" "${markerFramePath}"`, { timeout: 30_000 })
+      } catch {}
+
+      pushStep('Frames voorbereiden voor VGGT...', 32)
+      const allForVggt = (await import('fs/promises').then(m => m.readdir(framesDir)))
+        .filter(f => /^frame_\d+\.png$/.test(f)).sort()
+      const orbitForVggt = allForVggt.filter(f => f !== 'frame_0000.png')
+      const maxOrbit = 39
+      const vggtSampleStep = orbitForVggt.length > maxOrbit ? Math.ceil(orbitForVggt.length / maxOrbit) : 1
+      const sampledForVggt = orbitForVggt.filter((_, i) => i % vggtSampleStep === 0).slice(0, maxOrbit)
+
+      const imageB64Arr: string[] = []
+      for (let i = 0; i < sampledForVggt.length; i++) {
+        const framePath = join(framesDir, sampledForVggt[i])
+        const { stdout: jpegBuf } = await exec(`ffmpeg -y -i "${framePath}" -vf scale=640:-2 -q:v 4 -f image2 pipe:1 2>/dev/null`, { encoding: 'buffer', timeout: 10_000 }) as any
+        imageB64Arr.push((jpegBuf as Buffer).toString('base64'))
+        if (i % 5 === 0) pushStep(`Frames voorbereiden... (${i + 1}/${sampledForVggt.length})`, 32 + Math.round((i / sampledForVggt.length) * 28))
+      }
+
+      pushStep(`${imageB64Arr.length} frames klaar, VGGT starten op RunPod...`, 61)
+      const vggtResult = await runVggtPoseEstimation({
+        supabaseUrl: SUPABASE_URL,
+        jwt,
+        image_b64: imageB64Arr,
+        orig_w: 640,
+        orig_h: 360,
+        frame_names: sampledForVggt,
+        onProgress: ({ step, progress }) => pushStep(step, 61 + Math.round(progress * 0.33)),
+      })
+
+      const sparseDir = join(colmapDir, 'sparse', '1')
+      await mkdir(sparseDir, { recursive: true })
+      await writeFile(join(sparseDir, 'cameras.bin'), Buffer.from(vggtResult.cameras_b64, 'base64'))
+      await writeFile(join(sparseDir, 'images.bin'), Buffer.from(vggtResult.images_b64, 'base64'))
+      await writeFile(join(sparseDir, 'points3D.bin'), Buffer.from(vggtResult.points3d_b64, 'base64'))
+
+      const colmapResult = {
+        registered: vggtResult.registered,
+        total: vggtResult.total,
+        pct: vggtResult.pct,
+        pass: vggtResult.pct >= 80,
+        method: 'runpod-vggt' as const,
+      }
+
+      await updateOrbitRun(jwt, orbitRunId, { status: 'done', pose_method: 'fal', registered_frames: colmapResult.registered, frame_count: frameCount, registration_pct: colmapResult.pct })
+      pushStep(`Klaar: ${colmapResult.registered}/${colmapResult.total} frames (${colmapResult.pct}%)`, 100)
+
+      return { ok: true, frameCount, sampleClayUrls, colmap: colmapResult, orbitRunId }
+    } catch (err: any) {
+      console.error('[prepare-assets]', err?.message ?? err)
+      await updateOrbitRun(jwt, orbitRunId, { status: 'error', error_message: err?.message }).catch(() => {})
+      return { ok: false, error: err?.message ?? 'Assets voorbereiding mislukt.' }
+    }
+  })
+
   ipcMain.handle('product-studio:load-splat', async (_e, args?: { defaultDir?: string }) => {
     const { dialog } = await import('electron')
     const { existsSync } = await import('fs')
@@ -4485,7 +4624,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
   ipcMain.handle('product-studio:get-splat-pose', async (_e, args: { projectId: string; orbitRunId?: string; renderVersionId?: string; model?: string }) => {
     const { existsSync } = await import('fs')
-    const wsDir = await resolveWsDir(args.projectId, args.orbitRunId ?? args.renderVersionId, args.model)
+    const wsDir = await resolveWsDir(args.projectId, args.orbitRunId, args.model, args.renderVersionId)
 
     let sparseDir = join(wsDir, 'colmap', 'sparse', '1')
     if (!existsSync(join(sparseDir, 'images.bin'))) {
@@ -4516,7 +4655,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const jwt = getJwt()
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
 
-    const wsDir = await resolveWsDir(args.projectId, args.orbitRunId ?? args.renderVersionId, args.model)
+    const wsDir = await resolveWsDir(args.projectId, args.orbitRunId, args.model, args.renderVersionId)
     const framesDir = join(wsDir, 'frames')
     const colmapDir = join(wsDir, 'colmap')
     const outputDir = join(wsDir, '2dgs')
@@ -4581,7 +4720,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
   }) => {
     try {
       const { writeFile, mkdir } = await import('fs/promises')
-      const dir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+      const dir = args.renderVersionId
+        ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId)
+        : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
       await mkdir(dir, { recursive: true })
       const scenePath = join(dir, 'scene.json')
       const data = JSON.stringify({ version: 1, savedAt: new Date().toISOString(), renderVersionId: args.renderVersionId ?? null, alignment: args.alignment }, null, 2)
@@ -4592,14 +4733,21 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
   })
 
-  ipcMain.handle('product-studio:load-scene-alignment', async (_e, args: { projectId: string }) => {
+  ipcMain.handle('product-studio:load-scene-alignment', async (_e, args: { projectId: string; renderVersionId?: string }) => {
     try {
       const { readFile } = await import('fs/promises')
       const { existsSync } = await import('fs')
-      const scenePath = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, 'scene.json')
+      const baseDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+      const scenePath = args.renderVersionId
+        ? join(baseDir, args.renderVersionId, 'scene.json')
+        : join(baseDir, 'scene.json')
       if (!existsSync(scenePath)) return { ok: false, error: 'Geen opgeslagen uitlijning gevonden.' }
       const raw = await readFile(scenePath, 'utf8')
-      const { alignment } = JSON.parse(raw)
+      const parsed = JSON.parse(raw)
+      if (args.renderVersionId && parsed.renderVersionId !== args.renderVersionId) {
+        return { ok: false, error: 'Opgeslagen uitlijning hoort bij een andere archive-foto.' }
+      }
+      const { alignment } = parsed
       if (!alignment?.plyPath || !existsSync(alignment.plyPath)) {
         return { ok: false, error: 'PLY bestand niet gevonden.' }
       }
@@ -4607,7 +4755,6 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const { plyToSplat } = await import('./lib/ply-to-splat')
       const { splatPath } = await plyToSplat(alignment.plyPath)
       const splatUrl = `huphe://file/${encodeURIComponent(splatPath)}`
-      const parsed = JSON.parse(raw)
       return { ok: true, renderVersionId: parsed.renderVersionId ?? null, alignment: { ...alignment, splatUrl } }
     } catch (err: any) {
       return { ok: false, error: err?.message }
