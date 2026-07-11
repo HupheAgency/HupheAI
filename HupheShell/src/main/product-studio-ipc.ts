@@ -3769,17 +3769,40 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
     const resolvedColmap = (wsDir?: string) => colmapFromDb ?? checkColmap(wsDir)
 
+    // Kies 9 gelijkmatig gespreide sample-frames uit frames/ als clay-preview (herstel na restart)
+    const sampleFrameUrls = (wsDir: string): string[] => {
+      try {
+        const { readdirSync: rds } = require('fs')
+        const framesDir = join(wsDir, 'frames')
+        if (!existsSync(framesDir)) return []
+        const frames = rds(framesDir)
+          .filter((f: string) => /^frame_(?!0000)\d+\.png$/.test(f))
+          .sort()
+        if (frames.length === 0) return []
+        const step = Math.max(1, Math.floor(frames.length / 9))
+        return Array.from({ length: Math.min(9, frames.length) }, (_, i) => {
+          const f = frames[Math.min(i * step, frames.length - 1)]
+          return `huphe://file/${encodeURIComponent(join(framesDir, f))}`
+        })
+      } catch { return [] }
+    }
+
     // Eerst: check de local_path uit Supabase (meest betrouwbaar, ook voor gemigreerde data)
     if (activeLocalPath) {
       const orbitRunVideoPath = join(activeLocalPath, 'orbit.mp4')
-      if (existsSync(orbitRunVideoPath)) {
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId }
+      const found = existsSync(orbitRunVideoPath)
+      console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} orbitRunId=${orbitRunId} localPath=${activeLocalPath} videoExists=${found}`)
+      if (found) {
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath) }
       }
+    } else {
+      console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} jwt=${!!jwt} activeRun=${!!activeRun} — geen local_path in DB`)
     }
 
     if (existsSync(primaryPath)) {
-      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId }
+      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir) }
     }
+    console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} — niet gevonden (primaryPath=${primaryPath})`)
     return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }
   })
 
@@ -3800,7 +3823,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
     const pushStep = (step: string, progress: number) => {
       console.log(`[orbit-splat] (${progress}%) ${step}`)
-      _e.sender.send('product-studio:orbit-step', { step, progress })
+      try { if (!_e.sender.isDestroyed()) _e.sender.send('product-studio:orbit-step', { step, progress }) } catch { /* renderer navigated away */ }
     }
 
     const jwt = getJwt()
@@ -4484,7 +4507,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
     const pushStep = (step: string, progress: number) => {
       console.log(`[prepare-assets] (${progress}%) ${step}`)
-      _e.sender.send('product-studio:assets-step', { step, progress })
+      try { if (!_e.sender.isDestroyed()) _e.sender.send('product-studio:assets-step', { step, progress }) } catch { /* renderer navigated away */ }
     }
 
     const jwt = getJwt()
@@ -4662,7 +4685,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
     const pushStep = (step: string, progress: number, extra?: Record<string, unknown>) => {
       console.log(`[train-splat] (${progress}%) ${step}`)
-      _e.sender.send('product-studio:training-progress', { step, progress, ...extra })
+      try { if (!_e.sender.isDestroyed()) _e.sender.send('product-studio:training-progress', { step, progress, ...extra }) } catch { /* renderer navigated away */ }
     }
 
     try {

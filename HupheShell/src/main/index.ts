@@ -18,6 +18,15 @@ import { z } from 'zod'
 
 app.setName('HupheAI')
 
+// Vang uncaught exceptions zodat een fout in een IPC-handler (bijv. "Object has been destroyed")
+// de hele app niet laat crashen.
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaughtException (niet-fataal):', err?.message ?? err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] unhandledRejection (niet-fataal):', reason)
+})
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'huphe',

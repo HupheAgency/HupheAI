@@ -180,7 +180,7 @@ type ProductStudioApi = {
   }) => Promise<any>
   finalizeBake: (args: { projectId: string }) => Promise<any>
   testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' | 'runpod-vggt' }) => Promise<any>
-  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any }>
+  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any; sampleClayUrls?: string[] }>
   loadSplat: (args?: { defaultDir?: string }) => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number; plyPath?: string }>
   getSplatPose: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
   loadSceneAlignment: (args: { projectId: string; renderVersionId?: string }) => Promise<{ ok: boolean; renderVersionId?: string | null; alignment?: SplatAlignment; error?: string }>
@@ -588,6 +588,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [poseMethod, setPoseMethod] = useState<'fal'>('fal')
   const [orbitConfirmOpen, setOrbitConfirmOpen] = useState(false)
   const [orbitVideoExpanded, setOrbitVideoExpanded] = useState(false)
+  const [clayLightboxIndex, setClayLightboxIndex] = useState<number | null>(null)
   const [splatViewerUrl, setSplatViewerUrl] = useState<string | null>(null)
   const [splatAlignment, setSplatAlignment] = useState<SplatAlignment | null>(null)
   const [splatBaseAlignment, setSplatBaseAlignment] = useState<SplatAlignment | null>(null)
@@ -899,23 +900,26 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!api || !project.backendProject?.id) return
     if (orbitTest.phase === 'running') return
     const renderVersionId = project.finalRenderRecord?.id
+    let cancelled = false
     setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
     setAssetsPrep({ phase: 'idle', step: '', progress: 0 })
     setSplatTraining({ phase: 'idle', step: '', progress: 0 })
     api.checkOrbitVideo({ projectId: project.backendProject.id, renderVersionId, model: orbitModel }).then((res) => {
+      if (cancelled) return
       if (res.exists && res.videoUrl) {
         setOrbitTest((prev) => prev.phase === 'idle' || prev.phase === 'done'
           ? { phase: 'done', step: '', progress: 100, renderVersionId, videoUrl: res.videoUrl!, orbitRunId: res.orbitRunId ?? prev.orbitRunId }
           : prev
         )
-        // Herstel assetsPrep colmap vanuit opgeslagen DB-data (na herstart)
+        // Herstel assetsPrep colmap + clay frames vanuit opgeslagen data (na herstart)
         if (res.colmap) {
-          setAssetsPrep({ phase: 'done', step: '', progress: 100, colmap: res.colmap })
+          setAssetsPrep({ phase: 'done', step: '', progress: 100, colmap: res.colmap, sampleClayUrls: res.sampleClayUrls })
         }
       } else {
         setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
       }
     }).catch(() => {})
+    return () => { cancelled = true }
   }, [orbitModel, project.backendProject?.id, project.finalRenderRecord?.id])
   // Auto-save splat alignment naar scene.json na elke wijziging (debounced 1.5s)
   useEffect(() => {
@@ -3036,7 +3040,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             {assetsPrep.phase === 'done' && assetsPrep.sampleClayUrls && assetsPrep.sampleClayUrls.length > 0 && (
               <div className="mt-2 grid grid-cols-3 gap-1">
                 {assetsPrep.sampleClayUrls.map((url, i) => (
-                  <img key={i} src={url} className="w-full rounded aspect-video object-cover opacity-90" />
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => setClayLightboxIndex(i)}
+                    className="relative group focus:outline-none"
+                  >
+                    <img src={url} className="w-full rounded aspect-video object-cover opacity-90 group-hover:opacity-100 transition-opacity" />
+                    <div className="absolute inset-0 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 transition-opacity bg-black/30">
+                      <span className="text-[9px] text-white font-medium">🔍</span>
+                    </div>
+                  </button>
                 ))}
               </div>
             )}
@@ -4593,6 +4607,55 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     return loadingState
   }
 
+  const clayUrls = assetsPrep.sampleClayUrls ?? []
+  const clayLightbox = clayLightboxIndex !== null && clayUrls.length > 0 ? (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 backdrop-blur-sm"
+      onClick={() => setClayLightboxIndex(null)}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') setClayLightboxIndex(null)
+        if (e.key === 'ArrowLeft') setClayLightboxIndex((i) => i !== null ? (i - 1 + clayUrls.length) % clayUrls.length : null)
+        if (e.key === 'ArrowRight') setClayLightboxIndex((i) => i !== null ? (i + 1) % clayUrls.length : null)
+      }}
+      tabIndex={-1}
+      ref={(el) => el?.focus()}
+    >
+      <img
+        src={clayUrls[clayLightboxIndex]}
+        className="max-h-[85vh] max-w-[85vw] rounded-lg shadow-2xl object-contain"
+        onClick={(e) => e.stopPropagation()}
+      />
+      {/* teller */}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-3 py-1 text-[11px] text-white/70">
+        {clayLightboxIndex + 1} / {clayUrls.length}
+      </div>
+      {/* links */}
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setClayLightboxIndex((i) => i !== null ? (i - 1 + clayUrls.length) % clayUrls.length : null) }}
+        className="absolute left-4 top-1/2 -translate-y-1/2 rounded-full bg-white/10 p-3 text-white/70 hover:bg-white/20 text-lg leading-none"
+      >
+        ‹
+      </button>
+      {/* rechts */}
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setClayLightboxIndex((i) => i !== null ? (i + 1) % clayUrls.length : null) }}
+        className="absolute right-4 top-1/2 -translate-y-1/2 rounded-full bg-white/10 p-3 text-white/70 hover:bg-white/20 text-lg leading-none"
+      >
+        ›
+      </button>
+      {/* sluiten */}
+      <button
+        type="button"
+        onClick={() => setClayLightboxIndex(null)}
+        className="absolute right-6 top-6 rounded-full bg-white/10 p-2 text-white/60 hover:bg-white/20"
+      >
+        ✕
+      </button>
+    </div>
+  ) : null
+
   const orbitVideoModal = orbitVideoExpanded && orbitBelongsToCurrentRender && orbitTest.videoUrl ? (
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 backdrop-blur-sm"
@@ -4667,6 +4730,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         )}
         {orbitConfirmModal}
         {orbitVideoModal}
+        {clayLightbox}
         {splatViewerUrl && <SplatViewer src={splatViewerUrl} onClose={() => setSplatViewerUrl(null)} />}
       </>
     )
@@ -4691,6 +4755,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         />
       )}
       {orbitConfirmModal}
+      {clayLightbox}
     </div>
   )
 }
