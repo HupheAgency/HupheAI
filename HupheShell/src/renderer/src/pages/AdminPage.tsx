@@ -198,6 +198,11 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
   const [replicateSaving, setReplicateSaving] = useState(false)
   const [replicateSaved, setReplicateSaved] = useState(false)
 
+  const [worldlabsKey, setWorldlabsKey] = useState('')
+  const [worldlabsHasKey, setWorldlabsHasKey] = useState(false)
+  const [worldlabsSaving, setWorldlabsSaving] = useState(false)
+  const [worldlabsSaved, setWorldlabsSaved] = useState(false)
+
   const [typekitId, setTypekitId] = useState('')
   const [typekitHasKey, setTypekitHasKey] = useState(false)
   const [typekitSaving, setTypekitSaving] = useState(false)
@@ -279,6 +284,7 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
     api().hasKey('serper').then((has: boolean) => setSerperHasKey(has))
     api().hasKey('fal').then((has: boolean) => setFalHasKey(has))
     api().hasKey('replicate').then((has: boolean) => setReplicateHasKey(has))
+    api().hasKey('worldlabs').then((has: boolean) => setWorldlabsHasKey(has))
     api().hasKey('typekit').then((has: boolean) => setTypekitHasKey(has))
   }, [])
 
@@ -536,6 +542,18 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
     setReplicateSaving(false)
     setReplicateSaved(true)
     setTimeout(() => setReplicateSaved(false), 2500)
+  }
+
+  async function saveWorldlabsKey() {
+    if (!worldlabsKey.trim()) return
+    setWorldlabsSaving(true)
+    setWorldlabsSaved(false)
+    await api().setKey('worldlabs', worldlabsKey.trim())
+    setWorldlabsHasKey(true)
+    setWorldlabsKey('')
+    setWorldlabsSaving(false)
+    setWorldlabsSaved(true)
+    setTimeout(() => setWorldlabsSaved(false), 2500)
   }
 
   async function saveTypekitId() {
@@ -939,6 +957,25 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                   <>
                     <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" />
                     <path d="M12 8v8M8 12h8" />
+                  </>
+                )}
+              />
+              <ApiKeyRow
+                label="Marble · World Labs"
+                description="API key voor het genereren van 3D-omgevingen via de Marble World API. Verkrijgbaar via platform.worldlabs.ai → API keys (betaalmethode vereist, ~$1,20 per wereld)."
+                hasKey={worldlabsHasKey}
+                value={worldlabsKey}
+                placeholder={worldlabsHasKey ? '••••••••••••  (vervang bestaande sleutel)' : 'Plak je API key hier…'}
+                saving={worldlabsSaving}
+                saved={worldlabsSaved}
+                iconBg="rgba(251,191,36,0.12)"
+                iconStroke="rgb(251,191,36)"
+                onChange={setWorldlabsKey}
+                onSave={saveWorldlabsKey}
+                icon={(
+                  <>
+                    <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" />
+                    <path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20" />
                   </>
                 )}
               />

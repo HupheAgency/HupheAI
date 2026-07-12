@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-clay_convert.py — converteert orbit frames naar matte clay versie.
+clay_convert.py — converteert orbit frames naar matte clay render.
 
-Verwijdert speculaire highlights, reflecties en transparantie door frames om te
-zetten naar fotometrische grijswaarden. Behoudt belichting, schaduwen en randen
-zodat VGGT genoeg features heeft voor pose-estimatie en 2DGS voor reconstructie.
+Clay render = geometrie/belichting zichtbaar, maar oppervlak-textuur volledig weg.
+Resultaat: glad, mat, grijswit — zoals gips of klei. Geen concrete-textuur, geen kleur.
 
 Gebruik: python3 clay_convert.py <frames_dir>
 Overschrijft frame_*.png in-place (frame_0000.png wordt overgeslagen).
@@ -29,20 +28,33 @@ except ImportError:
 
 
 def convert_cv2(img_bgr):
-    # 1. Luminantie: BGR → grey (perceptueel gewogen)
+    # 1. Naar grijswaarden (perceptueel gewogen)
     grey = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    # 2. Bilateral filter: smoother speculaire vlekken, randen intact
-    grey = cv2.bilateralFilter(grey, d=9, sigmaColor=75, sigmaSpace=75)
-    # 3. CLAHE: boost lokaal contrast voor feature-detectie
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    grey = clahe.apply(grey)
-    # 4. Terug naar 3-kanaals (RGB verwacht door downstream modellen)
-    return cv2.merge([grey, grey, grey])
+    h, w = grey.shape
+
+    # 2. Downsample naar 1/4 resolutie met INTER_AREA (verwijdert fine texture als low-pass filter)
+    #    Grain, concrete-textuur en specular hotspots zijn <5px → verdwijnen in 1/4 schaal
+    small = cv2.resize(grey, (w // 4, h // 4), interpolation=cv2.INTER_AREA)
+
+    # 3. Eén bilateral pass op kleine schaal: egaliseer resterende vlekken, behoudt geometrische randen
+    small = cv2.bilateralFilter(small, d=7, sigmaColor=40, sigmaSpace=40)
+
+    # 4. Upsample terug naar originele resolutie met INTER_CUBIC (soepele interpolatie)
+    clay = cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC)
+
+    # 5. Normaliseer naar 30–220 (geen gecrushte zwarten, geen geblowde witten)
+    clay = cv2.normalize(clay, None, 30, 220, cv2.NORM_MINMAX).astype(np.uint8)
+
+    # 6. Terug naar 3-kanaals RGB (verwacht door downstream modellen)
+    return cv2.merge([clay, clay, clay])
 
 
 def convert_pil(path):
     img = Image.open(path).convert('L')
-    img = img.filter(ImageFilter.SMOOTH_MORE)
+    # Meerdere SMOOTH_MORE passes als PIL fallback
+    for _ in range(5):
+        img = img.filter(ImageFilter.SMOOTH_MORE)
+    img = img.filter(ImageFilter.GaussianBlur(radius=3))
     Image.merge('RGB', [img, img, img]).save(path)
 
 

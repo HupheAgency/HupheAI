@@ -583,6 +583,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; renderVersionId?: string | null; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [assetsPrep, setAssetsPrep] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; sampleClayUrls?: string[]; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
+  const [marbleGen, setMarbleGen] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; thumbnailUrl?: string; spzPath?: string; worldId?: string; error?: string }>(() => {
+    try {
+      const raw = localStorage.getItem('huphe:marble-gen:v1')
+      if (raw) return JSON.parse(raw)
+    } catch { /* ignore */ }
+    return { phase: 'idle', step: '', progress: 0 }
+  })
+  const [marblePrompt, setMarblePrompt] = useState('')
   const orbitBelongsToCurrentRender = Boolean(project.finalRenderRecord?.id && orbitTest.renderVersionId === project.finalRenderRecord.id)
   const orbitModel = 'seedance' as const
   const [poseMethod, setPoseMethod] = useState<'fal'>('fal')
@@ -868,6 +876,48 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
   }
 
+  const startMarbleGenerate = async () => {
+    const api = getProductStudioApi()
+    if (!api || !project.backendProject?.id) return
+    const imageSrc = project.finalRenderRecord?.output_url ?? project.finalRender?.src
+    if (!imageSrc) return
+    setMarbleGen({ phase: 'running', step: 'Starten...', progress: 0 })
+    const unsub = api.onMarbleStep?.((data) => {
+      setMarbleGen((prev) => prev.phase === 'running' ? { ...prev, step: data.step, progress: data.progress } : prev)
+    })
+    try {
+      const result = await api.marbleGenerate({
+        imageSrc,
+        projectId: project.backendProject.id,
+        renderVersionId: project.finalRenderRecord?.id,
+        displayName: project.backendProject.name,
+        textPrompt: marblePrompt.trim() || undefined,
+        orbitRunId: orbitTest.orbitRunId,
+      })
+      if (!result.ok) {
+        setMarbleGen({ phase: 'error', step: result.error ?? 'Mislukt', progress: 0, error: result.error })
+        return
+      }
+      setMarbleGen({ phase: 'done', step: 'Klaar!', progress: 100, thumbnailUrl: result.thumbnailUrl, spzPath: result.spzPath, worldId: result.worldId })
+    } catch (err: any) {
+      setMarbleGen({ phase: 'error', step: err?.message ?? 'Mislukt', progress: 0, error: err?.message })
+    } finally {
+      unsub?.()
+    }
+  }
+
+  // Persist marble gen state (niet tijdens genereren)
+  useEffect(() => {
+    if (marbleGen.phase === 'running') return
+    try { localStorage.setItem('huphe:marble-gen:v1', JSON.stringify(marbleGen)) } catch { /* ignore */ }
+  }, [marbleGen])
+
+  // Auto-load SPZ in viewer zodra pad beschikbaar is
+  useEffect(() => {
+    if (!marbleGen.spzPath) return
+    setSplatViewerUrl(`huphe://file/${encodeURIComponent(marbleGen.spzPath)}`)
+  }, [marbleGen.spzPath])
+
   useEffect(() => {
     const handler = (e: Event) => {
       const { step, progress } = (e as CustomEvent<{ step: string; progress: number }>).detail
@@ -914,6 +964,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         // Herstel assetsPrep colmap + clay frames vanuit opgeslagen data (na herstart)
         if (res.colmap) {
           setAssetsPrep({ phase: 'done', step: '', progress: 100, colmap: res.colmap, sampleClayUrls: res.sampleClayUrls })
+        }
+        // Herstel marble state als world.spz al op schijf staat
+        if (res.marble?.spzPath) {
+          setMarbleGen((prev) => prev.phase === 'done' && prev.spzPath === res.marble!.spzPath ? prev
+            : { phase: 'done', step: 'Klaar!', progress: 100, spzPath: res.marble!.spzPath, worldId: res.marble!.worldId })
         }
       } else {
         setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
@@ -3102,6 +3157,60 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                     <p className="text-[10px] text-red-300">✗ {splatTraining.error}</p>
                     <button type="button" onClick={startSplatTraining} className="mt-1 text-[9px] text-red-300/60 underline hover:text-red-300">
                       Opnieuw proberen
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Marble: alternatieve route — omgeving genereren direct vanuit foto */}
+            {(project.finalRenderRecord?.output_url || project.finalRender?.src) && (
+              <div className="mt-3 rounded-md border border-amber-400/20 bg-amber-500/5 p-2">
+                <p className="mb-1.5 text-[9px] font-medium uppercase tracking-wide text-amber-400/60">Alternatief · Marble</p>
+                {marbleGen.phase === 'idle' || marbleGen.phase === 'error' ? (
+                  <>
+                    <textarea
+                      value={marblePrompt}
+                      onChange={(e) => setMarblePrompt(e.target.value)}
+                      placeholder="Optioneel: beschrijf de ruimte (360° rondom, voor én achter). Leeg = Marble genereert automatisch."
+                      rows={3}
+                      className="mb-1.5 w-full resize-none rounded-md border border-amber-400/20 bg-black/30 px-2 py-1.5 text-[10px] leading-relaxed text-amber-100/80 placeholder:text-amber-400/30 focus:border-amber-400/40 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={startMarbleGenerate}
+                      className="w-full rounded-md border border-amber-400/30 bg-amber-500/15 py-1.5 text-[11px] font-medium text-amber-300 hover:bg-amber-500/25"
+                    >
+                      ◆ Genereer omgeving met Marble
+                      {orbitTest.orbitRunId && <span className="ml-1 text-[9px] opacity-60">· via orbit video</span>}
+                    </button>
+                    {marbleGen.phase === 'error' && (
+                      <p className="mt-1 text-[9px] text-red-300">✗ {marbleGen.error}</p>
+                    )}
+                  </>
+                ) : marbleGen.phase === 'running' ? (
+                  <div className="rounded-md border border-amber-400/15 bg-amber-500/8 p-2">
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <span className="text-[10px] font-medium text-amber-300">Marble genereert...</span>
+                      <span className="text-[10px] tabular-nums text-amber-400/80">{marbleGen.progress}%</span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                      <div className="h-full rounded-full bg-amber-400 transition-all duration-500" style={{ width: `${marbleGen.progress}%` }} />
+                    </div>
+                    <p className="mt-1 truncate text-[9px] text-amber-300/50">{marbleGen.step}</p>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {marbleGen.thumbnailUrl && (
+                      <img src={marbleGen.thumbnailUrl} alt="Marble world" className="w-full rounded object-cover" style={{ aspectRatio: '16/9' }} />
+                    )}
+                    <p className="text-[9px] text-amber-300/70">✓ World gegenereerd · {marbleGen.worldId}</p>
+                    <button
+                      type="button"
+                      onClick={startMarbleGenerate}
+                      className="w-full rounded-md border border-amber-400/20 py-1 text-[9px] text-amber-400/60 hover:text-amber-300"
+                    >
+                      Opnieuw genereren
                     </button>
                   </div>
                 )}

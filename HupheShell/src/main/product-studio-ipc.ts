@@ -3769,6 +3769,19 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
     const resolvedColmap = (wsDir?: string) => colmapFromDb ?? checkColmap(wsDir)
 
+    const resolveMarble = (wsDir: string): { spzPath: string; worldId?: string } | null => {
+      try {
+        const spzPath = join(wsDir, 'marble', 'world.spz')
+        if (!existsSync(spzPath)) return null
+        let worldId: string | undefined
+        try {
+          const metaPath = join(wsDir, 'marble', 'meta.json')
+          if (existsSync(metaPath)) worldId = JSON.parse(require('fs').readFileSync(metaPath, 'utf8')).worldId
+        } catch {}
+        return { spzPath, worldId }
+      } catch { return null }
+    }
+
     // Kies 9 gelijkmatig gespreide sample-frames uit frames/ als clay-preview (herstel na restart)
     const sampleFrameUrls = (wsDir: string): string[] => {
       try {
@@ -3793,14 +3806,14 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const found = existsSync(orbitRunVideoPath)
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} orbitRunId=${orbitRunId} localPath=${activeLocalPath} videoExists=${found}`)
       if (found) {
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath) }
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: resolveMarble(activeLocalPath) }
       }
     } else {
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} jwt=${!!jwt} activeRun=${!!activeRun} — geen local_path in DB`)
     }
 
     if (existsSync(primaryPath)) {
-      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir) }
+      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir), marble: resolveMarble(primaryDir) }
     }
     console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} — niet gevonden (primaryPath=${primaryPath})`)
     return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }
@@ -4805,6 +4818,159 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     } catch (err: any) {
       console.error('[reconvert-splat]', err?.message ?? err)
       return { ok: false, error: err?.message ?? 'Herconversie mislukt.' }
+    }
+  })
+
+  // ─── Marble World API: omgeving genereren vanuit foto ─────────────────────────
+  ipcMain.handle('product-studio:marble-generate', async (_e, args: {
+    imageSrc: string          // output_url van de archieffoto (of huphe://file/... pad)
+    projectId: string
+    renderVersionId?: string
+    displayName?: string
+    textPrompt?: string
+    seed?: number
+    orbitRunId?: string       // als aanwezig: multi-image route via orbit frames
+  }) => {
+    const { existsSync: _existsWorldlabs, readFileSync: _readWorldlabs } = await import('fs')
+    const { safeStorage: _ssWorldlabs } = await import('electron')
+    const _wlKeyPath = join(app.getPath('userData'), 'worldlabs.enc')
+    const apiKey = _existsWorldlabs(_wlKeyPath)
+      ? _ssWorldlabs.decryptString(_readWorldlabs(_wlKeyPath))
+      : ((meta.MAIN_VITE_WORLDLABS_API_KEY as string) || '')
+    if (!apiKey) return { ok: false, error: 'Geen World Labs API key gevonden. Voeg hem toe via Admin → API Keys → Marble.' }
+
+    const pushStep = (step: string, progress: number) => {
+      console.log(`[marble] (${progress}%) ${step}`)
+      try {
+        if (!_e.sender.isDestroyed()) _e.sender.send('product-studio:marble-step', { step, progress })
+      } catch { /* renderer weg */ }
+    }
+
+    try {
+      const { writeFile: wf, mkdir: md, readFile: rf } = await import('fs/promises')
+      const { existsSync } = await import('fs')
+
+      // Bepaal uitvoermap
+      const outDir = args.renderVersionId
+        ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId, 'marble')
+        : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, 'marble')
+      await md(outDir, { recursive: true })
+
+      // Download bronafbeelding
+      pushStep('Afbeelding ophalen...', 5)
+      let imageBuffer: Buffer
+      let fileName: string
+      let ext: string
+
+      if (args.imageSrc.startsWith('huphe://file/')) {
+        const localPath = decodeURIComponent(args.imageSrc.replace('huphe://file/', '').split('?')[0])
+        if (!existsSync(localPath)) throw new Error(`Afbeelding niet gevonden: ${localPath}`)
+        imageBuffer = await rf(localPath)
+        fileName = localPath.split('/').pop() ?? 'image.png'
+        ext = (fileName.split('.').pop() ?? 'png').toLowerCase()
+      } else {
+        const imgRes = await fetch(args.imageSrc)
+        if (!imgRes.ok) throw new Error(`Kan afbeelding niet downloaden (${imgRes.status})`)
+        imageBuffer = Buffer.from(await imgRes.arrayBuffer())
+        const ct = imgRes.headers.get('content-type') ?? ''
+        ext = ct.includes('jpeg') || ct.includes('jpg') ? 'jpg' : ct.includes('png') ? 'png' : 'jpg'
+        fileName = `source.${ext}`
+      }
+
+      // Upload + genereer: video (orbit.mp4) of single-image (fallback)
+      const { marbleUpload, marbleUploadVideo, marbleGenerate, marbleGenerateFromVideo, marblePoll } = await import('./lib/marble-client')
+      const { existsSync: fsExistsSync, statSync } = await import('fs')
+
+      let operationId: string
+
+      const orbitVideoPath = args.orbitRunId
+        ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.orbitRunId, 'orbit.mp4')
+        : null
+
+      const hasOrbitVideo = orbitVideoPath && fsExistsSync(orbitVideoPath)
+      const videoSizeMb = hasOrbitVideo ? statSync(orbitVideoPath!).size / 1024 / 1024 : 0
+
+      if (hasOrbitVideo && videoSizeMb <= 100) {
+        // ── Video route: orbit.mp4 direct naar Marble ───────────────────────
+        pushStep(`Orbit video uploaden (${videoSizeMb.toFixed(0)} MB)...`, 12)
+        const videoBuf = await rf(orbitVideoPath!)
+        console.log(`[marble] video route: ${orbitVideoPath} (${videoSizeMb.toFixed(1)} MB)`)
+        const mediaAssetId = await marbleUploadVideo(apiKey, videoBuf, 'orbit.mp4')
+        console.log(`[marble] video media_asset_id=${mediaAssetId}`)
+        pushStep('Video-generatie starten...', 20)
+        operationId = await marbleGenerateFromVideo(apiKey, mediaAssetId, args.displayName, args.textPrompt, args.seed)
+      } else {
+        // ── Single-image fallback ────────────────────────────────────────────
+        if (hasOrbitVideo) console.warn(`[marble] orbit.mp4 te groot (${videoSizeMb.toFixed(0)} MB > 100 MB) — fallback naar single image`)
+        pushStep('Uploaden naar Marble...', 15)
+        const mediaAssetId = await marbleUpload(apiKey, imageBuffer, fileName, ext)
+        console.log(`[marble] single-image media_asset_id=${mediaAssetId}`)
+        pushStep('Genereren gestart...', 20)
+        operationId = await marbleGenerate(apiKey, mediaAssetId, args.displayName, args.textPrompt, args.seed)
+      }
+
+      console.log(`[marble] operation_id=${operationId}`)
+
+      // Poll tot klaar
+      const result = await marblePoll(
+        apiKey,
+        operationId,
+        (pct) => pushStep(`Marble genereert... (${Math.round(pct)}%)`, 20 + Math.round(pct * 0.7)),
+      )
+      console.log(`[marble] world_id=${result.worldId} credits=${result.totalCredits} spz=${result.spzUrls.length}`)
+
+      // Download thumbnail (voor UI-preview)
+      let thumbnailPath: string | undefined
+      if (result.thumbnailUrl) {
+        try {
+          const thumbRes = await fetch(result.thumbnailUrl)
+          if (thumbRes.ok) {
+            thumbnailPath = join(outDir, 'thumbnail.jpg')
+            await wf(thumbnailPath, Buffer.from(await thumbRes.arrayBuffer()))
+          }
+        } catch { /* thumbnail is optioneel */ }
+      }
+
+      // Download .spz — voorkeur: 500k, daarna full_res, 150k, 100k
+      pushStep('SPZ downloaden...', 92)
+      const variants = result.spzVariants
+      console.log('[marble] spz varianten:', JSON.stringify(variants))
+      const spzUrl = variants['500k'] ?? variants['full_res'] ?? variants['150k'] ?? variants['100k']
+        ?? Object.values(variants).find(Boolean)
+      let spzPath: string | undefined
+      if (!spzUrl) {
+        console.warn('[marble] Geen SPZ URLs in response — panoUrl:', result.panoUrl)
+      } else {
+        console.log(`[marble] Downloaden SPZ van: ${spzUrl}`)
+        const spzRes = await fetch(spzUrl)
+        console.log(`[marble] SPZ fetch status: ${spzRes.status}`)
+        if (!spzRes.ok) {
+          const body = await spzRes.text().catch(() => '')
+          throw new Error(`SPZ download mislukt (${spzRes.status}): ${body.slice(0, 200)}`)
+        }
+        spzPath = join(outDir, 'world.spz')
+        const spzBuf = Buffer.from(await spzRes.arrayBuffer())
+        await wf(spzPath, spzBuf)
+        console.log(`[marble] SPZ opgeslagen: ${spzPath} (${(spzBuf.length / 1024 / 1024).toFixed(1)} MB)`)
+      }
+
+      // Sla meta op zodat checkOrbitVideo worldId kan herstellen na herstart
+      try { await wf(join(outDir, 'meta.json'), Buffer.from(JSON.stringify({ worldId: result.worldId }))) } catch {}
+
+      pushStep('Klaar!', 100)
+      return {
+        ok: true,
+        worldId: result.worldId,
+        spzPath,
+        thumbnailUrl: thumbnailPath ? `huphe://file/${encodeURIComponent(thumbnailPath)}` : undefined,
+        panoUrl: result.panoUrl,
+        metricScaleFactor: result.metricScaleFactor,
+        groundPlaneOffset: result.groundPlaneOffset,
+        totalCredits: result.totalCredits,
+      }
+    } catch (err: any) {
+      console.error('[marble]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Marble generatie mislukt.' }
     }
   })
 }

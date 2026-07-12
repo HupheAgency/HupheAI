@@ -265,7 +265,7 @@ const ImportPayloadSchema = z.object({
 const LocalPathSchema = z.string().min(1).max(4096)
 const HUPHE_FILE_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg',
-  '.glb', '.gltf', '.json', '.ply', '.splat',
+  '.glb', '.gltf', '.json', '.ply', '.splat', '.spz',
   '.mp4', '.webm', '.mov', '.m4v', '.mp3', '.wav', '.ogg', '.m4a',
   '.woff', '.woff2', '.ttf', '.otf',
   '.pdf',

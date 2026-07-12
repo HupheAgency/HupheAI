@@ -53,6 +53,10 @@ ipcRenderer.on('product-studio:assets-step', (_event, step) => {
   g.dispatchEvent(new g.CustomEvent('product-studio:assets-step', { detail: step }))
 })
 
+ipcRenderer.on('product-studio:marble-step', (_event, step) => {
+  g.dispatchEvent(new g.CustomEvent('product-studio:marble-step', { detail: step }))
+})
+
 // Forward Engine push events
 ipcRenderer.on('engine:message-added', (_event, data) => {
   g.dispatchEvent(new g.CustomEvent('engine:message-added', { detail: data }))
@@ -362,10 +366,17 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:load-scene-alignment', args),
     reconvertSplat: (args: { plyPath: string; alphaThreshold?: number; scaleIqrFactor?: number; positionSigma?: number }) =>
       ipcRenderer.invoke('product-studio:reconvert-splat', args),
+    marbleGenerate: (args: { imageSrc: string; projectId: string; renderVersionId?: string; displayName?: string; textPrompt?: string; seed?: number; orbitRunId?: string }) =>
+      ipcRenderer.invoke('product-studio:marble-generate', args),
     onTrainingProgress: (cb: (data: { step: string; progress: number }) => void) => {
       const handler = (_: unknown, data: { step: string; progress: number }) => cb(data)
       ipcRenderer.on('product-studio:training-progress', handler)
       return () => ipcRenderer.removeListener('product-studio:training-progress', handler)
+    },
+    onMarbleStep: (cb: (data: { step: string; progress: number }) => void) => {
+      const handler = (_: unknown, data: { step: string; progress: number }) => cb(data)
+      ipcRenderer.on('product-studio:marble-step', handler)
+      return () => ipcRenderer.removeListener('product-studio:marble-step', handler)
     },
     renameProject: (args: { projectId: string; name: string }) => ipcRenderer.invoke('product-studio:rename-project', args),
     deleteProject: (args: { projectId: string }) => ipcRenderer.invoke('product-studio:delete-project', args),

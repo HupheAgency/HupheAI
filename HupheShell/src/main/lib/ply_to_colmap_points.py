@@ -130,6 +130,18 @@ def write_colmap_points3d(path, vertices):
             f.write(struct.pack('<Q', 0))            # track length = 0
 
 
+MAX_INIT_POINTS = 5000
+
+
+def subsample(vertices, target):
+    """Uniform random subsample zonder numpy-afhankelijkheid."""
+    if len(vertices) <= target:
+        return vertices
+    import random
+    rng = random.Random(42)
+    return rng.sample(vertices, target)
+
+
 def main():
     if len(sys.argv) < 3:
         print(json.dumps({'ok': False, 'error': 'Gebruik: ply_to_colmap_points.py <input.ply> <output.bin>'}))
@@ -148,8 +160,13 @@ def main():
         else:
             vertices = read_ply_vertices_ascii(f, n_vertices, props)
 
+    # Subsample: 60k VGGT-punten → 5k initialisatie-punten.
+    # Meer punten = trager per stap + meer pruning nodig. COLMAP geeft typisch ook 3k-8k.
+    original = len(vertices)
+    vertices = subsample(vertices, MAX_INIT_POINTS)
+
     write_colmap_points3d(out_path, vertices)
-    print(json.dumps({'ok': True, 'points': len(vertices)}))
+    print(json.dumps({'ok': True, 'points': len(vertices), 'original': original}))
 
 
 if __name__ == '__main__':
