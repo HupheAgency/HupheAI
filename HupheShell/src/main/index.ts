@@ -18,6 +18,14 @@ import { z } from 'zod'
 
 app.setName('HupheAI')
 
+// WebGL via SwiftShader (software renderer).
+// use-angle=metal en use-angle=gl falen beide op deze Mac in dev-modus (webgl=disabled_off).
+// SwiftShader geeft stabiele software-WebGL die wél werkt.
+app.commandLine.appendSwitch('disable-gpu-sandbox')
+app.commandLine.appendSwitch('ignore-gpu-blocklist')
+app.commandLine.appendSwitch('enable-unsafe-swiftshader')
+app.commandLine.appendSwitch('use-angle', 'swiftshader')
+
 // Vang uncaught exceptions zodat een fout in een IPC-handler (bijv. "Object has been destroyed")
 // de hele app niet laat crashen.
 process.on('uncaughtException', (err) => {
@@ -4142,8 +4150,32 @@ function buildApplicationMenu(): Menu {
   return Menu.buildFromTemplate(template)
 }
 
+app.on('gpu-process-crashed', (_e, killed) => {
+  console.error(`[GPU] GPU-process gecrasht (killed=${killed}) — hardware-versnelling uitgeschakeld tot herstart`)
+})
+
+app.on('gpu-info-update', async () => {
+  const info = await app.getGPUInfo('basic').catch(() => null)
+  const webgpu = (info as any)?.auxAttributes?.webgpu ?? 'onbekend'
+  console.log(`[GPU] update — WebGPU: ${webgpu}, hardwareAcceleration: ${app.isHardwareAccelerationEnabled()}`)
+})
+
 app.whenReady().then(async () => {
   await initSentry()
+
+  // GPU status check: log wat Chromium werkelijk gebruikt
+  const gpuStatus = app.getGPUFeatureStatus()
+  const webgl = (gpuStatus as any).webgl ?? 'onbekend'
+  const webgpu = (gpuStatus as any).webgpu ?? 'onbekend'
+  const opengl = (gpuStatus as any).opengl ?? 'onbekend'
+  console.log(`[GPU] status — webgl=${webgl} webgpu=${webgpu} opengl=${opengl} hwAccel=${app.isHardwareAccelerationEnabled()}`)
+  const degraded = Object.entries(gpuStatus)
+    .filter(([, v]) => typeof v === 'string' && !(v as string).startsWith('enabled'))
+    .map(([k, v]) => `${k}=${v}`)
+  if (degraded.length > 0) {
+    console.warn('[GPU] Niet hardware-versneld:', degraded.join(', '))
+  }
+
   registerHupheProtocol()
   Menu.setApplicationMenu(buildApplicationMenu())
   if (app.dock) {

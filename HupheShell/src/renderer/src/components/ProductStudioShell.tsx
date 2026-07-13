@@ -546,6 +546,12 @@ function ReferenceCard({ view, onApprove, onReject, onRegenerate }: { view: Refe
   )
 }
 
+// Marble splat bestanden worden URL-encoded in splatUrl — slashes worden %2F.
+// Controleer op bestandsnaam (onveranderd na encoding) om marble-URLs te herkennen.
+function isMarbleSplatUrl(url: string): boolean {
+  return url.includes('world_hq.splat') || url.includes('world_preview.splat') || url.includes('world.splat')
+}
+
 export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   initialImageSrc?: string | null
   renderLayout?: (sidebar: React.ReactNode, viewport: React.ReactNode) => React.ReactNode
@@ -583,7 +589,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; renderVersionId?: string | null; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [assetsPrep, setAssetsPrep] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; sampleClayUrls?: string[]; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
-  const [marbleGen, setMarbleGen] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; thumbnailUrl?: string; spzPath?: string; worldId?: string; error?: string }>(() => {
+  const [marbleGen, setMarbleGen] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; thumbnailUrl?: string; spzPath?: string; splatPath?: string; worldId?: string; error?: string }>(() => {
     try {
       const raw = localStorage.getItem('huphe:marble-gen:v1')
       if (raw) return JSON.parse(raw)
@@ -898,7 +904,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         setMarbleGen({ phase: 'error', step: result.error ?? 'Mislukt', progress: 0, error: result.error })
         return
       }
-      setMarbleGen({ phase: 'done', step: 'Klaar!', progress: 100, thumbnailUrl: result.thumbnailUrl, spzPath: result.spzPath, worldId: result.worldId })
+      setMarbleGen({ phase: 'done', step: 'Klaar!', progress: 100, thumbnailUrl: result.thumbnailUrl, spzPath: result.spzPath, splatPath: result.splatPath, worldId: result.worldId })
     } catch (err: any) {
       setMarbleGen({ phase: 'error', step: err?.message ?? 'Mislukt', progress: 0, error: err?.message })
     } finally {
@@ -912,11 +918,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     try { localStorage.setItem('huphe:marble-gen:v1', JSON.stringify(marbleGen)) } catch { /* ignore */ }
   }, [marbleGen])
 
-  // Auto-load SPZ in viewer zodra pad beschikbaar is
+  // Marble wereld als achtergrond via splatAlignment (enkel WebGL-context, binnen R3F)
   useEffect(() => {
-    if (!marbleGen.spzPath) return
-    setSplatViewerUrl(`huphe://file/${encodeURIComponent(marbleGen.spzPath)}`)
-  }, [marbleGen.spzPath])
+    if (!marbleGen.splatPath) return
+    const splatUrl = `huphe://file/${encodeURIComponent(marbleGen.splatPath)}`
+    setSplatAlignment((prev) => {
+      // Behoud custom alignment (niet een marble-bestand).
+      // Gebruik bestandsnamen want de URL is encoded; /marble/ wordt %2Fmarble%2F.
+      if (prev && !isMarbleSplatUrl(prev.splatUrl)) return prev
+      return {
+        splatUrl,
+        position: [0, 1.5, 4] as [number, number, number],
+        quaternion: [0, 0, 0, 1] as [number, number, number, number],
+        fovY: 60, width: 1920, height: 1080,
+        sceneCenter: [0, 0, 0] as [number, number, number],
+        groupPositionY: 0,
+      }
+    })
+  }, [marbleGen.splatPath])
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -965,10 +984,28 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         if (res.colmap) {
           setAssetsPrep({ phase: 'done', step: '', progress: 100, colmap: res.colmap, sampleClayUrls: res.sampleClayUrls })
         }
-        // Herstel marble state als world.spz al op schijf staat
+        // Herstel marble state als world.spz (en eventueel world.splat) al op schijf staan
         if (res.marble?.spzPath) {
-          setMarbleGen((prev) => prev.phase === 'done' && prev.spzPath === res.marble!.spzPath ? prev
-            : { phase: 'done', step: 'Klaar!', progress: 100, spzPath: res.marble!.spzPath, worldId: res.marble!.worldId })
+          setMarbleGen((prev) => {
+            if (prev.phase === 'done' && prev.spzPath === res.marble!.spzPath && prev.splatPath === res.marble!.splatPath) return prev
+            return { phase: 'done', step: 'Klaar!', progress: 100, spzPath: res.marble!.spzPath, splatPath: res.marble!.splatPath, worldId: res.marble!.worldId }
+          })
+          // Stel splatAlignment direct in als die leeg is (bijv. na archive-switch waarbij het
+          // splatPath niet veranderd is en de useEffect dus niet opnieuw vuurt).
+          if (res.marble.splatPath) {
+            const marbleSplatUrl = `huphe://file/${encodeURIComponent(res.marble.splatPath)}`
+            setSplatAlignment((prev) => {
+              if (prev !== null) return prev  // loadSceneAlignment of custom alignment al aanwezig
+              return {
+                splatUrl: marbleSplatUrl,
+                position: [0, 1.5, 4] as [number, number, number],
+                quaternion: [0, 0, 0, 1] as [number, number, number, number],
+                fovY: 60, width: 1920, height: 1080,
+                sceneCenter: [0, 0, 0] as [number, number, number],
+                groupPositionY: 0,
+              }
+            })
+          }
         }
       } else {
         setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
@@ -2288,11 +2325,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         const splatApi = getProductStudioApi()
         splatApi?.loadSceneAlignment?.({ projectId, renderVersionId: version.id }).then((res) => {
           if (res?.ok && res.alignment?.splatUrl && res.renderVersionId === version.id) {
+            // Opgeslagen alignment gevonden — altijd toepassen (overschrijft marble-default)
             setSplatAlignment(res.alignment)
             setSplatBaseAlignment(res.alignment)
           } else {
-            setSplatAlignment(null)
             setSplatBaseAlignment(null)
+            // Geen opgeslagen alignment. Zet alleen null als checkOrbitVideo nog geen marble
+            // heeft ingesteld — anders bewaar de marble-alignment die al geladen is.
+            setSplatAlignment((prev) => {
+              if (prev !== null && isMarbleSplatUrl(prev.splatUrl)) return prev
+              return null
+            })
           }
         }).catch(() => {})
       }

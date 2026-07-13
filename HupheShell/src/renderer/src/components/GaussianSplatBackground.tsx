@@ -1,6 +1,7 @@
 import { Component, Suspense, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Splat } from '@react-three/drei'
+import { useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 
 class SplatErrorBoundary extends Component<{ children: ReactNode }, { error: boolean }> {
@@ -120,6 +121,7 @@ export function GaussianSplatBackground({
   const [blobUrl, setBlobUrl] = useState<string | null>(null)
   const [splatObject, setSplatObject] = useState<THREE.Object3D | null>(null)
   const blobRef = useRef<string | null>(null)
+  const { invalidate } = useThree()
 
   // Pre-fetch to blob URL (huphe:// not accessible from Workers used by Splat)
   useEffect(() => {
@@ -134,6 +136,8 @@ export function GaussianSplatBackground({
         const url = URL.createObjectURL(blob)
         blobRef.current = url
         setBlobUrl(url)
+        // frameloop="demand": trigger initial render after blob is ready
+        invalidate()
       })
       .catch((e) => console.error('[GaussianSplatBackground] fetch failed:', e))
 
@@ -169,6 +173,7 @@ export function GaussianSplatBackground({
               try {
                 setSplatObject((current) => (current === mesh ? current : mesh))
                 patchSplatCrop(mesh, groupMaskSize, groupMaskOffsetX, groupMaskOffsetY, groupMaskOffsetZ)
+                invalidate()
               } catch (e) {
                 console.warn('[GaussianSplatBackground] onUpdate error:', e)
               }

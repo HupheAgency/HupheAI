@@ -3769,17 +3769,40 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
     const resolvedColmap = (wsDir?: string) => colmapFromDb ?? checkColmap(wsDir)
 
-    const resolveMarble = (wsDir: string): { spzPath: string; worldId?: string } | null => {
-      try {
-        const spzPath = join(wsDir, 'marble', 'world.spz')
-        if (!existsSync(spzPath)) return null
-        let worldId: string | undefined
+    // Marble zoeklocaties in volgorde van meest naar minst betrouwbaar:
+    // 1. orbit run directory (werkelijk opslagpad van marble)
+    // 2. renderVersionId directory (legacy/backup)
+    // 3. projectId root (zeer oud)
+    const marbleSearchDirs: string[] = []
+    if (orbitRunId) marbleSearchDirs.push(orbitRunsDir(args.projectId, orbitRunId))
+    if (activeLocalPath && !marbleSearchDirs.includes(activeLocalPath)) marbleSearchDirs.push(activeLocalPath)
+    if (args.renderVersionId) marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId))
+    marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId))
+
+    const resolveMarble = (): { spzPath: string; splatPath?: string; worldId?: string } | null => {
+      for (const baseDir of marbleSearchDirs) {
         try {
-          const metaPath = join(wsDir, 'marble', 'meta.json')
-          if (existsSync(metaPath)) worldId = JSON.parse(require('fs').readFileSync(metaPath, 'utf8')).worldId
+          const spzPath = join(baseDir, 'marble', 'world.spz')
+          if (!existsSync(spzPath)) continue
+          let worldId: string | undefined
+          try {
+            const metaPath = join(baseDir, 'marble', 'meta.json')
+            if (existsSync(metaPath)) worldId = JSON.parse(require('fs').readFileSync(metaPath, 'utf8')).worldId
+          } catch {}
+          // Voorkeursvolgorde: hq (200k, hardware GPU) > preview (50k, software) > full (100k, Python)
+          const hqSplat      = join(baseDir, 'marble', 'world_hq.splat')
+          const previewSplat = join(baseDir, 'marble', 'world_preview.splat')
+          const fullSplat    = join(baseDir, 'marble', 'world.splat')
+          const splatPath = existsSync(hqSplat) ? hqSplat
+            : existsSync(previewSplat) ? previewSplat
+            : existsSync(fullSplat) ? fullSplat
+            : undefined
+          const label = existsSync(hqSplat) ? 'hq(200k)' : existsSync(previewSplat) ? 'preview(50k)' : 'full(100k)'
+          console.log(`[marble] gevonden in ${baseDir} — splat: ${splatPath ? label : 'geen'}`)
+          return { spzPath, splatPath, worldId }
         } catch {}
-        return { spzPath, worldId }
-      } catch { return null }
+      }
+      return null
     }
 
     // Kies 9 gelijkmatig gespreide sample-frames uit frames/ als clay-preview (herstel na restart)
@@ -3806,14 +3829,14 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const found = existsSync(orbitRunVideoPath)
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} orbitRunId=${orbitRunId} localPath=${activeLocalPath} videoExists=${found}`)
       if (found) {
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: resolveMarble(activeLocalPath) }
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: resolveMarble() }
       }
     } else {
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} jwt=${!!jwt} activeRun=${!!activeRun} — geen local_path in DB`)
     }
 
     if (existsSync(primaryPath)) {
-      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir), marble: resolveMarble(primaryDir) }
+      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir), marble: resolveMarble() }
     }
     console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} — niet gevonden (primaryPath=${primaryPath})`)
     return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }
@@ -4917,7 +4940,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         operationId,
         (pct) => pushStep(`Marble genereert... (${Math.round(pct)}%)`, 20 + Math.round(pct * 0.7)),
       )
-      console.log(`[marble] world_id=${result.worldId} credits=${result.totalCredits} spz=${result.spzUrls.length}`)
+      console.log(`[marble] world_id=${result.worldId} credits=${result.totalCredits} spz varianten:${Object.keys(result.spzVariants).join(',')}`)
 
       // Download thumbnail (voor UI-preview)
       let thumbnailPath: string | undefined
@@ -4935,7 +4958,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       pushStep('SPZ downloaden...', 92)
       const variants = result.spzVariants
       console.log('[marble] spz varianten:', JSON.stringify(variants))
-      const spzUrl = variants['500k'] ?? variants['full_res'] ?? variants['150k'] ?? variants['100k']
+      const spzUrl = variants['100k'] ?? variants['150k'] ?? variants['500k'] ?? variants['full_res']
         ?? Object.values(variants).find(Boolean)
       let spzPath: string | undefined
       if (!spzUrl) {
@@ -4954,6 +4977,45 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         console.log(`[marble] SPZ opgeslagen: ${spzPath} (${(spzBuf.length / 1024 / 1024).toFixed(1)} MB)`)
       }
 
+      // Maak HQ splat via SplatTransform (200k Gaussians, SH gefilterd op band 1)
+      // Fallback: Python converter (100k) als SplatTransform faalt.
+      let splatPath: string | undefined
+      if (spzPath) {
+        pushStep('Splat aanmaken...', 92)
+        const hqPlyPath    = join(outDir, 'world_hq.ply')
+        const hqSplatPath  = join(outDir, 'world_hq.splat')
+        try {
+          const { promisify: _promisify } = await import('util')
+          const { exec: _execRaw } = await import('child_process')
+          const _exec = _promisify(_execRaw)
+          // 200k Gaussians, SH band 1 (kleiner in geheugen, zelfde visuele kwaliteit)
+          await _exec(`splat-transform "${spzPath}" --gpu cpu --filter-nan --filter-harmonics 1 -d 200000 "${hqPlyPath}"`, { timeout: 180_000 })
+          console.log(`[marble] SplatTransform HQ klaar: 200k → ${hqPlyPath}`)
+          const { plyToSplat } = await import('./lib/ply-to-splat')
+          const { splatPath: converted } = await plyToSplat(hqPlyPath, { alphaThreshold: 5 })
+          await import('fs/promises').then(f => f.rename(converted, hqSplatPath))
+          splatPath = hqSplatPath
+          console.log(`[marble] HQ splat klaar: ${splatPath}`)
+        } catch (hqErr: any) {
+          console.warn('[marble] SplatTransform HQ mislukt, fallback naar Python converter:', hqErr?.message ?? hqErr)
+          try {
+            const { promisify: _promisify2 } = await import('util')
+            const { exec: _execRaw2 } = await import('child_process')
+            const _exec2 = _promisify2(_execRaw2)
+            const python = '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3'
+            const converterScript = join(__dirname, 'lib/spz_to_splat.py')
+            const fallbackSplat = join(outDir, 'world.splat')
+            const { stdout } = await _exec2(`"${python}" "${converterScript}" "${spzPath}" "${fallbackSplat}"`, { timeout: 120_000 })
+            const convResult = JSON.parse(stdout.trim())
+            console.log(`[marble] Python fallback klaar: ${convResult.numPoints} punten → ${fallbackSplat}`)
+            splatPath = fallbackSplat
+          } catch (fallbackErr: any) {
+            console.error('[marble] Alle .splat conversies mislukt:', fallbackErr?.message ?? fallbackErr)
+          }
+        }
+        pushStep('Klaar!', 95)
+      }
+
       // Sla meta op zodat checkOrbitVideo worldId kan herstellen na herstart
       try { await wf(join(outDir, 'meta.json'), Buffer.from(JSON.stringify({ worldId: result.worldId }))) } catch {}
 
@@ -4962,6 +5024,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         ok: true,
         worldId: result.worldId,
         spzPath,
+        splatPath,
         thumbnailUrl: thumbnailPath ? `huphe://file/${encodeURIComponent(thumbnailPath)}` : undefined,
         panoUrl: result.panoUrl,
         metricScaleFactor: result.metricScaleFactor,

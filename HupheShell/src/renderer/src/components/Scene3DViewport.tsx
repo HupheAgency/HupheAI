@@ -162,6 +162,38 @@ function LightHelper({ light, selected }: { light: Scene3DState['lights'][number
   )
 }
 
+function DynamicDpr() {
+  const { gl, invalidate } = useThree()
+
+  useEffect(() => {
+    const canvas = gl.domElement
+    const baseDpr = Math.min(window.devicePixelRatio, 1.5)
+    const moveDpr = Math.min(window.devicePixelRatio * 0.55, 0.9)
+    let restoreTimer: ReturnType<typeof setTimeout> | null = null
+
+    const onDown = () => {
+      if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null }
+      gl.setPixelRatio(moveDpr)
+    }
+    const onUp = () => {
+      restoreTimer = setTimeout(() => {
+        gl.setPixelRatio(baseDpr)
+        invalidate()
+      }, 120)
+    }
+
+    canvas.addEventListener('pointerdown', onDown)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('pointerup', onUp)
+      if (restoreTimer) clearTimeout(restoreTimer)
+    }
+  }, [gl, invalidate])
+
+  return null
+}
+
 function SceneBackground({ background, viewMode, transparent }: { background: Scene3DBackground; viewMode: ViewMode; transparent?: boolean }) {
   const { scene } = useThree()
 
@@ -1109,7 +1141,9 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     <div className="relative h-full w-full" onClick={(e) => { if (e.target === e.currentTarget) onDeselectAll() }}>
       <Canvas
         ref={canvasRef}
-        gl={{ preserveDrawingBuffer: true, antialias: true, alpha: true, powerPreference: 'high-performance' }}
+        frameloop="demand"
+        dpr={[1, 1.5]}
+        gl={{ preserveDrawingBuffer: true, antialias: false, alpha: true, powerPreference: 'high-performance' }}
         camera={{ position: initialPos, fov: initialFov, near: 0.1, far: 1000 }}
         shadows
         style={{ background: transparentCanvas ? 'transparent' : viewMode === 'rendered' ? '#000000' : '#1a1a1a' }}
@@ -1118,6 +1152,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           gl.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault() }, false)
         }}
       >
+        <DynamicDpr />
         <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
         <RenderPassCapture passRef={passRef} />
         <SceneManifestCapture manifestRef={manifestRef} sceneState={scene} orbitStateRef={orbitStateRef} />

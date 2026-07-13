@@ -1,17 +1,4 @@
-import { Component, Suspense, useEffect, useRef, useState, useCallback } from 'react'
-import type { ReactNode } from 'react'
-import { Canvas } from '@react-three/fiber'
-import { Splat, OrbitControls } from '@react-three/drei'
-
-class SplatErrorBoundary extends Component<{ children: ReactNode; onError: (e: Error) => void }, { error: Error | null }> {
-  state = { error: null }
-  static getDerivedStateFromError(error: Error) { return { error } }
-  componentDidCatch(error: Error) { this.props.onError(error) }
-  render() {
-    if (this.state.error) return null
-    return this.props.children
-  }
-}
+import { useEffect, useRef, useState } from 'react'
 
 interface SplatViewerProps {
   src: string
@@ -19,9 +6,11 @@ interface SplatViewerProps {
 }
 
 export function SplatViewer({ src, onClose }: SplatViewerProps) {
-  const [blobUrl, setBlobUrl] = useState<string | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const blobUrlRef = useRef<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const viewerRef = useRef<any>(null)
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [progress, setProgress] = useState(0)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -30,56 +19,88 @@ export function SplatViewer({ src, onClose }: SplatViewerProps) {
   }, [onClose])
 
   useEffect(() => {
-    if (!src) return
-    setBlobUrl(null)
-    setLoadError(null)
+    if (!containerRef.current || !src) return
 
-    fetch(src)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.arrayBuffer()
-      })
-      .then((buf) => {
-        const blob = new Blob([buf], { type: 'application/octet-stream' })
-        const url = URL.createObjectURL(blob)
-        blobUrlRef.current = url
-        setBlobUrl(url)
-      })
-      .catch((err) => {
-        console.error('[SplatViewer] fetch failed:', err)
-        setLoadError(String(err))
-      })
+    let disposed = false
+    let blobUrl: string | null = null
+
+    async function init() {
+      try {
+        setStatus('loading')
+        setProgress(0)
+
+        const GaussianSplats3D = await import('@mkkellogg/gaussian-splats-3d')
+
+        const res = await fetch(src)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const buf = await res.arrayBuffer()
+        blobUrl = URL.createObjectURL(new Blob([buf]))
+
+        if (disposed) return
+
+        const viewer = new GaussianSplats3D.Viewer({
+          rootElement: containerRef.current!,
+          selfDrivenMode: true,
+          useBuiltInControls: true,
+          gpuAcceleratedSort: true,
+          useWebWorkers: true,
+          dynamicScene: false,
+          freeIntermediateSplatData: true,
+          initialCameraPosition: [0, 1.5, 4],
+          initialCameraLookAt: [0, 0, 0],
+        })
+        viewerRef.current = viewer
+
+        const ext = src.split('?')[0].split('.').pop()?.toLowerCase()
+        const SceneFormat = (GaussianSplats3D as any).SceneFormat
+        const format = ext === 'spz' && SceneFormat?.SPZ != null
+          ? SceneFormat.SPZ
+          : SceneFormat?.Splat ?? undefined
+
+        await viewer.addSplatScene(blobUrl, {
+          ...(format != null ? { format } : {}),
+          splatAlphaRemovalThreshold: 5,
+          progressiveLoad: true,
+          onProgress: (pct: number) => { if (!disposed) setProgress(Math.round(pct)) },
+        })
+
+        if (disposed) return
+
+        viewer.start()
+        setStatus('ready')
+      } catch (err: any) {
+        if (!disposed) {
+          console.error('[SplatViewer]', err?.message ?? err)
+          setErrorMsg(String(err?.message ?? err))
+          setStatus('error')
+        }
+      }
+    }
+
+    init()
 
     return () => {
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current)
-        blobUrlRef.current = null
-      }
+      disposed = true
+      try { viewerRef.current?.dispose() } catch {}
+      viewerRef.current = null
+      if (blobUrl) URL.revokeObjectURL(blobUrl)
     }
   }, [src])
 
   return (
     <div className="fixed inset-0 z-[9999] flex flex-col bg-black">
-      <div className="flex-1">
-        {loadError && (
-          <div className="flex h-full items-center justify-center">
-            <p className="text-sm text-red-400">Laden mislukt: {loadError}</p>
+      <div ref={containerRef} className="relative flex-1">
+        {status === 'loading' && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <p className="text-sm text-white/40">
+              Splat laden{progress > 0 ? ` ${progress}%` : '…'}
+            </p>
           </div>
         )}
-        {!blobUrl && !loadError && (
-          <div className="flex h-full items-center justify-center">
-            <p className="text-sm text-white/40">Splat laden...</p>
+        {status === 'error' && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <p className="text-sm text-red-400">Laden mislukt: {errorMsg}</p>
           </div>
-        )}
-        {blobUrl && (
-          <SplatErrorBoundary onError={(e) => console.error('[SplatViewer]', e)}>
-            <Canvas camera={{ position: [0, 1, 4], fov: 60 }}>
-              <Suspense fallback={null}>
-                <Splat src={blobUrl} />
-              </Suspense>
-              <OrbitControls enableDamping dampingFactor={0.05} minDistance={0.5} maxDistance={20} />
-            </Canvas>
-          </SplatErrorBoundary>
         )}
       </div>
       <div className="flex items-center justify-between px-4 py-2">
