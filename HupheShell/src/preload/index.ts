@@ -360,7 +360,7 @@ contextBridge.exposeInMainWorld('api', {
     getSplatPose: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string }) => ipcRenderer.invoke('product-studio:get-splat-pose', args),
     trainSplat: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling'; brushBinPath?: string; maxSteps?: number }) =>
       ipcRenderer.invoke('product-studio:train-splat', args),
-    saveSceneAlignment: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown> }) =>
+    saveSceneAlignment: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown>; baseAlignment?: Record<string, unknown> | null }) =>
       ipcRenderer.invoke('product-studio:save-scene-alignment', args),
     loadSceneAlignment: (args: { projectId: string; renderVersionId?: string }) =>
       ipcRenderer.invoke('product-studio:load-scene-alignment', args),

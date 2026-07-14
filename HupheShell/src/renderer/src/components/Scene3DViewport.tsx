@@ -9,6 +9,14 @@ import { GaussianSplatBackground, type SplatAlignment } from './GaussianSplatBac
 
 export type { SplatAlignment }
 
+function finiteNumber(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+const DEFAULT_BUBBLE_RADIUS = 3
+const DEFAULT_BUBBLE_FEATHER = 0.1
+
 function EnvironmentMesh({ url }: { url: string }) {
   const gltf = useGLTF(url)
   const groupRef = useRef<THREE.Group>(null)
@@ -510,6 +518,20 @@ function hideEditorOnlyObjects(scene: THREE.Scene): THREE.Object3D[] {
 
 const RENDER_WIDTH = 1920
 const RENDER_HEIGHT = 1080
+
+function QuickScreenshotCapture({ captureRef }: { captureRef: React.MutableRefObject<(() => string | null) | null> }) {
+  const { gl, scene, camera } = useThree()
+  useEffect(() => {
+    captureRef.current = () => {
+      const rt = new THREE.WebGLRenderTarget(RENDER_WIDTH, RENDER_HEIGHT)
+      const dataUrl = renderToDataUrl(gl, scene, camera, rt)
+      rt.dispose()
+      return dataUrl
+    }
+    return () => { captureRef.current = null }
+  }, [gl, scene, camera, captureRef])
+  return null
+}
 
 function CleanScreenshotCapture({ captureRef }: { captureRef: React.MutableRefObject<((fovScale?: number) => string | null) | null> }) {
   const { gl, scene, camera } = useThree()
@@ -1108,13 +1130,14 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
+  const quickScreenshotRef = useRef<(() => string | null) | null>(null)
   const manifestRef = useRef<(() => Scene3DRenderManifest | null) | null>(null)
   const setCameraOrbitRef = useRef<((pos: [number, number, number], tgt: [number, number, number], fov?: number) => void) | null>(null)
 
   useImperativeHandle(ref, () => ({
     captureScreenshot() {
-      if (!canvasRef.current) return null
-      return canvasRef.current.toDataURL('image/png')
+      // Gebruik offscreen render target zodat preserveDrawingBuffer niet nodig is
+      return quickScreenshotRef.current?.() ?? null
     },
     captureCleanScreenshot(fovScale?: number) {
       return cleanScreenshotRef.current?.(fovScale) ?? null
@@ -1143,7 +1166,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
         ref={canvasRef}
         frameloop="demand"
         dpr={[1, 1.5]}
-        gl={{ preserveDrawingBuffer: true, antialias: false, alpha: true, powerPreference: 'high-performance' }}
+        gl={{ antialias: false, alpha: true, powerPreference: 'high-performance' }}
         camera={{ position: initialPos, fov: initialFov, near: 0.1, far: 1000 }}
         shadows
         style={{ background: transparentCanvas ? 'transparent' : viewMode === 'rendered' ? '#000000' : '#1a1a1a' }}
@@ -1153,6 +1176,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
         }}
       >
         <DynamicDpr />
+        <QuickScreenshotCapture captureRef={quickScreenshotRef} />
         <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
         <RenderPassCapture passRef={passRef} />
         <SceneManifestCapture manifestRef={manifestRef} sceneState={scene} orbitStateRef={orbitStateRef} />
@@ -1181,16 +1205,23 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
             quaternion={splatAlignment.quaternion}
             fovY={splatAlignment.fovY}
             sceneCenter={splatAlignment.sceneCenter}
-            groupPositionX={splatAlignment.groupPositionX ?? 0}
-            groupPositionY={splatAlignment.groupPositionY}
-            groupPositionZ={splatAlignment.groupPositionZ ?? 0}
-            groupTiltX={splatAlignment.groupTiltX ?? 0}
-            groupTiltZ={splatAlignment.groupTiltZ ?? 0}
-            groupScale={splatAlignment.groupScale ?? 1}
-            groupMaskSize={splatAlignment.groupMaskSize ?? 20}
-            groupMaskOffsetX={splatAlignment.groupMaskOffsetX ?? 0}
-            groupMaskOffsetY={splatAlignment.groupMaskOffsetY ?? 0}
-            groupMaskOffsetZ={splatAlignment.groupMaskOffsetZ ?? 0}
+            groupPositionX={finiteNumber(splatAlignment.groupPositionX, 0)}
+            groupPositionY={finiteNumber(splatAlignment.groupPositionY, 0)}
+            groupPositionZ={finiteNumber(splatAlignment.groupPositionZ, 0)}
+            groupTiltX={finiteNumber(splatAlignment.groupTiltX, 0)}
+            groupTiltZ={finiteNumber(splatAlignment.groupTiltZ, 0)}
+            groupScale={finiteNumber(splatAlignment.groupScale, 1)}
+            groupMaskSize={finiteNumber(splatAlignment.groupMaskSize, 20)}
+            groupMaskOffsetX={finiteNumber(splatAlignment.groupMaskOffsetX, 0)}
+            groupMaskOffsetY={finiteNumber(splatAlignment.groupMaskOffsetY, 0)}
+            groupMaskOffsetZ={finiteNumber(splatAlignment.groupMaskOffsetZ, 0)}
+            bubbleRadius={finiteNumber(splatAlignment.bubbleRadius, DEFAULT_BUBBLE_RADIUS)}
+            bubbleFeather={finiteNumber(splatAlignment.bubbleFeather, DEFAULT_BUBBLE_FEATHER)}
+            splatToShot={Boolean(splatAlignment.splatToShot)}
+            transformPosition={splatAlignment.transformPosition}
+            transformQuaternion={splatAlignment.transformQuaternion}
+            transformScale={finiteNumber(splatAlignment.transformScale, 1)}
+            basisRotationY={splatAlignment.basisRotationY}
           />
         )}
       </Canvas>

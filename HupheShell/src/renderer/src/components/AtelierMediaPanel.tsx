@@ -17,6 +17,7 @@ import type { MediaAsset } from '../lib/media-asset-store'
 import { supabase } from '../lib/supabase'
 import { Toggle } from './Toggle'
 import Scene3DEditorInline from './Scene3DEditorInline'
+import ProductStudioBoundary from './ProductStudioBoundary'
 import ProductStudioShell from './ProductStudioShell'
 
 export function AtelierMediaCreationPanel({
@@ -627,20 +628,22 @@ export function AtelierMediaCreationPanel({
       )}
 
       {productStudioOpen ? (
-        <ProductStudioShell
-          renderLayout={(sidebar, viewport) => (
-            <>
-              <section className="relative flex min-w-0 flex-1 flex-col">
-                <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0a0a0a]">
-                  {viewport}
+        <ProductStudioBoundary>
+          <ProductStudioShell
+            renderLayout={(sidebar, viewport) => (
+              <>
+                <section className="relative flex min-w-0 flex-1 flex-col">
+                  <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0a0a0a]">
+                    {viewport}
+                  </div>
+                </section>
+                <div className="flex w-[340px] flex-shrink-0 flex-col overflow-hidden border-l border-white/[0.06] bg-[#111] text-white">
+                  {sidebar}
                 </div>
-              </section>
-              <div className="flex w-[340px] flex-shrink-0 flex-col overflow-hidden border-l border-white/[0.06] bg-[#111] text-white">
-                {sidebar}
-              </div>
-            </>
-          )}
-        />
+              </>
+            )}
+          />
+        </ProductStudioBoundary>
       ) : (
       <section className="relative flex min-w-0 flex-1 flex-col">
       <div ref={canvasRef} className="relative min-h-0 flex-1 overflow-hidden flex items-center justify-center select-none cursor-grab active:cursor-grabbing">

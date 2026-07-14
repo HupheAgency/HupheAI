@@ -18,13 +18,13 @@ import { z } from 'zod'
 
 app.setName('HupheAI')
 
-// WebGL via SwiftShader (software renderer).
-// use-angle=metal en use-angle=gl falen beide op deze Mac in dev-modus (webgl=disabled_off).
-// SwiftShader geeft stabiele software-WebGL die wél werkt.
-app.commandLine.appendSwitch('disable-gpu-sandbox')
+// Hardware WebGL: Metal op macOS, standaard (D3D11/OpenGL) op andere platforms.
+// ignore-gpu-blocklist zorgt dat geblokkeerde drivers toch hardware-rendering proberen.
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
-app.commandLine.appendSwitch('enable-unsafe-swiftshader')
-app.commandLine.appendSwitch('use-angle', 'swiftshader')
+if (process.platform === 'darwin') {
+  // Metal is de native GPU-API op macOS (Intel én Apple Silicon).
+  app.commandLine.appendSwitch('use-angle', 'metal')
+}
 
 // Vang uncaught exceptions zodat een fout in een IPC-handler (bijv. "Object has been destroyed")
 // de hele app niet laat crashen.

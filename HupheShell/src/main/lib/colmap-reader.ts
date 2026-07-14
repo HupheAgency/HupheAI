@@ -17,6 +17,7 @@ export interface ColmapImage {
   qvec: [number, number, number, number] // qw, qx, qy, qz
   tvec: [number, number, number]
   cameraId: number
+  points2D: number
 }
 
 export interface ColmapPose {
@@ -33,6 +34,14 @@ export interface ColmapPose {
   sceneCenter: [number, number, number]
   // Y offset applied to the splat group so the floor aligns with Three.js Y=0
   groupPositionY: number
+  // Diagnostics for the selected COLMAP image.
+  selectedImageName: string
+  selectedImageId: number
+  selectedCameraId: number
+  selectedPoints2D: number
+  requestedImageName: string
+  anchorFound: boolean
+  imageCount: number
 }
 
 function readUint32LE(buf: Buffer, offset: number): number {
@@ -150,6 +159,7 @@ async function parseImagesBin(filePath: string): Promise<ColmapImage[]> {
       qvec: [qw, qx, qy, qz],
       tvec: [tx, ty, tz],
       cameraId,
+      points2D: numPoints2D,
     })
   }
 
@@ -192,8 +202,9 @@ async function parsePoints3DBin(filePath: string): Promise<[number, number, numb
  * COLMAP convention (OpenCV): X right, Y down, Z forward
  * Three.js convention (OpenGL): X right, Y up, Z toward viewer
  *
- * The Gaussian Splat group carries rotation={[Math.PI, 0, 0]} which maps
- * COLMAP world (Y-down, Z-fwd) to Three.js world (Y-up, Z-back) via T = diag(1,-1,-1).
+ * The renderer applies the final splat basis rotation when inserting the
+ * converted .splat into the Three.js scene. This function only exposes the
+ * camera pose and scene center in Three.js coordinates.
  *
  * Camera position: pos_gl = T * (-R^T * tvec) = (px, -py, -pz)
  *
@@ -234,7 +245,10 @@ function colmapPoseToThreeJs(qvec: [number, number, number, number], tvec: [numb
   return { position, quaternion }
 }
 
-export async function readColmapPose(sparseDir: string): Promise<ColmapPose> {
+export async function readColmapPose(
+  sparseDir: string,
+  options: { preferredImageName?: string } = {},
+): Promise<ColmapPose> {
   const camerasPath = join(sparseDir, 'cameras.bin')
   const imagesPath = join(sparseDir, 'images.bin')
   const points3DPath = join(sparseDir, 'points3D.bin')
@@ -246,16 +260,18 @@ export async function readColmapPose(sparseDir: string): Promise<ColmapPose> {
 
   if (images.length === 0) throw new Error('Geen frames gevonden in COLMAP images.bin')
 
-  // Sort images by name en kies een orbit-frame als referentie.
+  // Sort images by name en kies frame_0001 als anker voor Product Studio.
   // frame_0000 is de markerframe die VGGT op (0,0,0) plaatst — niet bruikbaar als camera.
   images.sort((a, b) => a.name.localeCompare(b.name))
   const orbitImages = images.filter((img) => !img.name.includes('frame_0000'))
-  const firstImage = orbitImages[Math.floor(orbitImages.length / 2)] ?? images[Math.floor(images.length / 2)]
+  const requestedImageName = options.preferredImageName ?? 'frame_0001.png'
+  const anchorImage = orbitImages.find((img) => img.name === requestedImageName)
+  const selectedImage = anchorImage ?? orbitImages[Math.floor(orbitImages.length / 2)] ?? images[Math.floor(images.length / 2)]
 
-  const cam = cameras.get(firstImage.cameraId)
-  if (!cam) throw new Error(`Camera ${firstImage.cameraId} niet gevonden in cameras.bin`)
+  const cam = cameras.get(selectedImage.cameraId)
+  if (!cam) throw new Error(`Camera ${selectedImage.cameraId} niet gevonden in cameras.bin`)
 
-  const { position, quaternion } = colmapPoseToThreeJs(firstImage.qvec, firstImage.tvec)
+  const { position, quaternion } = colmapPoseToThreeJs(selectedImage.qvec, selectedImage.tvec)
 
   // fovY in degrees from fy and image height
   const fovY = 2 * Math.atan(cam.height / (2 * cam.fy)) * (180 / Math.PI)
@@ -295,5 +311,12 @@ export async function readColmapPose(sparseDir: string): Promise<ColmapPose> {
     height: cam.height,
     sceneCenter,
     groupPositionY,
+    selectedImageName: selectedImage.name,
+    selectedImageId: selectedImage.id,
+    selectedCameraId: selectedImage.cameraId,
+    selectedPoints2D: selectedImage.points2D,
+    requestedImageName,
+    anchorFound: selectedImage.name === requestedImageName,
+    imageCount: images.length,
   }
 }

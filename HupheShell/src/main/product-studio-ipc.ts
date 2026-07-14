@@ -3779,16 +3779,33 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (args.renderVersionId) marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId))
     marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId))
 
-    const resolveMarble = (): { spzPath: string; splatPath?: string; worldId?: string } | null => {
+    const resolveMarble = (): {
+      spzPath: string
+      splatPath?: string
+      worldId?: string
+      renderVersionId?: string
+      orbitRunId?: string
+      route?: 'video' | 'image'
+      metricScaleFactor?: number
+      groundPlaneOffset?: number
+      thumbnailPath?: string
+      panoUrl?: string
+      colliderMeshUrl?: string
+      totalCredits?: number
+    } | null => {
       for (const baseDir of marbleSearchDirs) {
         try {
           const spzPath = join(baseDir, 'marble', 'world.spz')
           if (!existsSync(spzPath)) continue
-          let worldId: string | undefined
+          let meta: Record<string, any> = {}
           try {
             const metaPath = join(baseDir, 'marble', 'meta.json')
-            if (existsSync(metaPath)) worldId = JSON.parse(require('fs').readFileSync(metaPath, 'utf8')).worldId
+            if (existsSync(metaPath)) meta = JSON.parse(require('fs').readFileSync(metaPath, 'utf8'))
           } catch {}
+          if (args.renderVersionId && meta.renderVersionId && meta.renderVersionId !== args.renderVersionId) {
+            console.warn(`[marble] meta renderVersionId mismatch: gevraagd=${args.renderVersionId} meta=${meta.renderVersionId}`)
+            continue
+          }
           // Voorkeursvolgorde: hq (200k, hardware GPU) > preview (50k, software) > full (100k, Python)
           const hqSplat      = join(baseDir, 'marble', 'world_hq.splat')
           const previewSplat = join(baseDir, 'marble', 'world_preview.splat')
@@ -3799,7 +3816,20 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
             : undefined
           const label = existsSync(hqSplat) ? 'hq(200k)' : existsSync(previewSplat) ? 'preview(50k)' : 'full(100k)'
           console.log(`[marble] gevonden in ${baseDir} — splat: ${splatPath ? label : 'geen'}`)
-          return { spzPath, splatPath, worldId }
+          return {
+            spzPath,
+            splatPath,
+            worldId: meta.worldId,
+            renderVersionId: meta.renderVersionId,
+            orbitRunId: meta.orbitRunId,
+            route: meta.route,
+            metricScaleFactor: meta.metricScaleFactor,
+            groundPlaneOffset: meta.groundPlaneOffset,
+            thumbnailPath: meta.thumbnailPath,
+            panoUrl: meta.panoUrl,
+            colliderMeshUrl: meta.colliderMeshUrl,
+            totalCredits: meta.totalCredits,
+          }
         } catch {}
       }
       return null
@@ -4681,21 +4711,38 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     return { ok: true, splatUrl, localFloorY, plyPath }
   })
 
-  ipcMain.handle('product-studio:get-splat-pose', async (_e, args: { projectId: string; orbitRunId?: string; renderVersionId?: string; model?: string }) => {
+  const readFrameOnePose = async (colmapDir: string) => {
     const { existsSync } = await import('fs')
+    const { readColmapPose } = await import('./lib/colmap-reader')
+    const sparse0 = join(colmapDir, 'sparse', '0')
+    const sparse1 = join(colmapDir, 'sparse', '1')
+    const hasSparse0 = existsSync(join(sparse0, 'images.bin'))
+    const hasSparse1 = existsSync(join(sparse1, 'images.bin'))
+
+    let sparse0Pose: any = null
+    if (hasSparse0) {
+      try {
+        sparse0Pose = await readColmapPose(sparse0, { preferredImageName: 'frame_0001.png' })
+        if (sparse0Pose.anchorFound && sparse0Pose.selectedPoints2D > 0) {
+          return { ...sparse0Pose, poseSparseDir: sparse0, poseSparseKind: 'sparse0' as const }
+        }
+      } catch {}
+    }
+
+    if (hasSparse1) {
+      const sparse1Pose = await readColmapPose(sparse1, { preferredImageName: 'frame_0001.png' })
+      return { ...sparse1Pose, poseSparseDir: sparse1, poseSparseKind: 'sparse1' as const }
+    }
+
+    if (sparse0Pose) return { ...sparse0Pose, poseSparseDir: sparse0, poseSparseKind: 'sparse0' as const }
+    throw new Error('COLMAP reconstructie niet gevonden')
+  }
+
+  ipcMain.handle('product-studio:get-splat-pose', async (_e, args: { projectId: string; orbitRunId?: string; renderVersionId?: string; model?: string }) => {
     const wsDir = await resolveWsDir(args.projectId, args.orbitRunId, args.model, args.renderVersionId)
 
-    let sparseDir = join(wsDir, 'colmap', 'sparse', '1')
-    if (!existsSync(join(sparseDir, 'images.bin'))) {
-      sparseDir = join(wsDir, 'colmap', 'sparse', '0')
-    }
-    if (!existsSync(join(sparseDir, 'images.bin'))) {
-      return { ok: false, error: 'COLMAP reconstructie niet gevonden' }
-    }
-
     try {
-      const { readColmapPose } = await import('./lib/colmap-reader')
-      const pose = await readColmapPose(sparseDir)
+      const pose = await readFrameOnePose(join(wsDir, 'colmap'))
       return { ok: true, pose }
     } catch (err: any) {
       console.error('[get-splat-pose]', err?.message ?? err)
@@ -4753,12 +4800,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       pushStep('Camera-positie uitlezen...', 98)
       let pose = null
       try {
-        const { existsSync: es } = await import('fs')
-        const { readColmapPose } = await import('./lib/colmap-reader')
-        const sparseDir = es(join(colmapDir, 'sparse', '1', 'images.bin'))
-          ? join(colmapDir, 'sparse', '1')
-          : join(colmapDir, 'sparse', '0')
-        pose = await readColmapPose(sparseDir)
+        pose = await readFrameOnePose(colmapDir)
       } catch {
         // pose optioneel
       }
@@ -4776,6 +4818,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     projectId: string
     renderVersionId?: string
     alignment: Record<string, unknown>
+    baseAlignment?: Record<string, unknown> | null
   }) => {
     try {
       const { writeFile, mkdir } = await import('fs/promises')
@@ -4784,7 +4827,13 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
       await mkdir(dir, { recursive: true })
       const scenePath = join(dir, 'scene.json')
-      const data = JSON.stringify({ version: 1, savedAt: new Date().toISOString(), renderVersionId: args.renderVersionId ?? null, alignment: args.alignment }, null, 2)
+      const data = JSON.stringify({
+        version: 2,
+        savedAt: new Date().toISOString(),
+        renderVersionId: args.renderVersionId ?? null,
+        alignment: args.alignment,
+        baseAlignment: args.baseAlignment ?? null,
+      }, null, 2)
       await writeFile(scenePath, data, 'utf8')
       return { ok: true }
     } catch (err: any) {
@@ -4806,15 +4855,49 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       if (args.renderVersionId && parsed.renderVersionId !== args.renderVersionId) {
         return { ok: false, error: 'Opgeslagen uitlijning hoort bij een andere archive-foto.' }
       }
-      const { alignment } = parsed
-      if (!alignment?.plyPath || !existsSync(alignment.plyPath)) {
-        return { ok: false, error: 'PLY bestand niet gevonden.' }
+      const { alignment, baseAlignment } = parsed
+      const decodeHupheFileUrl = (value: unknown): string | undefined => {
+        if (typeof value !== 'string' || !value) return undefined
+        if (value.startsWith('huphe://file/')) return decodeURIComponent(value.replace('huphe://file/', '').split('?')[0])
+        return value
       }
-      // Herconverteer altijd het PLY zodat het .splat up-to-date is met de huidige converter
-      const { plyToSplat } = await import('./lib/ply-to-splat')
-      const { splatPath } = await plyToSplat(alignment.plyPath)
-      const splatUrl = `huphe://file/${encodeURIComponent(splatPath)}`
-      return { ok: true, renderVersionId: parsed.renderVersionId ?? null, alignment: { ...alignment, splatUrl } }
+      const alignmentAny = alignment as Record<string, any> | undefined
+      const baseAlignmentAny = baseAlignment as Record<string, any> | undefined
+      const plyPath = decodeHupheFileUrl(alignmentAny?.plyPath)
+      const splatPathFromAlignment = decodeHupheFileUrl(alignmentAny?.splatPath) ?? decodeHupheFileUrl(alignmentAny?.splatUrl)
+      const spzPath = decodeHupheFileUrl(alignmentAny?.spzPath)
+      const isMarbleAlignment =
+        alignmentAny?.source === 'marble' ||
+        Boolean(spzPath?.endsWith('/world.spz')) ||
+        Boolean(splatPathFromAlignment && /\/world(_hq|_preview)?\.splat$/.test(splatPathFromAlignment))
+
+      if (plyPath && existsSync(plyPath)) {
+        // Herconverteer PLY/Brush altijd zodat het .splat up-to-date is met de huidige converter.
+        const { plyToSplat } = await import('./lib/ply-to-splat')
+        const { splatPath } = await plyToSplat(plyPath)
+        const splatUrl = `huphe://file/${encodeURIComponent(splatPath)}`
+        return {
+          ok: true,
+          renderVersionId: parsed.renderVersionId ?? null,
+          alignment: { ...alignmentAny, plyPath, splatUrl },
+          baseAlignment: baseAlignmentAny ? { ...baseAlignmentAny, splatUrl } : null,
+        }
+      }
+
+      if (isMarbleAlignment) {
+        if (!splatPathFromAlignment || !existsSync(splatPathFromAlignment)) {
+          return { ok: false, error: 'Marble .splat bestand niet gevonden.' }
+        }
+        const splatUrl = `huphe://file/${encodeURIComponent(splatPathFromAlignment)}`
+        return {
+          ok: true,
+          renderVersionId: parsed.renderVersionId ?? null,
+          alignment: { ...alignmentAny, splatUrl, spzPath },
+          baseAlignment: baseAlignmentAny ? { ...baseAlignmentAny, splatUrl, spzPath } : null,
+        }
+      }
+
+      return { ok: false, error: 'PLY bestand niet gevonden.' }
     } catch (err: any) {
       return { ok: false, error: err?.message }
     }
@@ -4905,6 +4988,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const { existsSync: fsExistsSync, statSync } = await import('fs')
 
       let operationId: string
+      let mediaAssetId: string | undefined
+      let marbleRoute: 'video' | 'image' = 'image'
 
       const orbitVideoPath = args.orbitRunId
         ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.orbitRunId, 'orbit.mp4')
@@ -4915,18 +5000,20 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
       if (hasOrbitVideo && videoSizeMb <= 100) {
         // ── Video route: orbit.mp4 direct naar Marble ───────────────────────
+        marbleRoute = 'video'
         pushStep(`Orbit video uploaden (${videoSizeMb.toFixed(0)} MB)...`, 12)
         const videoBuf = await rf(orbitVideoPath!)
         console.log(`[marble] video route: ${orbitVideoPath} (${videoSizeMb.toFixed(1)} MB)`)
-        const mediaAssetId = await marbleUploadVideo(apiKey, videoBuf, 'orbit.mp4')
+        mediaAssetId = await marbleUploadVideo(apiKey, videoBuf, 'orbit.mp4')
         console.log(`[marble] video media_asset_id=${mediaAssetId}`)
         pushStep('Video-generatie starten...', 20)
         operationId = await marbleGenerateFromVideo(apiKey, mediaAssetId, args.displayName, args.textPrompt, args.seed)
       } else {
         // ── Single-image fallback ────────────────────────────────────────────
+        marbleRoute = 'image'
         if (hasOrbitVideo) console.warn(`[marble] orbit.mp4 te groot (${videoSizeMb.toFixed(0)} MB > 100 MB) — fallback naar single image`)
         pushStep('Uploaden naar Marble...', 15)
-        const mediaAssetId = await marbleUpload(apiKey, imageBuffer, fileName, ext)
+        mediaAssetId = await marbleUpload(apiKey, imageBuffer, fileName, ext)
         console.log(`[marble] single-image media_asset_id=${mediaAssetId}`)
         pushStep('Genereren gestart...', 20)
         operationId = await marbleGenerate(apiKey, mediaAssetId, args.displayName, args.textPrompt, args.seed)
@@ -5016,13 +5103,38 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         pushStep('Klaar!', 95)
       }
 
-      // Sla meta op zodat checkOrbitVideo worldId kan herstellen na herstart
-      try { await wf(join(outDir, 'meta.json'), Buffer.from(JSON.stringify({ worldId: result.worldId }))) } catch {}
+      // Sla meta op zodat checkOrbitVideo de Marble-world hard aan deze render/video kan koppelen.
+      try {
+        await wf(join(outDir, 'meta.json'), Buffer.from(JSON.stringify({
+          version: 2,
+          savedAt: new Date().toISOString(),
+          projectId: args.projectId,
+          renderVersionId: args.renderVersionId ?? null,
+          orbitRunId: args.orbitRunId ?? null,
+          route: marbleRoute,
+          sourceImageFileName: fileName,
+          orbitVideoPath: marbleRoute === 'video' ? orbitVideoPath : null,
+          videoSizeMb: marbleRoute === 'video' ? videoSizeMb : null,
+          mediaAssetId,
+          operationId,
+          worldId: result.worldId,
+          spzPath,
+          splatPath,
+          thumbnailPath,
+          panoUrl: result.panoUrl,
+          metricScaleFactor: result.metricScaleFactor,
+          groundPlaneOffset: result.groundPlaneOffset,
+          totalCredits: result.totalCredits,
+        }, null, 2)))
+      } catch {}
 
       pushStep('Klaar!', 100)
       return {
         ok: true,
         worldId: result.worldId,
+        route: marbleRoute,
+        orbitRunId: args.orbitRunId,
+        renderVersionId: args.renderVersionId,
         spzPath,
         splatPath,
         thumbnailUrl: thumbnailPath ? `huphe://file/${encodeURIComponent(thumbnailPath)}` : undefined,

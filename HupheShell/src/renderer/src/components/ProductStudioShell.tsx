@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import * as THREE from 'three'
 import { SplatViewer } from './SplatViewer'
 import { notifyIfCreditsRequired } from '../lib/credits-required'
 import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview, type Scene3DSceneControls } from './Scene3DEditor'
@@ -180,10 +181,33 @@ type ProductStudioApi = {
   }) => Promise<any>
   finalizeBake: (args: { projectId: string }) => Promise<any>
   testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' | 'runpod-vggt' }) => Promise<any>
-  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any; sampleClayUrls?: string[] }>
+  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any; sampleClayUrls?: string[]; marble?: MarbleRunState | null }>
   loadSplat: (args?: { defaultDir?: string }) => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number; plyPath?: string }>
   getSplatPose: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
-  loadSceneAlignment: (args: { projectId: string; renderVersionId?: string }) => Promise<{ ok: boolean; renderVersionId?: string | null; alignment?: SplatAlignment; error?: string }>
+  saveSceneAlignment?: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown>; baseAlignment?: Record<string, unknown> | null }) => Promise<{ ok: boolean; error?: string }>
+  loadSceneAlignment: (args: { projectId: string; renderVersionId?: string }) => Promise<{ ok: boolean; renderVersionId?: string | null; alignment?: SplatAlignment; baseAlignment?: SplatAlignment | null; error?: string }>
+  marbleGenerate?: (args: { imageSrc: string; projectId: string; renderVersionId?: string; displayName?: string; textPrompt?: string; seed?: number; orbitRunId?: string }) => Promise<{ ok: boolean; error?: string } & MarbleRunState>
+  onMarbleStep?: (cb: (data: { step: string; progress: number }) => void) => () => void
+}
+
+interface MarbleRunState {
+  phase?: 'idle' | 'running' | 'done' | 'error'
+  step?: string
+  progress?: number
+  thumbnailUrl?: string
+  spzPath?: string
+  splatPath?: string
+  worldId?: string
+  route?: 'video' | 'image'
+  renderVersionId?: string | null
+  orbitRunId?: string | null
+  metricScaleFactor?: number
+  groundPlaneOffset?: number
+  thumbnailPath?: string
+  panoUrl?: string
+  colliderMeshUrl?: string
+  totalCredits?: number
+  error?: string
 }
 
 function getProductStudioApi(): ProductStudioApi | null {
@@ -552,6 +576,80 @@ function isMarbleSplatUrl(url: string): boolean {
   return url.includes('world_hq.splat') || url.includes('world_preview.splat') || url.includes('world.splat')
 }
 
+function finiteNumber(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function marbleGroupScale(metricScaleFactor: unknown): number {
+  const metric = finiteNumber(metricScaleFactor, 0)
+  if (metric <= 0) return 1
+  return Math.max(0.001, Math.min(100, 1 / metric))
+}
+
+function marbleGroundOffsetY(groundPlaneOffset: unknown, scale: number): number {
+  const ground = finiteNumber(groundPlaneOffset, 0)
+  return Number.isFinite(ground) ? -ground * scale : 0
+}
+
+function isMarbleAlignment(alignment: Partial<SplatAlignment> | null | undefined): boolean {
+  const url = alignment?.splatUrl ?? ''
+  return alignment?.source === 'marble' || isMarbleSplatUrl(url) || Boolean(alignment?.spzPath?.endsWith('/world.spz'))
+}
+
+const DEFAULT_BUBBLE_RADIUS = 3
+const DEFAULT_BUBBLE_FEATHER = 0.1
+
+function cloneSplatAlignment(alignment: SplatAlignment): SplatAlignment {
+  return {
+    ...alignment,
+    position: [...alignment.position] as [number, number, number],
+    quaternion: [...alignment.quaternion] as [number, number, number, number],
+    sceneCenter: [...alignment.sceneCenter] as [number, number, number],
+    transformPosition: alignment.transformPosition ? [...alignment.transformPosition] as [number, number, number] : undefined,
+    transformQuaternion: alignment.transformQuaternion ? [...alignment.transformQuaternion] as [number, number, number, number] : undefined,
+  }
+}
+
+function fallbackImportBaseAlignment(alignment: SplatAlignment): SplatAlignment {
+  const base = cloneSplatAlignment(alignment)
+  return {
+    ...base,
+    groupPositionX: 0,
+    groupPositionY: finiteNumber(base.groupPositionY, 0),
+    groupPositionZ: 0,
+    groupScale: 1,
+    groupMaskSize: 20,
+    groupMaskOffsetX: 0,
+    groupMaskOffsetY: 0,
+    groupMaskOffsetZ: 0,
+    groupTiltX: 0,
+    groupTiltZ: 0,
+    cleanupAlpha: 15,
+    cleanupScaleIqr: 3,
+    cleanupPosSigma: 4,
+    bubbleRadius: DEFAULT_BUBBLE_RADIUS,
+    bubbleFeather: DEFAULT_BUBBLE_FEATHER,
+  }
+}
+
+function manifestProductPosition(manifest: any): [number, number, number] | null {
+  const pos = manifest?.product?.position
+  if (Array.isArray(pos) && pos.length === 3) return [Number(pos[0]), Number(pos[1]), Number(pos[2])]
+  const min = manifest?.product?.worldBounds?.min
+  const max = manifest?.product?.worldBounds?.max
+  if (Array.isArray(min) && Array.isArray(max) && min.length === 3 && max.length === 3) {
+    return [
+      (Number(min[0]) + Number(max[0])) / 2,
+      (Number(min[1]) + Number(max[1])) / 2,
+      (Number(min[2]) + Number(max[2])) / 2,
+    ]
+  }
+  const target = manifest?.camera?.target
+  if (Array.isArray(target) && target.length === 3) return [Number(target[0]), Number(target[1]), Number(target[2])]
+  return null
+}
+
 export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   initialImageSrc?: string | null
   renderLayout?: (sidebar: React.ReactNode, viewport: React.ReactNode) => React.ReactNode
@@ -589,7 +687,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; renderVersionId?: string | null; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [assetsPrep, setAssetsPrep] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; sampleClayUrls?: string[]; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
-  const [marbleGen, setMarbleGen] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; thumbnailUrl?: string; spzPath?: string; splatPath?: string; worldId?: string; error?: string }>(() => {
+  const [marbleGen, setMarbleGen] = useState<MarbleRunState>(() => {
     try {
       const raw = localStorage.getItem('huphe:marble-gen:v1')
       if (raw) return JSON.parse(raw)
@@ -609,18 +707,44 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [splatVisible, setSplatVisible] = useState(true)
   const viewportShellRef = useRef<HTMLDivElement>(null)
 
+  const applySplatAlignment = (alignment: SplatAlignment, baseAlignment?: SplatAlignment | null) => {
+    const current = cloneSplatAlignment(alignment)
+    const base = baseAlignment ? cloneSplatAlignment(baseAlignment) : cloneSplatAlignment(alignment)
+    const safeCurrent = isMarbleAlignment(current) && current.splatToShot
+      ? applyMarbleBaseAlignment(current)
+      : current
+    const safeBase = isMarbleAlignment(base) && base.splatToShot
+      ? applyMarbleBaseAlignment(base)
+      : base
+    setSplatBaseAlignment(safeBase)
+    setSplatAlignment(safeCurrent)
+  }
+
+  const resetSplatAlignmentToBase = () => {
+    if (!splatBaseAlignment) return
+    setSplatAlignment(cloneSplatAlignment(splatBaseAlignment))
+  }
+
   const nudgeSplatAlignment = (dx: number, dy: number, dz = 0) => {
     setSplatAlignment((prev) => {
       if (!prev) return prev
+      const currentX = finiteNumber(prev.groupPositionX, 0)
+      const currentY = finiteNumber(prev.groupPositionY, 0)
+      const currentZ = finiteNumber(prev.groupPositionZ, 0)
+      const currentCenter = [
+        finiteNumber(prev.sceneCenter?.[0], 0),
+        finiteNumber(prev.sceneCenter?.[1], 0),
+        finiteNumber(prev.sceneCenter?.[2], 0),
+      ] as [number, number, number]
       return {
         ...prev,
-        groupPositionX: (prev.groupPositionX ?? 0) + dx,
-        groupPositionY: prev.groupPositionY + dy,
-        groupPositionZ: (prev.groupPositionZ ?? 0) + dz,
+        groupPositionX: currentX + dx,
+        groupPositionY: currentY + dy,
+        groupPositionZ: currentZ + dz,
         sceneCenter: [
-          prev.sceneCenter[0] + dx,
-          prev.sceneCenter[1] + dy,
-          prev.sceneCenter[2] + dz,
+          currentCenter[0] + dx,
+          currentCenter[1] + dy,
+          currentCenter[2] + dz,
         ],
       }
     })
@@ -629,22 +753,28 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const setSplatAlignmentAxis = (axis: 'x' | 'y' | 'z', value: number) => {
     setSplatAlignment((prev) => {
       if (!prev) return prev
-      const currentX = prev.groupPositionX ?? 0
-      const currentY = prev.groupPositionY
-      const currentZ = prev.groupPositionZ ?? 0
-      const dx = axis === 'x' ? value - currentX : 0
-      const dy = axis === 'y' ? value - currentY : 0
-      const dz = axis === 'z' ? value - currentZ : 0
+      const safeValue = finiteNumber(value, 0)
+      const currentX = finiteNumber(prev.groupPositionX, 0)
+      const currentY = finiteNumber(prev.groupPositionY, 0)
+      const currentZ = finiteNumber(prev.groupPositionZ, 0)
+      const currentCenter = [
+        finiteNumber(prev.sceneCenter?.[0], 0),
+        finiteNumber(prev.sceneCenter?.[1], 0),
+        finiteNumber(prev.sceneCenter?.[2], 0),
+      ] as [number, number, number]
+      const dx = axis === 'x' ? safeValue - currentX : 0
+      const dy = axis === 'y' ? safeValue - currentY : 0
+      const dz = axis === 'z' ? safeValue - currentZ : 0
 
       return {
         ...prev,
-        groupPositionX: axis === 'x' ? value : currentX,
-        groupPositionY: axis === 'y' ? value : currentY,
-        groupPositionZ: axis === 'z' ? value : currentZ,
+        groupPositionX: axis === 'x' ? safeValue : currentX,
+        groupPositionY: axis === 'y' ? safeValue : currentY,
+        groupPositionZ: axis === 'z' ? safeValue : currentZ,
         sceneCenter: [
-          prev.sceneCenter[0] + dx,
-          prev.sceneCenter[1] + dy,
-          prev.sceneCenter[2] + dz,
+          currentCenter[0] + dx,
+          currentCenter[1] + dy,
+          currentCenter[2] + dz,
         ],
       }
     })
@@ -655,8 +785,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       if (!prev) return prev
       return {
         ...prev,
-        groupTiltX: axis === 'x' ? value : (prev.groupTiltX ?? 0),
-        groupTiltZ: axis === 'z' ? value : (prev.groupTiltZ ?? 0),
+        groupTiltX: axis === 'x' ? finiteNumber(value, 0) : finiteNumber(prev.groupTiltX, 0),
+        groupTiltZ: axis === 'z' ? finiteNumber(value, 0) : finiteNumber(prev.groupTiltZ, 0),
       }
     })
   }
@@ -680,9 +810,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     try {
       const result = await api.reconvertSplat?.({
         plyPath: splatAlignment.plyPath,
-        alphaThreshold: splatAlignment.cleanupAlpha ?? 15,
-        scaleIqrFactor: splatAlignment.cleanupScaleIqr ?? 3,
-        positionSigma: splatAlignment.cleanupPosSigma ?? 4,
+        alphaThreshold: finiteNumber(splatAlignment.cleanupAlpha, 15),
+        scaleIqrFactor: finiteNumber(splatAlignment.cleanupScaleIqr, 3),
+        positionSigma: finiteNumber(splatAlignment.cleanupPosSigma, 4),
       })
       if (result?.ok && result.splatUrl) {
         setSplatAlignment((prev) => prev ? { ...prev, splatUrl: result.splatUrl } : prev)
@@ -693,13 +823,87 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }
 
   const setSplatMaskOffset = (axis: 'x' | 'y' | 'z', value: number) => {
-    const safeValue = Number.isFinite(value) ? value : 0
+    const safeValue = finiteNumber(value, 0)
     setSplatAlignment((prev) => prev ? {
       ...prev,
-      groupMaskOffsetX: axis === 'x' ? safeValue : (prev.groupMaskOffsetX ?? 0),
-      groupMaskOffsetY: axis === 'y' ? safeValue : (prev.groupMaskOffsetY ?? 0),
-      groupMaskOffsetZ: axis === 'z' ? safeValue : (prev.groupMaskOffsetZ ?? 0),
+      groupMaskOffsetX: axis === 'x' ? safeValue : finiteNumber(prev.groupMaskOffsetX, 0),
+      groupMaskOffsetY: axis === 'y' ? safeValue : finiteNumber(prev.groupMaskOffsetY, 0),
+      groupMaskOffsetZ: axis === 'z' ? safeValue : finiteNumber(prev.groupMaskOffsetZ, 0),
     } : prev)
+  }
+
+  const applySplatToShotTransform = (alignment: SplatAlignment): SplatAlignment => {
+    const manifest = renderManifestRef.current as any
+    const cameraPos = manifest?.camera?.position
+    const cameraTarget = manifest?.camera?.target
+    const productPos = manifestProductPosition(manifest)
+    if (!Array.isArray(cameraPos) || !Array.isArray(cameraTarget) || !productPos) return alignment
+
+    const shotCamera = new THREE.Vector3(Number(cameraPos[0]), Number(cameraPos[1]), Number(cameraPos[2]))
+    const shotTarget = new THREE.Vector3(Number(cameraTarget[0]), Number(cameraTarget[1]), Number(cameraTarget[2]))
+    const shotObject = new THREE.PerspectiveCamera()
+    shotObject.position.copy(shotCamera)
+    shotObject.up.set(0, 1, 0)
+    shotObject.lookAt(shotTarget)
+    shotObject.updateMatrixWorld()
+
+    const colmapCamera = new THREE.Vector3(...alignment.position)
+    const colmapCenter = new THREE.Vector3(...alignment.sceneCenter)
+    const sceneCenter = new THREE.Vector3(...productPos)
+    const colmapDistance = colmapCamera.distanceTo(colmapCenter)
+    const sceneDistance = shotCamera.distanceTo(sceneCenter)
+    const transformScale = colmapDistance > 1e-5 && sceneDistance > 1e-5
+      ? Math.max(0.001, Math.min(100, sceneDistance / colmapDistance))
+      : 1
+
+    const colmapQuat = new THREE.Quaternion(
+      alignment.quaternion[0],
+      alignment.quaternion[1],
+      alignment.quaternion[2],
+      alignment.quaternion[3],
+    ).normalize()
+    const transformQuat = shotObject.quaternion.clone().multiply(colmapQuat.clone().invert()).normalize()
+    const transformedColmapCamera = colmapCamera.clone().applyQuaternion(transformQuat).multiplyScalar(transformScale)
+    const transformPosition = shotCamera.clone().sub(transformedColmapCamera)
+
+    return {
+      ...alignment,
+      splatToShot: true,
+      transformPosition: [transformPosition.x, transformPosition.y, transformPosition.z],
+      transformQuaternion: [transformQuat.x, transformQuat.y, transformQuat.z, transformQuat.w],
+      transformScale,
+      basisRotationY: 0,
+      groupPositionX: finiteNumber(alignment.groupPositionX, 0),
+      groupPositionY: finiteNumber(alignment.groupPositionY, 0),
+      groupPositionZ: finiteNumber(alignment.groupPositionZ, 0),
+      groupScale: finiteNumber(alignment.groupScale, 1),
+    }
+  }
+
+  const applyMarbleBaseAlignment = (alignment: SplatAlignment): SplatAlignment => {
+    const groupScale = marbleGroupScale(alignment.metricScaleFactor)
+    const groupPositionY = marbleGroundOffsetY(alignment.groundPlaneOffset, groupScale)
+    return {
+      ...alignment,
+      source: 'marble',
+      splatToShot: false,
+      transformPosition: undefined,
+      transformQuaternion: undefined,
+      transformScale: undefined,
+      basisRotationY: Math.PI / 2,
+      groupPositionX: 0,
+      groupPositionY,
+      groupPositionZ: 0,
+      groupScale,
+      groupTiltX: 0,
+      groupTiltZ: 0,
+      sceneCenter: alignment.sceneCenter ?? [0, 0, 0],
+      position: alignment.position ?? [0, 1.5, 4],
+      quaternion: alignment.quaternion ?? [0, 0, 0, 1],
+      fovY: alignment.fovY ?? 60,
+      width: alignment.width ?? 1920,
+      height: alignment.height ?? 1080,
+    }
   }
 
   const [splatPuntMode, setSplatPuntMode] = useState<'off' | 'foto' | 'scene'>('off')
@@ -805,7 +1009,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const saveSceneAlignment = (alignment: SplatAlignment, renderVersionId?: string) => {
     const api = getProductStudioApi()
     if (!api || !project.backendProject?.id || !renderVersionId) return
-    api.saveSceneAlignment?.({ projectId: project.backendProject.id, renderVersionId, alignment: alignment as unknown as Record<string, unknown> })
+    api.saveSceneAlignment?.({
+      projectId: project.backendProject.id,
+      renderVersionId,
+      alignment: alignment as unknown as Record<string, unknown>,
+      baseAlignment: (splatBaseAlignment ?? alignment) as unknown as Record<string, unknown>,
+    })
       .catch((e: unknown) => console.warn('[scene.json] opslaan mislukt:', e))
   }
 
@@ -825,9 +1034,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         projectId,
         renderVersionId,
         alignment: res.alignment as unknown as Record<string, unknown>,
+        baseAlignment: (res.baseAlignment ?? fallbackImportBaseAlignment(res.alignment)) as unknown as Record<string, unknown>,
       })
-      setSplatAlignment(res.alignment)
-      setSplatBaseAlignment(res.alignment)
+      applySplatAlignment(res.alignment, res.baseAlignment ?? fallbackImportBaseAlignment(res.alignment))
     } catch (e) {
       console.warn('[scene.json] legacy uitlijning koppelen mislukt:', e)
     }
@@ -852,7 +1061,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         return
       }
       // Auto-load het PLY + COLMAP pose in de scene
-      const nextAlignment: SplatAlignment = {
+      const nextAlignment: SplatAlignment = applySplatToShotTransform({
         splatUrl: result.splatUrl,
         plyPath: result.plyPath,
         ...(result.pose ?? {
@@ -871,10 +1080,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         cleanupAlpha: 15,
         cleanupScaleIqr: 3,
         cleanupPosSigma: 4,
-      }
+        bubbleRadius: DEFAULT_BUBBLE_RADIUS,
+        bubbleFeather: DEFAULT_BUBBLE_FEATHER,
+      })
       setSplatViewerUrl(null)
-      setSplatBaseAlignment(nextAlignment)
-      setSplatAlignment(nextAlignment)
+      applySplatAlignment(nextAlignment, nextAlignment)
       saveSceneAlignment(nextAlignment, renderVersionId)
       setSplatTraining({ phase: 'done', step: 'Training klaar!', progress: 100 })
     } catch (err: any) {
@@ -884,7 +1094,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
   const startMarbleGenerate = async () => {
     const api = getProductStudioApi()
-    if (!api || !project.backendProject?.id) return
+    if (!api || !api.marbleGenerate || !project.backendProject?.id) return
     const imageSrc = project.finalRenderRecord?.output_url ?? project.finalRender?.src
     if (!imageSrc) return
     setMarbleGen({ phase: 'running', step: 'Starten...', progress: 0 })
@@ -904,7 +1114,22 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         setMarbleGen({ phase: 'error', step: result.error ?? 'Mislukt', progress: 0, error: result.error })
         return
       }
-      setMarbleGen({ phase: 'done', step: 'Klaar!', progress: 100, thumbnailUrl: result.thumbnailUrl, spzPath: result.spzPath, splatPath: result.splatPath, worldId: result.worldId })
+      setMarbleGen({
+        phase: 'done',
+        step: 'Klaar!',
+        progress: 100,
+        thumbnailUrl: result.thumbnailUrl,
+        spzPath: result.spzPath,
+        splatPath: result.splatPath,
+        worldId: result.worldId,
+        route: result.route,
+        renderVersionId: result.renderVersionId ?? project.finalRenderRecord?.id ?? null,
+        orbitRunId: result.orbitRunId ?? orbitTest.orbitRunId ?? null,
+        metricScaleFactor: result.metricScaleFactor,
+        groundPlaneOffset: result.groundPlaneOffset,
+        panoUrl: result.panoUrl,
+        totalCredits: result.totalCredits,
+      })
     } catch (err: any) {
       setMarbleGen({ phase: 'error', step: err?.message ?? 'Mislukt', progress: 0, error: err?.message })
     } finally {
@@ -918,24 +1143,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     try { localStorage.setItem('huphe:marble-gen:v1', JSON.stringify(marbleGen)) } catch { /* ignore */ }
   }, [marbleGen])
 
-  // Marble wereld als achtergrond via splatAlignment (enkel WebGL-context, binnen R3F)
-  useEffect(() => {
-    if (!marbleGen.splatPath) return
-    const splatUrl = `huphe://file/${encodeURIComponent(marbleGen.splatPath)}`
-    setSplatAlignment((prev) => {
-      // Behoud custom alignment (niet een marble-bestand).
-      // Gebruik bestandsnamen want de URL is encoded; /marble/ wordt %2Fmarble%2F.
-      if (prev && !isMarbleSplatUrl(prev.splatUrl)) return prev
-      return {
-        splatUrl,
-        position: [0, 1.5, 4] as [number, number, number],
-        quaternion: [0, 0, 0, 1] as [number, number, number, number],
-        fovY: 60, width: 1920, height: 1080,
-        sceneCenter: [0, 0, 0] as [number, number, number],
-        groupPositionY: 0,
-      }
-    })
-  }, [marbleGen.splatPath])
+  // (Geen auto-load meer: marble wordt alleen geladen via restoreRenderState bij archive-klik)
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -988,24 +1196,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         if (res.marble?.spzPath) {
           setMarbleGen((prev) => {
             if (prev.phase === 'done' && prev.spzPath === res.marble!.spzPath && prev.splatPath === res.marble!.splatPath) return prev
-            return { phase: 'done', step: 'Klaar!', progress: 100, spzPath: res.marble!.spzPath, splatPath: res.marble!.splatPath, worldId: res.marble!.worldId }
+            return {
+              phase: 'done',
+              step: 'Klaar!',
+              progress: 100,
+              spzPath: res.marble!.spzPath,
+              splatPath: res.marble!.splatPath,
+              worldId: res.marble!.worldId,
+              route: res.marble!.route,
+              renderVersionId: res.marble!.renderVersionId ?? renderVersionId ?? null,
+              orbitRunId: res.marble!.orbitRunId ?? res.orbitRunId ?? null,
+              metricScaleFactor: res.marble!.metricScaleFactor,
+              groundPlaneOffset: res.marble!.groundPlaneOffset,
+              panoUrl: res.marble!.panoUrl,
+              totalCredits: res.marble!.totalCredits,
+            }
           })
-          // Stel splatAlignment direct in als die leeg is (bijv. na archive-switch waarbij het
-          // splatPath niet veranderd is en de useEffect dus niet opnieuw vuurt).
-          if (res.marble.splatPath) {
-            const marbleSplatUrl = `huphe://file/${encodeURIComponent(res.marble.splatPath)}`
-            setSplatAlignment((prev) => {
-              if (prev !== null) return prev  // loadSceneAlignment of custom alignment al aanwezig
-              return {
-                splatUrl: marbleSplatUrl,
-                position: [0, 1.5, 4] as [number, number, number],
-                quaternion: [0, 0, 0, 1] as [number, number, number, number],
-                fovY: 60, width: 1920, height: 1080,
-                sceneCenter: [0, 0, 0] as [number, number, number],
-                groupPositionY: 0,
-              }
-            })
-          }
+          // splatAlignment wordt geladen via restoreRenderState (niet hier), zodat de marble
+          // niet automatisch verschijnt bij project-open.
         }
       } else {
         setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
@@ -1019,11 +1227,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const api = getProductStudioApi()
     if (!api) return
     const tid = setTimeout(() => {
-      api.saveSceneAlignment?.({ projectId: project.backendProject!.id, renderVersionId: project.finalRenderRecord?.id, alignment: splatAlignment as unknown as Record<string, unknown> })
+      api.saveSceneAlignment?.({
+        projectId: project.backendProject!.id,
+        renderVersionId: project.finalRenderRecord?.id,
+        alignment: splatAlignment as unknown as Record<string, unknown>,
+        baseAlignment: (splatBaseAlignment ?? fallbackImportBaseAlignment(splatAlignment)) as unknown as Record<string, unknown>,
+      })
         .catch((e: unknown) => console.warn('[scene.json] auto-save mislukt:', e))
     }, 1500)
     return () => clearTimeout(tid)
-  }, [splatAlignment, project.backendProject?.id, project.finalRenderRecord?.id])
+  }, [splatAlignment, splatBaseAlignment, project.backendProject?.id, project.finalRenderRecord?.id])
 
   const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number; fovScale?: number } | null>(null)
   // Per-version local cache: model transform per archive photo (session only)
@@ -2228,6 +2441,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       }
     }
     activeArchiveVersionId.current = version.id
+    // Wis huidige marble direct — wordt hersteld door loadSceneAlignment of expliciete checkOrbitVideo
+    setSplatAlignment(null)
+    setSplatBaseAlignment(null)
     setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId: version.id })
     setSplatTraining({ phase: 'idle', step: '', progress: 0 })
     setOrbitVideoExpanded(false)
@@ -2319,23 +2535,56 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const depthSource = (version.background_plate_url ?? version.output_url) as string
       if (depthSource) triggerAiDepthExtraction(depthSource)
 
-      // Laad splat alleen als deze archieffoto gekoppeld is aan de getrainde 3D omgeving
+      // Laad splat alleen als deze archieffoto gekoppeld is aan de getrainde 3D omgeving.
+      // Gebruik expliciete IPC-calls (niet het reactieve checkOrbitVideo-effect) want dat effect
+      // vuurt niet opnieuw als de renderVersionId niet veranderd is (zelfde foto als huidig project).
       const projectId = project.backendProject?.id
       if (projectId) {
         const splatApi = getProductStudioApi()
         splatApi?.loadSceneAlignment?.({ projectId, renderVersionId: version.id }).then((res) => {
           if (res?.ok && res.alignment?.splatUrl && res.renderVersionId === version.id) {
-            // Opgeslagen alignment gevonden — altijd toepassen (overschrijft marble-default)
-            setSplatAlignment(res.alignment)
-            setSplatBaseAlignment(res.alignment)
+            // Opgeslagen alignment gevonden — altijd toepassen
+            applySplatAlignment(res.alignment, res.baseAlignment ?? fallbackImportBaseAlignment(res.alignment))
           } else {
             setSplatBaseAlignment(null)
-            // Geen opgeslagen alignment. Zet alleen null als checkOrbitVideo nog geen marble
-            // heeft ingesteld — anders bewaar de marble-alignment die al geladen is.
-            setSplatAlignment((prev) => {
-              if (prev !== null && isMarbleSplatUrl(prev.splatUrl)) return prev
-              return null
-            })
+            setSplatAlignment(null)
+            // Geen opgeslagen alignment — controleer of dit orbit-versie een marble heeft.
+            // checkOrbitVideo is al uitgevoerd door het reactieve effect, maar dat
+            // effect kan niet opnieuw vuren als de version-ID niet veranderd is.
+            // Vandaar expliciete call hier.
+            splatApi?.checkOrbitVideo?.({ projectId, renderVersionId: version.id, model: orbitModel }).then((orbitRes) => {
+              if (orbitRes?.marble?.splatPath) {
+                const marbleSplatUrl = `huphe://file/${encodeURIComponent(orbitRes.marble.splatPath)}`
+                const groupScale = marbleGroupScale(orbitRes.marble.metricScaleFactor)
+                const groupPositionY = marbleGroundOffsetY(orbitRes.marble.groundPlaneOffset, groupScale)
+                const nextAlignment: SplatAlignment = {
+                  splatUrl: marbleSplatUrl,
+                  spzPath: orbitRes.marble.spzPath,
+                  source: 'marble',
+                  renderVersionId: version.id,
+                  orbitRunId: orbitRes.marble.orbitRunId ?? orbitRes.orbitRunId ?? undefined,
+                  worldId: orbitRes.marble.worldId,
+                  route: orbitRes.marble.route,
+                  metricScaleFactor: orbitRes.marble.metricScaleFactor,
+                  groundPlaneOffset: orbitRes.marble.groundPlaneOffset,
+                  marbleMeta: {
+                    panoUrl: orbitRes.marble.panoUrl,
+                    colliderMeshUrl: orbitRes.marble.colliderMeshUrl,
+                    totalCredits: orbitRes.marble.totalCredits,
+                  },
+                  position: [0, 1.5, 4] as [number, number, number],
+                  quaternion: [0, 0, 0, 1] as [number, number, number, number],
+                  fovY: 60, width: 1920, height: 1080,
+                  sceneCenter: [0, 0, 0] as [number, number, number],
+                  groupPositionY,
+                  groupScale,
+                  bubbleRadius: DEFAULT_BUBBLE_RADIUS,
+                  bubbleFeather: DEFAULT_BUBBLE_FEATHER,
+                }
+                setSplatBaseAlignment((prev) => prev ?? cloneSplatAlignment(nextAlignment))
+                setSplatAlignment((prev) => prev ?? nextAlignment) // loadSceneAlignment al ingesteld
+              }
+            }).catch(() => {})
           }
         }).catch(() => {})
       }
@@ -3288,11 +3537,38 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               onClick={async () => {
                 const api = getProductStudioApi()
                 if (!api || !project.backendProject?.id) return
-                const defaultDir = splatAlignment?.plyPath
-                  ? splatAlignment.plyPath.replace(/\/[^/]+$/, '')
-                  : undefined
-                const splatResult = await api.loadSplat({ defaultDir })
-                if (!splatResult.ok || !splatResult.splatUrl) return
+                let currentSplatUrl = splatAlignment?.splatUrl
+                let currentPlyPath = splatAlignment?.plyPath
+                let currentSpzPath = splatAlignment?.spzPath
+                let currentSource = splatAlignment?.source
+                let localFloorY = 0
+
+                // Fallback voor lege state: alleen dan een bestand kiezen.
+                if (!currentSplatUrl) {
+                  const defaultDir = splatAlignment?.plyPath
+                    ? splatAlignment.plyPath.replace(/\/[^/]+$/, '')
+                    : undefined
+                  const splatResult = await api.loadSplat({ defaultDir })
+                  if (!splatResult.ok || !splatResult.splatUrl) return
+                  currentSplatUrl = splatResult.splatUrl
+                  currentPlyPath = splatResult.plyPath
+                  localFloorY = splatResult.localFloorY ?? 0
+                  currentSource = 'manual'
+                }
+
+                if (splatAlignment && isMarbleAlignment({ ...splatAlignment, splatUrl: currentSplatUrl })) {
+                  const nextAlignment = applyMarbleBaseAlignment({
+                    ...splatAlignment,
+                    splatUrl: currentSplatUrl,
+                    plyPath: currentPlyPath,
+                    spzPath: currentSpzPath,
+                    source: 'marble',
+                  })
+                  setSplatViewerUrl(null)
+                  applySplatAlignment(nextAlignment, nextAlignment)
+                  return
+                }
+
                 const poseResult = await api.getSplatPose({
                   projectId: project.backendProject.id,
                   orbitRunId: orbitBelongsToCurrentRender ? orbitTest.orbitRunId : undefined,
@@ -3302,24 +3578,34 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   console.error('[splatAlignment] pose ophalen mislukt:', poseResult.error)
                   return
                 }
-                const localFloorY = splatResult.localFloorY ?? 0
-                const nextAlignment: SplatAlignment = {
-                  splatUrl: splatResult.splatUrl,
+                const nextAlignment: SplatAlignment = applySplatToShotTransform({
+                  splatUrl: currentSplatUrl,
+                  plyPath: currentPlyPath,
+                  spzPath: currentSpzPath,
+                  source: currentSource,
+                  renderVersionId: splatAlignment?.renderVersionId ?? project.finalRenderRecord?.id,
+                  orbitRunId: splatAlignment?.orbitRunId ?? orbitTest.orbitRunId ?? undefined,
+                  worldId: splatAlignment?.worldId,
+                  route: splatAlignment?.route,
+                  metricScaleFactor: splatAlignment?.metricScaleFactor,
+                  groundPlaneOffset: splatAlignment?.groundPlaneOffset,
+                  marbleMeta: splatAlignment?.marbleMeta,
                   ...poseResult.pose,
                   groupPositionX: poseResult.pose.groupPositionX ?? 0,
                   groupPositionY: (poseResult.pose.groupPositionY ?? 0) - localFloorY,
                   groupPositionZ: poseResult.pose.groupPositionZ ?? 0,
                   groupScale: poseResult.pose.groupScale ?? 1,
                   groupMaskSize: poseResult.pose.groupMaskSize ?? 20,
+                  bubbleRadius: poseResult.pose.bubbleRadius ?? DEFAULT_BUBBLE_RADIUS,
+                  bubbleFeather: poseResult.pose.bubbleFeather ?? DEFAULT_BUBBLE_FEATHER,
                   sceneCenter: [
                     poseResult.pose.sceneCenter[0],
                     poseResult.pose.sceneCenter[1] - localFloorY,
                     poseResult.pose.sceneCenter[2],
                   ],
-                }
+                })
                 setSplatViewerUrl(null)
-                setSplatBaseAlignment(nextAlignment)
-                setSplatAlignment(nextAlignment)
+                applySplatAlignment(nextAlignment, nextAlignment)
               }}
               className="mt-1.5 w-full rounded-md border border-sky-400/25 bg-sky-500/10 py-1.5 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20"
             >
@@ -3337,17 +3623,18 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                     </div>
                     <button
                       type="button"
-                      onClick={() => splatBaseAlignment && setSplatAlignment(splatBaseAlignment)}
-                      className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] font-medium text-white/45 hover:bg-white/[0.06] hover:text-white/70"
+                      onClick={resetSplatAlignmentToBase}
+                      disabled={!splatBaseAlignment}
+                      className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] font-medium text-white/45 hover:bg-white/[0.06] hover:text-white/70 disabled:cursor-not-allowed disabled:opacity-35"
                     >
                       Reset
                     </button>
                   </div>
                   <div className="mt-3 space-y-2.5">
                     {([
-                      { axis: 'x' as const, label: 'X', value: splatAlignment.groupPositionX ?? 0 },
-                      { axis: 'y' as const, label: 'Y', value: splatAlignment.groupPositionY },
-                      { axis: 'z' as const, label: 'Z', value: splatAlignment.groupPositionZ ?? 0 },
+                      { axis: 'x' as const, label: 'X', value: finiteNumber(splatAlignment.groupPositionX, 0) },
+                      { axis: 'y' as const, label: 'Y', value: finiteNumber(splatAlignment.groupPositionY, 0) },
+                      { axis: 'z' as const, label: 'Z', value: finiteNumber(splatAlignment.groupPositionZ, 0) },
                     ]).map((control) => (
                       <div key={control.axis} className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
                         <span className="text-[10px] font-semibold text-white/45">{control.label}</span>
@@ -3357,14 +3644,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                           max="10"
                           step="0.01"
                           value={control.value}
-                          onChange={(event) => setSplatAlignmentAxis(control.axis, Number(event.currentTarget.value))}
+                          onChange={(event) => setSplatAlignmentAxis(control.axis, finiteNumber(event.currentTarget.value, 0))}
                           className="h-1.5 w-full accent-[#facc15]"
                         />
                         <input
                           type="number"
                           step="0.01"
-                          value={Number(control.value.toFixed(2))}
-                          onChange={(event) => setSplatAlignmentAxis(control.axis, Number(event.currentTarget.value || 0))}
+                          value={Number(finiteNumber(control.value, 0).toFixed(2))}
+                          onChange={(event) => setSplatAlignmentAxis(control.axis, finiteNumber(event.currentTarget.value, 0))}
                           className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-[#facc15]/40"
                         />
                       </div>
@@ -3377,16 +3664,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                       min="0.2"
                       max="3"
                       step="0.01"
-                      value={splatAlignment.groupScale ?? 1}
-                      onChange={(event) => setSplatScale(Number(event.currentTarget.value))}
+                      value={finiteNumber(splatAlignment.groupScale, 1)}
+                      onChange={(event) => setSplatScale(finiteNumber(event.currentTarget.value, 1))}
                       className="h-1.5 w-full accent-[#facc15]"
                     />
                     <input
                       type="number"
                       min="0.1"
                       step="0.01"
-                      value={Number((splatAlignment.groupScale ?? 1).toFixed(2))}
-                      onChange={(event) => setSplatScale(Number(event.currentTarget.value || 1))}
+                      value={Number(finiteNumber(splatAlignment.groupScale, 1).toFixed(2))}
+                      onChange={(event) => setSplatScale(finiteNumber(event.currentTarget.value, 1))}
                       className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-[#facc15]/40"
                     />
                   </div>
@@ -3397,25 +3684,25 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                       min="0.5"
                       max="30"
                       step="0.1"
-                      value={splatAlignment.groupMaskSize ?? 20}
-                      onChange={(event) => setSplatMaskSize(Number(event.currentTarget.value))}
+                      value={finiteNumber(splatAlignment.groupMaskSize, 20)}
+                      onChange={(event) => setSplatMaskSize(finiteNumber(event.currentTarget.value, 20))}
                       className="h-1.5 w-full accent-emerald-400"
                     />
                     <input
                       type="number"
                       min="0.2"
                       step="0.1"
-                      value={Number((splatAlignment.groupMaskSize ?? 20).toFixed(1))}
-                      onChange={(event) => setSplatMaskSize(Number(event.currentTarget.value || 20))}
+                      value={Number(finiteNumber(splatAlignment.groupMaskSize, 20).toFixed(1))}
+                      onChange={(event) => setSplatMaskSize(finiteNumber(event.currentTarget.value, 20))}
                       className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-emerald-400/40"
                     />
                   </div>
                   <p className="mt-3 text-[10px] font-semibold text-white/40">Masker verschuiven</p>
                   <div className="mt-1.5 space-y-2.5">
                     {([
-                      { axis: 'x' as const, label: 'L/R', title: 'Links/rechts', value: splatAlignment.groupMaskOffsetX ?? 0 },
-                      { axis: 'y' as const, label: 'H', title: 'Hoogte', value: splatAlignment.groupMaskOffsetY ?? 0 },
-                      { axis: 'z' as const, label: 'V/A', title: 'Voor/achter', value: splatAlignment.groupMaskOffsetZ ?? 0 },
+                      { axis: 'x' as const, label: 'L/R', title: 'Links/rechts', value: finiteNumber(splatAlignment.groupMaskOffsetX, 0) },
+                      { axis: 'y' as const, label: 'H', title: 'Hoogte', value: finiteNumber(splatAlignment.groupMaskOffsetY, 0) },
+                      { axis: 'z' as const, label: 'V/A', title: 'Voor/achter', value: finiteNumber(splatAlignment.groupMaskOffsetZ, 0) },
                     ]).map((control) => (
                       <div key={control.axis} className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
                         <span className="text-[10px] font-semibold text-white/45" title={control.title}>{control.label}</span>
@@ -3425,14 +3712,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                           max="10"
                           step="0.05"
                           value={control.value}
-                          onChange={(event) => setSplatMaskOffset(control.axis, Number(event.currentTarget.value))}
+                          onChange={(event) => setSplatMaskOffset(control.axis, finiteNumber(event.currentTarget.value, 0))}
                           className="h-1.5 w-full accent-emerald-400"
                         />
                         <input
                           type="number"
                           step="0.05"
-                          value={Number(control.value.toFixed(2))}
-                          onChange={(event) => setSplatMaskOffset(control.axis, Number(event.currentTarget.value || 0))}
+                          value={Number(finiteNumber(control.value, 0).toFixed(2))}
+                          onChange={(event) => setSplatMaskOffset(control.axis, finiteNumber(event.currentTarget.value, 0))}
                           className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-emerald-400/40"
                         />
                       </div>
@@ -3449,8 +3736,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                             min="0"
                             max="80"
                             step="1"
-                            value={splatAlignment.cleanupAlpha ?? 15}
-                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupAlpha: Number(e.currentTarget.value) } : prev)}
+                            value={finiteNumber(splatAlignment.cleanupAlpha, 15)}
+                            onChange={(e) => {
+                              const value = finiteNumber(e.currentTarget.value, 15)
+                              setSplatAlignment((prev) => prev ? { ...prev, cleanupAlpha: value } : prev)
+                            }}
                             className="h-1.5 w-full accent-violet-400"
                           />
                           <input
@@ -3458,8 +3748,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                             min="0"
                             max="255"
                             step="1"
-                            value={splatAlignment.cleanupAlpha ?? 15}
-                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupAlpha: Number(e.currentTarget.value || 15) } : prev)}
+                            value={finiteNumber(splatAlignment.cleanupAlpha, 15)}
+                            onChange={(e) => {
+                              const value = finiteNumber(e.currentTarget.value, 15)
+                              setSplatAlignment((prev) => prev ? { ...prev, cleanupAlpha: value } : prev)
+                            }}
                             className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-violet-400/40"
                           />
                         </div>
@@ -3470,16 +3763,22 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                             min="1"
                             max="10"
                             step="0.5"
-                            value={splatAlignment.cleanupScaleIqr ?? 3}
-                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupScaleIqr: Number(e.currentTarget.value) } : prev)}
+                            value={finiteNumber(splatAlignment.cleanupScaleIqr, 3)}
+                            onChange={(e) => {
+                              const value = finiteNumber(e.currentTarget.value, 3)
+                              setSplatAlignment((prev) => prev ? { ...prev, cleanupScaleIqr: value } : prev)
+                            }}
                             className="h-1.5 w-full accent-violet-400"
                           />
                           <input
                             type="number"
                             min="0.5"
                             step="0.5"
-                            value={splatAlignment.cleanupScaleIqr ?? 3}
-                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupScaleIqr: Number(e.currentTarget.value || 3) } : prev)}
+                            value={finiteNumber(splatAlignment.cleanupScaleIqr, 3)}
+                            onChange={(e) => {
+                              const value = finiteNumber(e.currentTarget.value, 3)
+                              setSplatAlignment((prev) => prev ? { ...prev, cleanupScaleIqr: value } : prev)
+                            }}
                             className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-violet-400/40"
                           />
                         </div>
@@ -3490,16 +3789,22 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                             min="1"
                             max="8"
                             step="0.5"
-                            value={splatAlignment.cleanupPosSigma ?? 4}
-                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupPosSigma: Number(e.currentTarget.value) } : prev)}
+                            value={finiteNumber(splatAlignment.cleanupPosSigma, 4)}
+                            onChange={(e) => {
+                              const value = finiteNumber(e.currentTarget.value, 4)
+                              setSplatAlignment((prev) => prev ? { ...prev, cleanupPosSigma: value } : prev)
+                            }}
                             className="h-1.5 w-full accent-violet-400"
                           />
                           <input
                             type="number"
                             min="0.5"
                             step="0.5"
-                            value={splatAlignment.cleanupPosSigma ?? 4}
-                            onChange={(e) => setSplatAlignment((prev) => prev ? { ...prev, cleanupPosSigma: Number(e.currentTarget.value || 4) } : prev)}
+                            value={finiteNumber(splatAlignment.cleanupPosSigma, 4)}
+                            onChange={(e) => {
+                              const value = finiteNumber(e.currentTarget.value, 4)
+                              setSplatAlignment((prev) => prev ? { ...prev, cleanupPosSigma: value } : prev)
+                            }}
                             className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-violet-400/40"
                           />
                         </div>
@@ -3517,8 +3822,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   <p className="mt-3 text-[10px] font-semibold text-white/40">Kanteling</p>
                   <div className="mt-1.5 space-y-2.5">
                     {([
-                      { axis: 'x' as const, label: 'V/A', title: 'Voor/achter kantelen', value: splatAlignment.groupTiltX ?? 0 },
-                      { axis: 'z' as const, label: 'L/R', title: 'Links/rechts kantelen', value: splatAlignment.groupTiltZ ?? 0 },
+                      { axis: 'x' as const, label: 'V/A', title: 'Voor/achter kantelen', value: finiteNumber(splatAlignment.groupTiltX, 0) },
+                      { axis: 'z' as const, label: 'L/R', title: 'Links/rechts kantelen', value: finiteNumber(splatAlignment.groupTiltZ, 0) },
                     ]).map((control) => (
                       <div key={control.axis} className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
                         <span className="text-[10px] font-semibold text-white/45" title={control.title}>{control.label}</span>
@@ -3528,18 +3833,75 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                           max="0.5"
                           step="0.001"
                           value={control.value}
-                          onChange={(event) => setSplatTilt(control.axis, Number(event.currentTarget.value))}
+                          onChange={(event) => setSplatTilt(control.axis, finiteNumber(event.currentTarget.value, 0))}
                           className="h-1.5 w-full accent-sky-400"
                         />
                         <input
                           type="number"
                           step="0.001"
-                          value={Number(control.value.toFixed(3))}
-                          onChange={(event) => setSplatTilt(control.axis, Number(event.currentTarget.value || 0))}
+                          value={Number(finiteNumber(control.value, 0).toFixed(3))}
+                          onChange={(event) => setSplatTilt(control.axis, finiteNumber(event.currentTarget.value, 0))}
                           className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-sky-400/40"
                         />
                       </div>
                     ))}
+                  </div>
+                  <p className="mt-3 text-[10px] font-semibold text-white/40">Camera bubble</p>
+                  <div className="mt-1.5 space-y-2.5">
+                    <div className="grid grid-cols-[48px_1fr_64px] items-center gap-2">
+                      <span className="text-[10px] font-semibold text-white/45" title="Straal van de onzichtbare bol rond de camera (0 = uit)">Straal</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="10"
+                        step="0.1"
+                        value={finiteNumber(splatAlignment.bubbleRadius, DEFAULT_BUBBLE_RADIUS)}
+                        onChange={(e) => {
+                          const value = finiteNumber(e.currentTarget.value, DEFAULT_BUBBLE_RADIUS)
+                          setSplatAlignment((prev) => prev ? { ...prev, bubbleRadius: value } : prev)
+                        }}
+                        className="h-1.5 w-full accent-amber-400"
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        max="10"
+                        step="0.1"
+                        value={Number(finiteNumber(splatAlignment.bubbleRadius, DEFAULT_BUBBLE_RADIUS).toFixed(1))}
+                        onChange={(e) => {
+                          const value = finiteNumber(e.currentTarget.value, DEFAULT_BUBBLE_RADIUS)
+                          setSplatAlignment((prev) => prev ? { ...prev, bubbleRadius: value } : prev)
+                        }}
+                        className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-amber-400/40"
+                      />
+                    </div>
+                    <div className="grid grid-cols-[48px_1fr_64px] items-center gap-2">
+                      <span className="text-[10px] font-semibold text-white/45" title="Breedte van de zachte overgangsrand">Rand</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={finiteNumber(splatAlignment.bubbleFeather, DEFAULT_BUBBLE_FEATHER)}
+                        onChange={(e) => {
+                          const value = finiteNumber(e.currentTarget.value, DEFAULT_BUBBLE_FEATHER)
+                          setSplatAlignment((prev) => prev ? { ...prev, bubbleFeather: value } : prev)
+                        }}
+                        className="h-1.5 w-full accent-amber-400"
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        max="2"
+                        step="0.05"
+                        value={Number(finiteNumber(splatAlignment.bubbleFeather, DEFAULT_BUBBLE_FEATHER).toFixed(2))}
+                        onChange={(e) => {
+                          const value = finiteNumber(e.currentTarget.value, DEFAULT_BUBBLE_FEATHER)
+                          setSplatAlignment((prev) => prev ? { ...prev, bubbleFeather: value } : prev)
+                        }}
+                        className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-amber-400/40"
+                      />
+                    </div>
                   </div>
                 </div>
                 <button
