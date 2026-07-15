@@ -710,14 +710,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const applySplatAlignment = (alignment: SplatAlignment, baseAlignment?: SplatAlignment | null) => {
     const current = cloneSplatAlignment(alignment)
     const base = baseAlignment ? cloneSplatAlignment(baseAlignment) : cloneSplatAlignment(alignment)
-    const safeCurrent = isMarbleAlignment(current) && current.splatToShot
-      ? applyMarbleBaseAlignment(current)
-      : current
-    const safeBase = isMarbleAlignment(base) && base.splatToShot
-      ? applyMarbleBaseAlignment(base)
-      : base
-    setSplatBaseAlignment(safeBase)
-    setSplatAlignment(safeCurrent)
+    setSplatBaseAlignment(base)
+    setSplatAlignment(current)
   }
 
   const resetSplatAlignmentToBase = () => {
@@ -901,6 +895,84 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       position: alignment.position ?? [0, 1.5, 4],
       quaternion: alignment.quaternion ?? [0, 0, 0, 1],
       fovY: alignment.fovY ?? 60,
+      width: alignment.width ?? 1920,
+      height: alignment.height ?? 1080,
+    }
+  }
+
+  // Berekent de marbleToShot transform: Marble origin (= frame_0001 camera) → shot camera.
+  // Stappenplan:
+  //   1. OpenCV → Three.js coördinatenconversie: 180° om X-as (Q_x180)
+  //   2. Roteer Marble's startrichting naar de shot camera richting (Q_view)
+  //   3. Verplaats origin naar shot camera positie
+  //   4. Schaal met metric_scale_factor
+  const applyMarbleShotTransform = (alignment: SplatAlignment, manifest: any, baseAlignment?: SplatAlignment | null): SplatAlignment => {
+    const cameraPos = manifest?.camera?.position
+    const cameraTarget = manifest?.camera?.target
+    // Zonder shot camera data vallen we terug op de eenvoudige base alignment
+    if (!Array.isArray(cameraPos) || !Array.isArray(cameraTarget)) {
+      return applyMarbleBaseAlignment(alignment)
+    }
+
+    const shotCamera = new THREE.Vector3(Number(cameraPos[0]), Number(cameraPos[1]), Number(cameraPos[2]))
+    const shotTarget = new THREE.Vector3(Number(cameraTarget[0]), Number(cameraTarget[1]), Number(cameraTarget[2]))
+
+    // Q_view: rotatie van de shot camera — PerspectiveCamera.lookAt maakt -Z naar target wijzen.
+    // De Marble .splat is al in Three.js Y-up coördinaten opgeslagen, dus geen extra flip nodig.
+    const camObj = new THREE.PerspectiveCamera()
+    camObj.position.copy(shotCamera)
+    camObj.up.set(0, 1, 0)
+    camObj.lookAt(shotTarget)
+    camObj.updateMatrix()
+    const Q_total = camObj.quaternion.clone()
+
+    // Schaal: Marble COLMAP staat in een eigen coördinatenstelsel (niet PS-world).
+    // metricScaleFactor (Marble units → meters) is NIET gelijk aan PS-world units.
+    //
+    // Correcte aanpak: gebruik de DIEPTE van de sceneCenter langs de camera-as (-Z THREE.js).
+    //   Q_total * (0, 0, -D) = D * lookDir → landt op orbit target
+    //   => transformScale = psDistToTarget / (-sceneCenter.z)
+    //
+    // De X,Y-componenten van sceneCenter worden door Q_total naar laterale richtingen
+    // geroteerd (loodrecht op de kijkrichting) — die mogen NIET meedoen in de schaalberekening.
+    // |sceneCenter| (volledige lengte) is FOUT: X,Y-bijdragen draaien achter de camera.
+    const rawSceneCenter = baseAlignment?.sceneCenter ?? alignment.sceneCenter
+    const marbleForwardDepth = rawSceneCenter ? -Number(rawSceneCenter[2]) : 0
+    const psDistToTarget = shotCamera.distanceTo(shotTarget)
+    const transformScale = (marbleForwardDepth > 0.01 && psDistToTarget > 0.1)
+      ? psDistToTarget / marbleForwardDepth
+      : Math.max(0.001, Math.min(100, finiteNumber(alignment.metricScaleFactor, 1)))
+
+    // Als dit alignment al eerder handmatig gekalibreerd is, draag de kalibratie mee.
+    // groupPosition altijd resetten: dat is afhankelijk van de camerahoek per shot.
+    const wasCalibrated = alignment.splatToShot === true
+    const prevGroupScale = wasCalibrated ? finiteNumber(alignment.groupScale, 1) : 1
+    const prevBasisRotationY = wasCalibrated ? finiteNumber(alignment.basisRotationY, 0) : 0
+    const prevGroupTiltX = wasCalibrated ? finiteNumber(alignment.groupTiltX, 0) : 0
+    const prevGroupTiltZ = wasCalibrated ? finiteNumber(alignment.groupTiltZ, 0) : 0
+    const prevBubbleRadius = wasCalibrated ? finiteNumber(alignment.bubbleRadius, 0) : 0
+    const prevMaskSize = wasCalibrated ? finiteNumber(alignment.groupMaskSize, 20) : 20
+
+    return {
+      ...alignment,
+      source: 'marble',
+      splatToShot: true,
+      transformPosition: [shotCamera.x, shotCamera.y, shotCamera.z],
+      transformQuaternion: [Q_total.x, Q_total.y, Q_total.z, Q_total.w],
+      transformScale,
+      basisRotationY: prevBasisRotationY,
+      bubbleRadius: prevBubbleRadius,
+      groupPositionX: 0,
+      groupPositionY: 0,
+      groupPositionZ: 0,
+      groupScale: prevGroupScale,
+      groupTiltX: prevGroupTiltX,
+      groupTiltZ: prevGroupTiltZ,
+      groupMaskSize: prevMaskSize,
+      sceneCenter: alignment.sceneCenter ?? [0, 0, 0],
+      position: cameraPos as [number, number, number],
+      quaternion: alignment.quaternion ?? [0, 0, 0, 1],
+      fovY: alignment.fovY ?? (manifest?.camera?.fov ?? 60),
       width: alignment.width ?? 1920,
       height: alignment.height ?? 1080,
     }
@@ -1246,6 +1318,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const renderManifestRef = useRef<typeof renderManifest>(undefined)
   const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
   const [viewportOverlay, setViewportOverlay] = useState<'light' | 'productLayer' | 'composite' | 'bgComposite' | '__depth' | null>(null)
+  const [overlayOpacity, setOverlayOpacity] = useState(1)
   const [debugRings, setDebugRings] = useState<{ spacing: number; width: number } | undefined>({ spacing: 0.04, width: 0.002 })
   const [viewMode, setViewMode] = useState<'wireframe' | 'solid' | 'material' | 'rendered'>('material')
   const textureDeletedRef = useRef(false)
@@ -2424,8 +2497,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }
 
   async function restoreRenderState(version: FinalRenderVersion) {
+    console.log('[restore] aangeroepen — version.id:', version.id, 'render_packet_id:', version.render_packet_id)
     const api = getProductStudioApi()
-    if (!api || !(api as any).restoreRenderState) return
+    if (!api || !(api as any).restoreRenderState) {
+      console.warn('[restore] gestopt: api ontbreekt of restoreRenderState niet beschikbaar', { api: !!api, hasMethod: !!(api as any)?.restoreRenderState })
+      return
+    }
 
     // Sla huidige model-transform op vóór we wisselen
     const prevId = activeArchiveVersionId.current
@@ -2450,6 +2527,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
     try {
       const result = await (api as any).restoreRenderState({ renderPacketId: version.render_packet_id })
+      console.log('[restore] IPC result:', result?.ok, result?.error)
       if (!result?.ok) return
 
       const packet = result.packet as RenderPacket
@@ -2543,8 +2621,19 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         const splatApi = getProductStudioApi()
         splatApi?.loadSceneAlignment?.({ projectId, renderVersionId: version.id }).then((res) => {
           if (res?.ok && res.alignment?.splatUrl && res.renderVersionId === version.id) {
-            // Opgeslagen alignment gevonden — altijd toepassen
-            applySplatAlignment(res.alignment, res.baseAlignment ?? fallbackImportBaseAlignment(res.alignment))
+            // Opgeslagen alignment gevonden.
+            // Marble-alignments altijd herberekenen vanuit manifest-cameraData — de shot
+            // transform is deterministisch en de opgeslagen quaternion kan verouderd zijn
+            // (bv. Q_x180-fout of oud Object3D.lookAt). splatToShot in de save wordt genegeerd.
+            const base = res.baseAlignment ?? fallbackImportBaseAlignment(res.alignment)
+            // Verrijk de alignment met metricScaleFactor uit marbleGen als die ontbreekt in scene.json
+            const enriched: SplatAlignment = (res.alignment.source === 'marble' && res.alignment.metricScaleFactor == null)
+              ? { ...res.alignment, metricScaleFactor: marbleGen.metricScaleFactor ?? undefined, groundPlaneOffset: res.alignment.groundPlaneOffset ?? marbleGen.groundPlaneOffset ?? undefined }
+              : res.alignment
+            const alignment = enriched.source === 'marble'
+              ? applyMarbleShotTransform(enriched, manifest, base)
+              : enriched
+            applySplatAlignment(alignment, base)
           } else {
             setSplatBaseAlignment(null)
             setSplatAlignment(null)
@@ -2555,9 +2644,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             splatApi?.checkOrbitVideo?.({ projectId, renderVersionId: version.id, model: orbitModel }).then((orbitRes) => {
               if (orbitRes?.marble?.splatPath) {
                 const marbleSplatUrl = `huphe://file/${encodeURIComponent(orbitRes.marble.splatPath)}`
-                const groupScale = marbleGroupScale(orbitRes.marble.metricScaleFactor)
-                const groupPositionY = marbleGroundOffsetY(orbitRes.marble.groundPlaneOffset, groupScale)
-                const nextAlignment: SplatAlignment = {
+                const baseAlignmentForShot: SplatAlignment = {
                   splatUrl: marbleSplatUrl,
                   spzPath: orbitRes.marble.spzPath,
                   source: 'marble',
@@ -2576,11 +2663,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   quaternion: [0, 0, 0, 1] as [number, number, number, number],
                   fovY: 60, width: 1920, height: 1080,
                   sceneCenter: [0, 0, 0] as [number, number, number],
-                  groupPositionY,
-                  groupScale,
+                  groupPositionY: 0,
+                  groupScale: 1,
                   bubbleRadius: DEFAULT_BUBBLE_RADIUS,
                   bubbleFeather: DEFAULT_BUBBLE_FEATHER,
                 }
+                const nextAlignment = applyMarbleShotTransform(baseAlignmentForShot, manifest, baseAlignmentForShot)
                 setSplatBaseAlignment((prev) => prev ?? cloneSplatAlignment(nextAlignment))
                 setSplatAlignment((prev) => prev ?? nextAlignment) // loadSceneAlignment al ingesteld
               }
@@ -3557,15 +3645,21 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 }
 
                 if (splatAlignment && isMarbleAlignment({ ...splatAlignment, splatUrl: currentSplatUrl })) {
-                  const nextAlignment = applyMarbleBaseAlignment({
+                  const manifest = studioRef.current?.captureRenderManifest?.()
+                  const marbleBase = {
                     ...splatAlignment,
                     splatUrl: currentSplatUrl,
                     plyPath: currentPlyPath,
                     spzPath: currentSpzPath,
-                    source: 'marble',
-                  })
+                    source: 'marble' as const,
+                  }
+                  // Pas marbleToShot toe met de huidige kalibratie (groupScale, basisRotationY, tilt).
+                  // Zonder manifest (geen shot) → basis COLMAP-uitlijning als fallback.
+                  const nextAlignment = manifest
+                    ? applyMarbleShotTransform(splatAlignment, manifest, null)
+                    : applyMarbleBaseAlignment(marbleBase)
                   setSplatViewerUrl(null)
-                  applySplatAlignment(nextAlignment, nextAlignment)
+                  applySplatAlignment(nextAlignment, splatBaseAlignment ?? nextAlignment)
                   return
                 }
 
@@ -3609,8 +3703,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               }}
               className="mt-1.5 w-full rounded-md border border-sky-400/25 bg-sky-500/10 py-1.5 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20"
             >
-              3D achtergrond uitlijnen (COLMAP)
+              {splatAlignment?.splatToShot ? '↺ Heruitlijnen op shot' : '3D achtergrond uitlijnen (COLMAP)'}
             </button>
+            {splatAlignment?.splatToShot && (
+              <p className="mt-1 text-[10px] text-white/30">
+                Kalibratie actief · schaal {finiteNumber(splatAlignment.groupScale, 1).toFixed(2)} · rotatie {(finiteNumber(splatAlignment.basisRotationY, 0) * 180 / Math.PI).toFixed(1)}°
+              </p>
+            )}
             {splatAlignment && (
               <>
                 <div className="mt-2 rounded-md border border-white/[0.08] bg-black/20 p-2">
@@ -3632,12 +3731,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   </div>
                   <div className="mt-3 space-y-2.5">
                     {([
-                      { axis: 'x' as const, label: 'X', value: finiteNumber(splatAlignment.groupPositionX, 0) },
-                      { axis: 'y' as const, label: 'Y', value: finiteNumber(splatAlignment.groupPositionY, 0) },
-                      { axis: 'z' as const, label: 'Z', value: finiteNumber(splatAlignment.groupPositionZ, 0) },
+                      { axis: 'x' as const, label: 'X', icon: '↔', title: 'Links / Rechts', value: finiteNumber(splatAlignment.groupPositionX, 0) },
+                      { axis: 'y' as const, label: 'Y', icon: '↕', title: 'Omhoog / Omlaag', value: finiteNumber(splatAlignment.groupPositionY, 0) },
+                      { axis: 'z' as const, label: 'Z', icon: '⇄', title: 'Dichterbij / Verder weg', value: finiteNumber(splatAlignment.groupPositionZ, 0) },
                     ]).map((control) => (
                       <div key={control.axis} className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
-                        <span className="text-[10px] font-semibold text-white/45">{control.label}</span>
+                        <span className="text-[10px] font-semibold text-white/45" title={`${control.label}: ${control.title}`}>{control.icon}</span>
                         <input
                           type="range"
                           min="-10"
@@ -3819,11 +3918,33 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                       </button>
                     </>
                   )}
+                  <p className="mt-3 text-[10px] font-semibold text-white/40">Draaien</p>
+                  <div className="mt-1.5 space-y-2.5">
+                    <div className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
+                      <span className="text-[10px] font-semibold text-white/45" title="Y-as: horizontaal draaien (links/rechts)">↻</span>
+                      <input
+                        type="range"
+                        min={-Math.PI}
+                        max={Math.PI}
+                        step="0.01"
+                        value={finiteNumber(splatAlignment.basisRotationY, 0)}
+                        onChange={(event) => { const v = finiteNumber(event.currentTarget.value, 0); setSplatAlignment((prev) => prev ? { ...prev, basisRotationY: v } : prev) }}
+                        className="h-1.5 w-full accent-sky-400"
+                      />
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={Number(finiteNumber(splatAlignment.basisRotationY, 0).toFixed(2))}
+                        onChange={(event) => { const v = finiteNumber(event.currentTarget.value, 0); setSplatAlignment((prev) => prev ? { ...prev, basisRotationY: v } : prev) }}
+                        className="h-7 rounded-md border border-white/10 bg-white/[0.04] px-2 text-right text-[11px] font-medium text-white/65 outline-none focus:border-sky-400/40"
+                      />
+                    </div>
+                  </div>
                   <p className="mt-3 text-[10px] font-semibold text-white/40">Kanteling</p>
                   <div className="mt-1.5 space-y-2.5">
                     {([
-                      { axis: 'x' as const, label: 'V/A', title: 'Voor/achter kantelen', value: finiteNumber(splatAlignment.groupTiltX, 0) },
-                      { axis: 'z' as const, label: 'L/R', title: 'Links/rechts kantelen', value: finiteNumber(splatAlignment.groupTiltZ, 0) },
+                      { axis: 'x' as const, label: '↕', title: 'Voor/achter kantelen', value: finiteNumber(splatAlignment.groupTiltX, 0) },
+                      { axis: 'z' as const, label: '↔', title: 'Links/rechts kantelen', value: finiteNumber(splatAlignment.groupTiltZ, 0) },
                     ]).map((control) => (
                       <div key={control.axis} className="grid grid-cols-[18px_1fr_64px] items-center gap-2">
                         <span className="text-[10px] font-semibold text-white/45" title={control.title}>{control.label}</span>
@@ -4598,6 +4719,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           }}
           hideProperties
           overlayImageSrc={viewportOverlay === 'bgComposite' ? undefined : activeOverlaySrc}
+          overlayOpacity={overlayOpacity}
           productOverlaySrc={undefined}
           productOverlayBlend="normal"
           backgroundPlateSrc={viewportOverlay === 'bgComposite' ? backgroundPlateUrl : undefined}
@@ -4798,6 +4920,27 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </div>
               </button>
             ))}
+            {activeOverlaySrc && viewportOverlay && viewportOverlay !== 'bgComposite' && (
+              <>
+                <div className="mx-0.5 h-5 w-px bg-white/15" />
+                <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/50 px-3 py-1 backdrop-blur-sm">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-white/50">
+                    <circle cx="12" cy="12" r="10" /><path d="M12 8v8M8 12h8" />
+                  </svg>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={overlayOpacity}
+                    onChange={(e) => setOverlayOpacity(Number(e.currentTarget.value))}
+                    className="h-1 w-20 accent-white/70"
+                    title={`Transparantie: ${Math.round(overlayOpacity * 100)}%`}
+                  />
+                  <span className="w-7 text-right text-[10px] font-medium text-white/45">{Math.round(overlayOpacity * 100)}%</span>
+                </div>
+              </>
+            )}
           </div>
           <button
             type="button"

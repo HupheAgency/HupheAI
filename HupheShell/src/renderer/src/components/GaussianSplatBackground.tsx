@@ -51,6 +51,7 @@ export interface SplatAlignment {
   groupPositionZ?: number
   groupTiltX?: number  // front/back tilt in radians
   groupTiltZ?: number  // left/right tilt in radians
+  groupQuaternion?: [number, number, number, number] // [qx, qy, qz, qw] — overschrijft tilt + basisrotatie als aanwezig (Marble marbleToShot)
   groupScale?: number
   groupMaskSize?: number
   groupMaskOffsetX?: number

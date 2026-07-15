@@ -3779,7 +3779,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (args.renderVersionId) marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId))
     marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId))
 
-    const resolveMarble = (): {
+    const resolveMarble = async (): Promise<{
       spzPath: string
       splatPath?: string
       worldId?: string
@@ -3792,7 +3792,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       panoUrl?: string
       colliderMeshUrl?: string
       totalCredits?: number
-    } | null => {
+    } | null> => {
       for (const baseDir of marbleSearchDirs) {
         try {
           const spzPath = join(baseDir, 'marble', 'world.spz')
@@ -3816,6 +3816,37 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
             : undefined
           const label = existsSync(hqSplat) ? 'hq(200k)' : existsSync(previewSplat) ? 'preview(50k)' : 'full(100k)'
           console.log(`[marble] gevonden in ${baseDir} — splat: ${splatPath ? label : 'geen'}`)
+
+          // Als metricScaleFactor ontbreekt in meta.json (oudere generaties), haal het op via de API.
+          let metricScaleFactor = meta.metricScaleFactor as number | undefined
+          let groundPlaneOffset = meta.groundPlaneOffset as number | undefined
+          if (meta.worldId && metricScaleFactor == null) {
+            try {
+              const _fs = require('fs') as typeof import('fs')
+              const { safeStorage: _ss } = require('electron') as typeof import('electron')
+              const _wlKeyPath = join(app.getPath('userData'), 'worldlabs.enc')
+              const _apiKey = _fs.existsSync(_wlKeyPath)
+                ? _ss.decryptString(_fs.readFileSync(_wlKeyPath))
+                : ((meta.MAIN_VITE_WORLDLABS_API_KEY as string) || '')
+              if (_apiKey) {
+                const { marbleGetWorld } = await import('./lib/marble-client')
+                const world = await marbleGetWorld(_apiKey, meta.worldId)
+                metricScaleFactor = world.metricScaleFactor
+                groundPlaneOffset = world.groundPlaneOffset ?? groundPlaneOffset
+                if (world.metricScaleFactor != null) {
+                  const metaPath = join(baseDir, 'marble', 'meta.json')
+                  try {
+                    const updated = { ...meta, metricScaleFactor, groundPlaneOffset }
+                    _fs.writeFileSync(metaPath, JSON.stringify(updated, null, 2))
+                    console.log(`[marble] metricScaleFactor opgeslagen in meta.json: ${metricScaleFactor}`)
+                  } catch {}
+                }
+              }
+            } catch (apiErr: any) {
+              console.warn('[marble] metricScaleFactor ophalen via API mislukt:', apiErr?.message)
+            }
+          }
+
           return {
             spzPath,
             splatPath,
@@ -3823,8 +3854,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
             renderVersionId: meta.renderVersionId,
             orbitRunId: meta.orbitRunId,
             route: meta.route,
-            metricScaleFactor: meta.metricScaleFactor,
-            groundPlaneOffset: meta.groundPlaneOffset,
+            metricScaleFactor,
+            groundPlaneOffset,
             thumbnailPath: meta.thumbnailPath,
             panoUrl: meta.panoUrl,
             colliderMeshUrl: meta.colliderMeshUrl,
@@ -3859,14 +3890,14 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const found = existsSync(orbitRunVideoPath)
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} orbitRunId=${orbitRunId} localPath=${activeLocalPath} videoExists=${found}`)
       if (found) {
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: resolveMarble() }
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: await resolveMarble() }
       }
     } else {
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} jwt=${!!jwt} activeRun=${!!activeRun} — geen local_path in DB`)
     }
 
     if (existsSync(primaryPath)) {
-      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir), marble: resolveMarble() }
+      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir), marble: await resolveMarble() }
     }
     console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} — niet gevonden (primaryPath=${primaryPath})`)
     return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }

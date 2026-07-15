@@ -68,6 +68,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   onSceneDirty?: () => void
   hideProperties?: boolean
   overlayImageSrc?: string | null
+  overlayOpacity?: number
   productOverlaySrc?: string | null
   productOverlayBlend?: 'normal' | 'screen'
   backgroundPlateSrc?: string | null
@@ -76,7 +77,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   viewMode?: ViewMode
   environmentMeshUrls?: string[]
   splatAlignment?: SplatAlignment | null
-}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls, splatAlignment }, ref) {
+}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, overlayOpacity = 1, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls, splatAlignment }, ref) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
@@ -335,7 +336,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
               style={{ aspectRatio: '16 / 9' }}
             >
               {overlayImageSrc && (
-                <img src={overlayImageSrc} alt="" className="absolute inset-0 h-full w-full object-cover" />
+                <img src={overlayImageSrc} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ opacity: overlayOpacity }} />
               )}
               {productOverlaySrc && (
                 <img

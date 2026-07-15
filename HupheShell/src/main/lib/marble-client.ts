@@ -123,6 +123,21 @@ export interface MarbleResult {
   totalCredits?: number
 }
 
+/** Haal een bestaande world op via worldId — bruikbaar om metricScaleFactor te herstellen als meta.json onvolledig is. */
+export async function marbleGetWorld(apiKey: string, worldId: string): Promise<MarbleResult> {
+  const r = await req(apiKey, `/worlds/${worldId}`, { method: 'GET', headers: { 'Content-Type': '' } as any })
+  const spzVariants: MarbleSpzVariants = r.assets?.splats?.spz_urls ?? {}
+  return {
+    worldId: r.world_id,
+    spzVariants,
+    panoUrl: r.assets?.imagery?.pano_url,
+    thumbnailUrl: r.assets?.thumbnail_url,
+    colliderMeshUrl: r.assets?.mesh?.collider_mesh_url,
+    metricScaleFactor: r.assets?.splats?.semantics_metadata?.metric_scale_factor ?? r.assets?.splats?.metric_scale_factor,
+    groundPlaneOffset: r.assets?.splats?.semantics_metadata?.ground_plane_offset ?? r.assets?.splats?.ground_plane_offset,
+  }
+}
+
 /** Stap 3: poll tot done=true, geeft assets terug. */
 export async function marblePoll(
   apiKey: string,
