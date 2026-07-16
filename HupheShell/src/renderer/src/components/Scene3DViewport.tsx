@@ -942,6 +942,7 @@ function SceneContent({
   onActivateCamera,
   onDeactivateCamera,
   onViewChanged,
+  onOrbitChange,
   orbitStateRef,
   setCameraOrbitRef,
   debugRings,
@@ -958,6 +959,7 @@ function SceneContent({
   onActivateCamera: (id: string) => void
   onDeactivateCamera: () => void
   onViewChanged?: () => void
+  onOrbitChange?: (position: [number, number, number], target: [number, number, number]) => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
   setCameraOrbitRef: React.MutableRefObject<((pos: [number, number, number], tgt: [number, number, number], fov?: number) => void) | null>
   debugRings?: { spacing: number; width: number }
@@ -971,12 +973,19 @@ function SceneContent({
 
   useJumpToCamera(scene.activeCameraId, camerasRef, orbitRef)
 
-  // Restore orbit state when mounting (fixes fullscreen ↔ inline position loss)
+  // Restore orbit state when mounting (fixes fullscreen ↔ inline position loss).
+  // Als er geen opgeslagen state is, initialiseer orbitStateRef met de huidige
+  // camerapositie zodat "Positie opslaan" meteen werkt zonder eerst te bewegen.
   useEffect(() => {
     if (orbitStateRef.current && orbitRef.current) {
       threeCamera.position.set(...orbitStateRef.current.position)
       orbitRef.current.target.set(...orbitStateRef.current.target)
       orbitRef.current.update()
+    } else if (!orbitStateRef.current && orbitRef.current) {
+      orbitStateRef.current = {
+        position: threeCamera.position.toArray() as [number, number, number],
+        target: orbitRef.current.target.toArray() as [number, number, number],
+      }
     }
   }, [])
 
@@ -995,15 +1004,19 @@ function SceneContent({
     return () => { setCameraOrbitRef.current = null }
   }, [threeCamera, setCameraOrbitRef])
 
+  // Callback-refs: houdt altijd de nieuwste versie zonder de effect te herinstalleren.
+  const onOrbitChangeRef = useRef(onOrbitChange)
+  onOrbitChangeRef.current = onOrbitChange
+
   // Save orbit state on every change + clear active camera when user orbits manually
   useEffect(() => {
     const controls = orbitRef.current
     if (!controls) return
     const handler = () => {
-      orbitStateRef.current = {
-        position: threeCamera.position.toArray() as [number, number, number],
-        target: controls.target.toArray() as [number, number, number],
-      }
+      const position = threeCamera.position.toArray() as [number, number, number]
+      const target = controls.target.toArray() as [number, number, number]
+      orbitStateRef.current = { position, target }
+      onOrbitChangeRef.current?.(position, target)
     }
     const startHandler = () => {
       onDeactivateCamera()
@@ -1121,12 +1134,13 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   onActivateCamera: (id: string) => void
   onDeactivateCamera: () => void
   onViewChanged?: () => void
+  onOrbitChange?: (position: [number, number, number], target: [number, number, number]) => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
   debugRings?: { spacing: number; width: number }
   environmentMeshUrls?: string[]
   transparentCanvas?: boolean
   splatAlignment?: SplatAlignment | null
-}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, orbitStateRef, debugRings, environmentMeshUrls, transparentCanvas, splatAlignment }, ref) {
+}>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, onOrbitChange, orbitStateRef, debugRings, environmentMeshUrls, transparentCanvas, splatAlignment }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
@@ -1192,6 +1206,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           onActivateCamera={onActivateCamera}
           onDeactivateCamera={onDeactivateCamera}
           onViewChanged={onViewChanged}
+          onOrbitChange={onOrbitChange}
           orbitStateRef={orbitStateRef}
           setCameraOrbitRef={setCameraOrbitRef}
           debugRings={debugRings}

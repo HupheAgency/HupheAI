@@ -151,6 +151,8 @@ export default function Scene3DPropertiesPanel({
   onUpdateObject,
   onUpdateLight,
   onEnvironmentChange,
+  cameraState,
+  onSetCamera,
   inline = false,
 }: {
   scene: Scene3DState
@@ -158,12 +160,33 @@ export default function Scene3DPropertiesPanel({
   onUpdateObject: (id: string, patch: Partial<Scene3DObject>) => void
   onUpdateLight: (id: string, patch: Partial<Scene3DLight>) => void
   onEnvironmentChange: (env: string | null) => void
+  cameraState?: { position: [number, number, number]; target: [number, number, number] } | null
+  onSetCamera?: (position: [number, number, number], target: [number, number, number]) => void
   inline?: boolean
 }) {
   const selectedObj = scene.objects.find((o) => o.id === selectedObjectId)
 
+  const pos = cameraState?.position ?? [0, 0, 0]
+  const tgt = cameraState?.target ?? [0, 0, 0]
+
   return (
     <div className={inline ? 'flex flex-col gap-4' : 'flex h-full w-56 flex-col gap-4 overflow-y-auto border-l border-white/[0.06] bg-[#1c1c1c] p-3'}>
+      <div className="flex flex-col gap-2">
+        <p className="text-[11px] font-semibold text-white/55">Camera</p>
+        <Vec3Input
+          label="Positie"
+          value={pos as [number, number, number]}
+          onChange={(v) => onSetCamera?.(v, tgt as [number, number, number])}
+        />
+        <Vec3Input
+          label="Doel"
+          value={tgt as [number, number, number]}
+          onChange={(v) => onSetCamera?.(pos as [number, number, number], v)}
+        />
+      </div>
+
+      <div className="h-px bg-white/[0.06]" />
+
       {selectedObj && (
         <ObjectProperties
           obj={selectedObj}

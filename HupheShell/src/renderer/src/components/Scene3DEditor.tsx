@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { useScene3D } from '../hooks/useScene3D'
 import Scene3DViewport, { type RenderPasses, type Scene3DRenderManifest, type Scene3DViewportHandle, type SplatAlignment } from './Scene3DViewport'
 import Scene3DToolbar from './Scene3DToolbar'
@@ -82,6 +82,33 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   const modelInputRef = useRef<HTMLInputElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
   const orbitStateRef = useRef<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
+  const [orbitDisplayState, setOrbitDisplayState] = useState<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
+
+  // Poll orbitStateRef via rAF — orbitStateRef wordt direct bijgehouden door de orbit handler.
+  // React's bail-out (prev === prev) zorgt dat re-renders alleen plaatsvinden bij echte verandering.
+  useEffect(() => {
+    let frame: number
+    const tick = () => {
+      const s = orbitStateRef.current
+      if (s) {
+        setOrbitDisplayState((prev) => {
+          if (
+            prev &&
+            prev.position[0] === s.position[0] &&
+            prev.position[1] === s.position[1] &&
+            prev.position[2] === s.position[2] &&
+            prev.target[0] === s.target[0] &&
+            prev.target[1] === s.target[1] &&
+            prev.target[2] === s.target[2]
+          ) return prev
+          return { position: [...s.position] as [number, number, number], target: [...s.target] as [number, number, number] }
+        })
+      }
+      frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [])
   const [showFrame, setShowFrame] = useState(false)
   const [selectedLightId, setSelectedLightId] = useState<string | null>(null)
 
@@ -360,6 +387,8 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           onUpdateObject={updateDirtyObject}
           onUpdateLight={updateDirtyLight}
           onEnvironmentChange={setDirtyEnvironment}
+          cameraState={orbitDisplayState ?? orbitStateRef.current}
+          onSetCamera={(position, target) => viewportRef.current?.setCameraOrbit(position, target)}
         />
       )}
     </div>

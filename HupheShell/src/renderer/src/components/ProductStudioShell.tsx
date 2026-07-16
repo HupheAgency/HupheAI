@@ -906,69 +906,105 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   //   2. Roteer Marble's startrichting naar de shot camera richting (Q_view)
   //   3. Verplaats origin naar shot camera positie
   //   4. Schaal met metric_scale_factor
-  const applyMarbleShotTransform = (alignment: SplatAlignment, manifest: any, baseAlignment?: SplatAlignment | null): SplatAlignment => {
+  // Kalibratie per Marble-wereld opslaan/laden via localStorage.
+  // marbleOriginInPS: vaste positie van Marble frame_0001 in de PS-wereld (onafhankelijk van camerahoek).
+  // Voor elke nieuwe shot: groupPosition = marbleOriginInPS - transformPosition (nieuwe camera).
+  interface MarbleCalibration {
+    marbleOriginInPS: [number, number, number]
+    groupScale: number
+    basisRotationY: number
+    groupTiltX: number
+    groupTiltZ: number
+    bubbleRadius: number
+    groupMaskSize: number
+    groupMaskOffsetX?: number
+    groupMaskOffsetY?: number
+    groupMaskOffsetZ?: number
+  }
+
+  const marbleCalibrationKey = (worldId: string) => `marble-cal-${worldId}`
+
+  const loadMarbleCalibration = (worldId?: string): MarbleCalibration | null => {
+    if (!worldId) return null
+    try {
+      const raw = localStorage.getItem(marbleCalibrationKey(worldId))
+      return raw ? (JSON.parse(raw) as MarbleCalibration) : null
+    } catch { return null }
+  }
+
+  const saveMarbleCalibration = (alignment: SplatAlignment) => {
+    const worldId = alignment.worldId
+    if (!worldId || !alignment.splatToShot || !Array.isArray(alignment.transformPosition)) return
+    const tx = finiteNumber(alignment.transformPosition[0], 0)
+    const ty = finiteNumber(alignment.transformPosition[1], 0)
+    const tz = finiteNumber(alignment.transformPosition[2], 0)
+    const cal: MarbleCalibration = {
+      marbleOriginInPS: [
+        tx + finiteNumber(alignment.groupPositionX, 0),
+        ty + finiteNumber(alignment.groupPositionY, 0),
+        tz + finiteNumber(alignment.groupPositionZ, 0),
+      ],
+      groupScale: finiteNumber(alignment.groupScale, 1),
+      basisRotationY: finiteNumber(alignment.basisRotationY, 0),
+      groupTiltX: finiteNumber(alignment.groupTiltX, 0),
+      groupTiltZ: finiteNumber(alignment.groupTiltZ, 0),
+      bubbleRadius: finiteNumber(alignment.bubbleRadius, 0),
+      groupMaskSize: finiteNumber(alignment.groupMaskSize, 20),
+      groupMaskOffsetX: finiteNumber(alignment.groupMaskOffsetX, 0),
+      groupMaskOffsetY: finiteNumber(alignment.groupMaskOffsetY, 0),
+      groupMaskOffsetZ: finiteNumber(alignment.groupMaskOffsetZ, 0),
+    }
+    try {
+      localStorage.setItem(marbleCalibrationKey(worldId), JSON.stringify(cal))
+    } catch { /* ignore */ }
+  }
+
+  const applyMarbleShotTransform = (alignment: SplatAlignment, manifest: any, baseAlignment?: SplatAlignment | null, forceRecalculate = false): SplatAlignment => {
+    // Herbereken altijd: de formule gebruikt de actuele camera en sceneCenter.
+    // Vroegere opgeslagen waarden (groupScale, basisRotationY etc.) worden niet meer hergebruikt.
+
     const cameraPos = manifest?.camera?.position
     const cameraTarget = manifest?.camera?.target
-    // Zonder shot camera data vallen we terug op de eenvoudige base alignment
     if (!Array.isArray(cameraPos) || !Array.isArray(cameraTarget)) {
+      if (alignment.splatToShot && Array.isArray(alignment.transformPosition)) {
+        return { ...alignment, source: 'marble' }
+      }
       return applyMarbleBaseAlignment(alignment)
     }
 
     const shotCamera = new THREE.Vector3(Number(cameraPos[0]), Number(cameraPos[1]), Number(cameraPos[2]))
     const shotTarget = new THREE.Vector3(Number(cameraTarget[0]), Number(cameraTarget[1]), Number(cameraTarget[2]))
 
-    // Q_view: rotatie van de shot camera — PerspectiveCamera.lookAt maakt -Z naar target wijzen.
-    // De Marble .splat is al in Three.js Y-up coördinaten opgeslagen, dus geen extra flip nodig.
-    const camObj = new THREE.PerspectiveCamera()
-    camObj.position.copy(shotCamera)
-    camObj.up.set(0, 1, 0)
-    camObj.lookAt(shotTarget)
-    camObj.updateMatrix()
-    const Q_total = camObj.quaternion.clone()
-
-    // Schaal: Marble COLMAP staat in een eigen coördinatenstelsel (niet PS-world).
-    // metricScaleFactor (Marble units → meters) is NIET gelijk aan PS-world units.
-    //
-    // Correcte aanpak: gebruik de DIEPTE van de sceneCenter langs de camera-as (-Z THREE.js).
-    //   Q_total * (0, 0, -D) = D * lookDir → landt op orbit target
-    //   => transformScale = psDistToTarget / (-sceneCenter.z)
-    //
-    // De X,Y-componenten van sceneCenter worden door Q_total naar laterale richtingen
-    // geroteerd (loodrecht op de kijkrichting) — die mogen NIET meedoen in de schaalberekening.
-    // |sceneCenter| (volledige lengte) is FOUT: X,Y-bijdragen draaien achter de camera.
     const rawSceneCenter = baseAlignment?.sceneCenter ?? alignment.sceneCenter
-    const marbleForwardDepth = rawSceneCenter ? -Number(rawSceneCenter[2]) : 0
-    const psDistToTarget = shotCamera.distanceTo(shotTarget)
-    const transformScale = (marbleForwardDepth > 0.01 && psDistToTarget > 0.1)
-      ? psDistToTarget / marbleForwardDepth
-      : Math.max(0.001, Math.min(100, finiteNumber(alignment.metricScaleFactor, 1)))
+    const sceneCenter3 = rawSceneCenter
+      ? new THREE.Vector3(Number(rawSceneCenter[0]), Number(rawSceneCenter[1]), Number(rawSceneCenter[2]))
+      : new THREE.Vector3(0, 0, -1)
 
-    // Als dit alignment al eerder handmatig gekalibreerd is, draag de kalibratie mee.
-    // groupPosition altijd resetten: dat is afhankelijk van de camerahoek per shot.
-    const wasCalibrated = alignment.splatToShot === true
-    const prevGroupScale = wasCalibrated ? finiteNumber(alignment.groupScale, 1) : 1
-    const prevBasisRotationY = wasCalibrated ? finiteNumber(alignment.basisRotationY, 0) : 0
-    const prevGroupTiltX = wasCalibrated ? finiteNumber(alignment.groupTiltX, 0) : 0
-    const prevGroupTiltZ = wasCalibrated ? finiteNumber(alignment.groupTiltZ, 0) : 0
-    const prevBubbleRadius = wasCalibrated ? finiteNumber(alignment.bubbleRadius, 0) : 0
-    const prevMaskSize = wasCalibrated ? finiteNumber(alignment.groupMaskSize, 20) : 20
+    // Eikpunt: splat op COLMAP-oorsprong, camera op [0,0,0] kijkend naar [0,0,-1].
+    // Dit is identiek aan de World Labs viewer: camera.position=[0,0,0], camera.lookAt=[0,0,-1],
+    // splatMesh.rotation.x = Math.PI (= Q_xflip hieronder).
+    // De PS-camera en vaas worden hier buiten beschouwing gelaten.
+    const Q_xflip = new THREE.Quaternion(1, 0, 0, 0) // 180° om X-as: OpenCV +Y-down → THREE.js Y-up
 
     return {
       ...alignment,
       source: 'marble',
       splatToShot: true,
-      transformPosition: [shotCamera.x, shotCamera.y, shotCamera.z],
-      transformQuaternion: [Q_total.x, Q_total.y, Q_total.z, Q_total.w],
-      transformScale,
-      basisRotationY: prevBasisRotationY,
-      bubbleRadius: prevBubbleRadius,
+      transformPosition: [0, 0, 0],
+      transformQuaternion: [Q_xflip.x, Q_xflip.y, Q_xflip.z, Q_xflip.w],
+      transformScale: 1,
+      basisRotationY: 0,
+      bubbleRadius: 0,
       groupPositionX: 0,
       groupPositionY: 0,
       groupPositionZ: 0,
-      groupScale: prevGroupScale,
-      groupTiltX: prevGroupTiltX,
-      groupTiltZ: prevGroupTiltZ,
-      groupMaskSize: prevMaskSize,
+      groupScale: 1,
+      groupTiltX: 0,
+      groupTiltZ: 0,
+      groupMaskSize: 20,
+      groupMaskOffsetX: 0,
+      groupMaskOffsetY: 0,
+      groupMaskOffsetZ: 0,
       sceneCenter: alignment.sceneCenter ?? [0, 0, 0],
       position: cameraPos as [number, number, number],
       quaternion: alignment.quaternion ?? [0, 0, 0, 1],
@@ -1097,20 +1133,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!api || !projectId || !renderVersionId) return
 
     try {
-      const res = await api.loadSceneAlignment({ projectId })
+      // Laad altijd de alignment die bij deze specifieke render versie hoort.
+      const res = await api.loadSceneAlignment({ projectId, renderVersionId })
       if (!res?.ok || !res.alignment?.splatUrl) {
-        console.warn('[scene.json] legacy uitlijning niet gevonden:', res?.error)
+        console.warn('[scene.json] uitlijning voor render versie niet gevonden:', res?.error)
         return
       }
-      await api.saveSceneAlignment?.({
-        projectId,
-        renderVersionId,
-        alignment: res.alignment as unknown as Record<string, unknown>,
-        baseAlignment: (res.baseAlignment ?? fallbackImportBaseAlignment(res.alignment)) as unknown as Record<string, unknown>,
-      })
       applySplatAlignment(res.alignment, res.baseAlignment ?? fallbackImportBaseAlignment(res.alignment))
     } catch (e) {
-      console.warn('[scene.json] legacy uitlijning koppelen mislukt:', e)
+      console.warn('[scene.json] uitlijning koppelen mislukt:', e)
     }
   }
 
@@ -1294,14 +1325,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     return () => { cancelled = true }
   }, [orbitModel, project.backendProject?.id, project.finalRenderRecord?.id])
   // Auto-save splat alignment naar scene.json na elke wijziging (debounced 1.5s)
+  // Gebruik altijd de versie die actief bekeken wordt (activeArchiveVersionId), niet finalRenderRecord.
+  // finalRenderRecord wijst naar de nieuwste render — bij archief-klikken is dat de VERKEERDE versie.
   useEffect(() => {
-    if (!splatAlignment || !project.backendProject?.id || !project.finalRenderRecord?.id) return
+    const renderVersionId = activeArchiveVersionId.current ?? project.finalRenderRecord?.id
+    if (!splatAlignment || !project.backendProject?.id || !renderVersionId) return
     const api = getProductStudioApi()
     if (!api) return
     const tid = setTimeout(() => {
       api.saveSceneAlignment?.({
         projectId: project.backendProject!.id,
-        renderVersionId: project.finalRenderRecord?.id,
+        renderVersionId,
         alignment: splatAlignment as unknown as Record<string, unknown>,
         baseAlignment: (splatBaseAlignment ?? fallbackImportBaseAlignment(splatAlignment)) as unknown as Record<string, unknown>,
       })
@@ -1571,12 +1605,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!manifest?.camera?.position || !manifest?.camera?.target || !studioRef.current) return
 
     if (viewportOverlay === 'bgComposite') {
-      // Herstel camera naar render-positie met originele FOV.
-      // fovScale compenseert frame vs canvas, maar die effecten heffen elkaar op:
-      // background-pixel-positie = 3D-canvas-pixel-positie bij originele FOV + originele positie.
-      studioRef.current.setCameraOrbit(manifest.camera.position, manifest.camera.target, manifest.camera.fov)
+      // Marble eikpunt: camera op oorsprong (= Marble viewer), niet op render-camera.
+      if (splatAlignment?.source === 'marble') {
+        studioRef.current.setCameraOrbit([0, 0, 0], [0, 0, -1], splatAlignment.fovY ?? 60)
+      } else {
+        // Herstel camera naar render-positie met originele FOV.
+        studioRef.current.setCameraOrbit(manifest.camera.position, manifest.camera.target, manifest.camera.fov)
+      }
     }
-  }, [viewportOverlay])
+  }, [viewportOverlay, splatAlignment])
 
   async function hydrateLatestState(projectId = getStoredProjectId(project), showBusy = true) {
     if (!projectId) return
@@ -2633,7 +2670,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             const alignment = enriched.source === 'marble'
               ? applyMarbleShotTransform(enriched, manifest, base)
               : enriched
-            applySplatAlignment(alignment, base)
+            // Voor marble is het reset-anker de berekende shot-uitlijning (niet de ruwe COLMAP base).
+            // Zo gaat Reset terug naar de automatisch berekende positie, niet naar de import-state.
+            applySplatAlignment(alignment, enriched.source === 'marble' ? alignment : base)
+            // Eikpunt: marble camera op [0,0,0] kijkend naar [0,0,-1], zelfde als World Labs viewer.
+            if (alignment.source === 'marble') {
+              studioRef.current?.setCameraOrbit([0, 0, 0], [0, 0, -1], alignment.fovY ?? 60)
+            }
           } else {
             setSplatBaseAlignment(null)
             setSplatAlignment(null)
@@ -2671,6 +2714,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 const nextAlignment = applyMarbleShotTransform(baseAlignmentForShot, manifest, baseAlignmentForShot)
                 setSplatBaseAlignment((prev) => prev ?? cloneSplatAlignment(nextAlignment))
                 setSplatAlignment((prev) => prev ?? nextAlignment) // loadSceneAlignment al ingesteld
+                studioRef.current?.setCameraOrbit([0, 0, 0], [0, 0, -1], nextAlignment.fovY ?? 60)
               }
             }).catch(() => {})
           }
@@ -3645,21 +3689,20 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 }
 
                 if (splatAlignment && isMarbleAlignment({ ...splatAlignment, splatUrl: currentSplatUrl })) {
-                  const manifest = studioRef.current?.captureRenderManifest?.()
-                  const marbleBase = {
-                    ...splatAlignment,
-                    splatUrl: currentSplatUrl,
-                    plyPath: currentPlyPath,
-                    spzPath: currentSpzPath,
-                    source: 'marble' as const,
-                  }
-                  // Pas marbleToShot toe met de huidige kalibratie (groupScale, basisRotationY, tilt).
-                  // Zonder manifest (geen shot) → basis COLMAP-uitlijning als fallback.
-                  const nextAlignment = manifest
-                    ? applyMarbleShotTransform(splatAlignment, manifest, null)
-                    : applyMarbleBaseAlignment(marbleBase)
+                  // Live manifest heeft de actuele camerahoek; render-packet manifest is de fallback.
+                  const liveManifest = studioRef.current?.captureRenderManifest?.()
+                  const manifest = liveManifest ?? renderManifestRef.current
+                  // forceRecalculate=true: knop herberekent altijd de shot-positie (nieuw camerastandpunt).
+                  // Kalibratie (groupScale, basisRotationY, tilt) wordt via wasCalibrated meegenomen;
+                  // groupPosition wordt gereset (is per-shot).
+                  const nextAlignment = applyMarbleShotTransform(
+                    { ...splatAlignment, splatUrl: currentSplatUrl, plyPath: currentPlyPath, spzPath: currentSpzPath, source: 'marble' as const },
+                    manifest,
+                    null,
+                    true,
+                  )
                   setSplatViewerUrl(null)
-                  applySplatAlignment(nextAlignment, splatBaseAlignment ?? nextAlignment)
+                  applySplatAlignment(nextAlignment, nextAlignment)
                   return
                 }
 
@@ -3703,12 +3746,29 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               }}
               className="mt-1.5 w-full rounded-md border border-sky-400/25 bg-sky-500/10 py-1.5 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20"
             >
-              {splatAlignment?.splatToShot ? '↺ Heruitlijnen op shot' : '3D achtergrond uitlijnen (COLMAP)'}
+              {splatAlignment?.source === 'marble' ? '↺ Achtergrond op shot uitlijnen' : '3D achtergrond uitlijnen (COLMAP)'}
             </button>
-            {splatAlignment?.splatToShot && (
-              <p className="mt-1 text-[10px] text-white/30">
-                Kalibratie actief · schaal {finiteNumber(splatAlignment.groupScale, 1).toFixed(2)} · rotatie {(finiteNumber(splatAlignment.basisRotationY, 0) * 180 / Math.PI).toFixed(1)}°
-              </p>
+            {splatAlignment?.splatToShot && splatAlignment.worldId && (
+              <div className="mt-1.5 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!splatAlignment) return
+                    saveMarbleCalibration(splatAlignment)
+                  }}
+                  className="flex-1 rounded-md border border-emerald-400/25 bg-emerald-500/10 py-1.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20"
+                >
+                  ✓ Sla op als standaard
+                </button>
+                {(() => {
+                  const cal = loadMarbleCalibration(splatAlignment.worldId)
+                  return cal ? (
+                    <span className="text-[10px] text-emerald-400/60" title={`Opgeslagen: schaal ${cal.groupScale.toFixed(2)}, rotatie ${(cal.basisRotationY * 180 / Math.PI).toFixed(1)}°`}>
+                      ✓ opgeslagen
+                    </span>
+                  ) : null
+                })()}
+              </div>
             )}
             {splatAlignment && (
               <>
