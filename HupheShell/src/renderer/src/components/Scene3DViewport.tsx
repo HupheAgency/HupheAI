@@ -1,11 +1,12 @@
 import { Suspense, useRef, useCallback, useImperativeHandle, forwardRef, useEffect, useMemo } from 'react'
-import { Canvas, useThree } from '@react-three/fiber'
+import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { OrbitControls, TransformControls, GizmoHelper, GizmoViewport, Grid, Environment, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { Scene3DState, TransformMode, ViewMode, Scene3DBackground } from '../lib/scene3d-types'
 import SceneObject from './SceneObject'
 import { GaussianSplatBackground, type SplatAlignment } from './GaussianSplatBackground'
+import { WorldLabsSplatBackground } from './WorldLabsSplatBackground'
 
 export type { SplatAlignment }
 
@@ -16,6 +17,66 @@ function finiteNumber(value: unknown, fallback: number): number {
 
 const DEFAULT_BUBBLE_RADIUS = 3
 const DEFAULT_BUBBLE_FEATHER = 0.1
+const OUTPUT_ASPECT = 16 / 9
+
+function canonicalCameraFov(camera: THREE.PerspectiveCamera): number {
+  return finiteNumber(camera.userData.__outputFovY, camera.fov)
+}
+
+function applyOutputFrameProjection(camera: THREE.Camera, canvas: HTMLCanvasElement): void {
+  if (!(camera instanceof THREE.PerspectiveCamera)) return
+  const canvasRect = canvas.getBoundingClientRect()
+  if (canvasRect.width <= 0 || canvasRect.height <= 0) return
+
+  const editorRoot = canvas.parentElement?.parentElement
+  const frame = editorRoot?.querySelector<HTMLElement>('[data-scene-frame="true"]')
+  const frameRect = frame?.getBoundingClientRect()
+  const canonicalFov = canonicalCameraFov(camera)
+
+  camera.aspect = canvasRect.width / canvasRect.height
+  if (frameRect && frameRect.height > 0) {
+    const verticalCoverage = Math.min(1, frameRect.height / canvasRect.height)
+    const halfFov = THREE.MathUtils.degToRad(canonicalFov) / 2
+    camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(halfFov) / verticalCoverage))
+  } else {
+    camera.fov = canonicalFov
+  }
+  camera.updateProjectionMatrix()
+}
+
+function OutputFrameProjection() {
+  const { camera, gl } = useThree()
+
+  useEffect(() => {
+    const canvas = gl.domElement
+    const editorRoot = canvas.parentElement?.parentElement
+    const apply = () => applyOutputFrameProjection(camera, canvas)
+    const resizeObserver = new ResizeObserver(apply)
+    resizeObserver.observe(canvas)
+    const frame = editorRoot?.querySelector<HTMLElement>('[data-scene-frame="true"]')
+    if (frame) resizeObserver.observe(frame)
+    const mutationObserver = editorRoot ? new MutationObserver(() => {
+      const nextFrame = editorRoot.querySelector<HTMLElement>('[data-scene-frame="true"]')
+      if (nextFrame) resizeObserver.observe(nextFrame)
+      apply()
+    }) : null
+    mutationObserver?.observe(editorRoot!, { childList: true, subtree: true })
+    apply()
+    return () => {
+      resizeObserver.disconnect()
+      mutationObserver?.disconnect()
+    }
+  }, [camera, gl])
+
+  return null
+}
+
+function splatSourceUrl(alignment: SplatAlignment): string {
+  const path = alignment.spzPath
+  if (!path) return alignment.splatUrl
+  if (/^(huphe:\/\/file\/|https?:\/\/|blob:|data:)/.test(path)) return path
+  return `huphe://file/${encodeURIComponent(decodeURIComponent(path.replace(/^file:\/\//, '')))}`
+}
 
 function EnvironmentMesh({ url }: { url: string }) {
   const gltf = useGLTF(url)
@@ -448,7 +509,7 @@ function useJumpToCamera(
   camerasRef: React.MutableRefObject<Scene3DState['cameras']>,
   orbitRef: React.RefObject<OrbitControlsImpl | null>,
 ) {
-  const { camera: threeCamera } = useThree()
+  const { camera: threeCamera, gl } = useThree()
   const handledRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -684,9 +745,11 @@ function withOffscreenCamera(camera: THREE.Camera, fovScale: number | undefined,
   const origAspect = (camera as any).aspect as number | undefined
 
   if ((camera as any).aspect !== undefined) {
-    ;(camera as any).aspect = RENDER_WIDTH / RENDER_HEIGHT
-    if (fovScale && fovScale > 0 && fovScale < 1 && origFov !== undefined) {
-      const halfRad = (origFov * Math.PI) / 360
+    ;(camera as any).aspect = OUTPUT_ASPECT
+    const outputFov = camera instanceof THREE.PerspectiveCamera ? canonicalCameraFov(camera) : origFov
+    if (outputFov !== undefined) (camera as any).fov = outputFov
+    if (fovScale && fovScale > 0 && fovScale < 1 && outputFov !== undefined) {
+      const halfRad = (outputFov * Math.PI) / 360
       const scaledHalfRad = Math.atan(Math.tan(halfRad) * fovScale)
       ;(camera as any).fov = (scaledHalfRad * 360) / Math.PI
     }
@@ -893,7 +956,7 @@ function SceneManifestCapture({
         camera: {
           position: camera.position.toArray() as [number, number, number],
           target,
-          fov: 'fov' in camera ? (camera as THREE.PerspectiveCamera).fov : sceneState.cameras[0]?.fov ?? 50,
+          fov: camera instanceof THREE.PerspectiveCamera ? canonicalCameraFov(camera) : sceneState.cameras[0]?.fov ?? 50,
           near: camera.near,
           far: camera.far,
           projectionMatrix: camera.projectionMatrix.toArray(),
@@ -926,6 +989,32 @@ function SceneManifestCapture({
     return () => { manifestRef.current = null }
   }, [camera, gl, manifestRef, orbitStateRef, scene, sceneState])
 
+  return null
+}
+
+function CameraTracker({ orbitStateRef }: {
+  orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
+}) {
+  const { camera, controls } = useThree()
+  useFrame(() => {
+    const target = (controls as any)?.target
+    if (!target) return
+    const pos = camera.position
+    const prev = orbitStateRef.current
+    if (
+      prev &&
+      prev.position[0] === pos.x &&
+      prev.position[1] === pos.y &&
+      prev.position[2] === pos.z &&
+      prev.target[0] === target.x &&
+      prev.target[1] === target.y &&
+      prev.target[2] === target.z
+    ) return
+    orbitStateRef.current = {
+      position: [pos.x, pos.y, pos.z],
+      target: [target.x, target.y, target.z],
+    }
+  })
   return null
 }
 
@@ -996,13 +1085,14 @@ function SceneContent({
       threeCamera.position.set(pos[0], pos[1], pos[2])
       orbitRef.current.target.set(tgt[0], tgt[1], tgt[2])
       if (fov !== undefined && 'fov' in threeCamera) {
-        (threeCamera as THREE.PerspectiveCamera).fov = fov;
-        (threeCamera as THREE.PerspectiveCamera).updateProjectionMatrix()
+        const perspectiveCamera = threeCamera as THREE.PerspectiveCamera
+        perspectiveCamera.userData.__outputFovY = fov
+        applyOutputFrameProjection(perspectiveCamera, gl.domElement)
       }
       orbitRef.current.update()
     }
     return () => { setCameraOrbitRef.current = null }
-  }, [threeCamera, setCameraOrbitRef])
+  }, [threeCamera, gl, setCameraOrbitRef])
 
   // Callback-refs: houdt altijd de nieuwste versie zonder de effect te herinstalleren.
   const onOrbitChangeRef = useRef(onOrbitChange)
@@ -1033,6 +1123,7 @@ function SceneContent({
   return (
     <>
       <OrbitControls ref={orbitRef} makeDefault />
+      <CameraTracker orbitStateRef={orbitStateRef} />
 
       <SceneLights lights={scene.lights} viewMode={viewMode} />
 
@@ -1185,11 +1276,16 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
         shadows
         style={{ background: transparentCanvas ? 'transparent' : viewMode === 'rendered' ? '#000000' : '#1a1a1a' }}
         onPointerMissed={() => onDeselectAll()}
-        onCreated={({ gl }) => {
+        onCreated={({ gl, camera }) => {
           gl.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault() }, false)
+          if (camera instanceof THREE.PerspectiveCamera) {
+            camera.userData.__outputFovY = initialFov
+            applyOutputFrameProjection(camera, gl.domElement)
+          }
         }}
       >
         <DynamicDpr />
+        <OutputFrameProjection />
         <QuickScreenshotCapture captureRef={quickScreenshotRef} />
         <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
         <RenderPassCapture passRef={passRef} />
@@ -1213,7 +1309,24 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
           environmentMeshUrls={environmentMeshUrls}
           transparentCanvas={transparentCanvas}
         />
-        {splatAlignment && (
+        {splatAlignment?.source === 'marble' && splatAlignment.splatToShot && splatAlignment.transformPosition && splatAlignment.transformQuaternion ? (
+          <WorldLabsSplatBackground
+            src={splatSourceUrl(splatAlignment)}
+            anchorPosition={splatAlignment.transformPosition}
+            anchorQuaternion={splatAlignment.transformQuaternion}
+            anchorScale={finiteNumber(splatAlignment.transformScale, 1) * finiteNumber(splatAlignment.groupScale, 1)}
+            offset={[
+              finiteNumber(splatAlignment.groupPositionX, 0),
+              finiteNumber(splatAlignment.groupPositionY, 0),
+              finiteNumber(splatAlignment.groupPositionZ, 0),
+            ]}
+            correctionRotation={[
+              finiteNumber(splatAlignment.groupTiltX, 0),
+              finiteNumber(splatAlignment.basisRotationY, 0),
+              finiteNumber(splatAlignment.groupTiltZ, 0),
+            ]}
+          />
+        ) : splatAlignment ? (
           <GaussianSplatBackground
             splatUrl={splatAlignment.splatUrl}
             position={splatAlignment.position}
@@ -1238,7 +1351,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
             transformScale={finiteNumber(splatAlignment.transformScale, 1)}
             basisRotationY={splatAlignment.basisRotationY}
           />
-        )}
+        ) : null}
       </Canvas>
     </div>
   )

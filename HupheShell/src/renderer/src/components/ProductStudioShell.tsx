@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import * as THREE from 'three'
+import { SplatFrameViewer } from './SplatFrameViewer'
 import { SplatViewer } from './SplatViewer'
 import { notifyIfCreditsRequired } from '../lib/credits-required'
 import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview, type Scene3DSceneControls } from './Scene3DEditor'
@@ -597,8 +598,15 @@ function isMarbleAlignment(alignment: Partial<SplatAlignment> | null | undefined
   return alignment?.source === 'marble' || isMarbleSplatUrl(url) || Boolean(alignment?.spzPath?.endsWith('/world.spz'))
 }
 
+function localPathToHupheFileUrl(path: string | null | undefined): string | null {
+  if (!path) return null
+  if (/^(huphe:\/\/file\/|https?:\/\/|blob:|data:)/.test(path)) return path
+  return `huphe://file/${encodeURIComponent(decodeURIComponent(path.replace(/^file:\/\//, '')))}`
+}
+
 const DEFAULT_BUBBLE_RADIUS = 3
 const DEFAULT_BUBBLE_FEATHER = 0.1
+const WORLDLABS_REFERENCE_FOV_Y = 50
 
 function cloneSplatAlignment(alignment: SplatAlignment): SplatAlignment {
   return {
@@ -674,6 +682,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [renderPacketStale, setRenderPacketStale] = useState(false)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [rightTab, setRightTab] = useState<'properties' | 'editor' | 'studio' | 'archive' | 'projects'>('studio')
+  const [currentCameraState, setCurrentCameraState] = useState<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
   const [allProjects, setAllProjects] = useState<any[]>([])
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -702,6 +711,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [orbitVideoExpanded, setOrbitVideoExpanded] = useState(false)
   const [clayLightboxIndex, setClayLightboxIndex] = useState<number | null>(null)
   const [splatViewerUrl, setSplatViewerUrl] = useState<string | null>(null)
+  const [splatFrameViewerOpen, setSplatFrameViewerOpen] = useState(false)
+  const [splatFrameCompositeOpacity, setSplatFrameCompositeOpacity] = useState(0.5)
+  const [splatFrameXFlip, setSplatFrameXFlip] = useState(true)
+  const [splatFramePreferSpz, setSplatFramePreferSpz] = useState(true)
   const [splatAlignment, setSplatAlignment] = useState<SplatAlignment | null>(null)
   const [splatBaseAlignment, setSplatBaseAlignment] = useState<SplatAlignment | null>(null)
   const [splatVisible, setSplatVisible] = useState(true)
@@ -713,6 +726,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setSplatBaseAlignment(base)
     setSplatAlignment(current)
   }
+
+  // Bij het laden van een archiefshot is de WorldLabs-nulcamera precies de
+  // camera waarmee die foto is gemaakt. Alleen bij een nieuwe koppeling/reset
+  // springen we naar dit anker; vrij rondkijken blijft daarna ongemoeid.
+  useEffect(() => {
+    if (splatAlignment?.source !== 'marble' || !splatAlignment.splatToShot) return
+    studioRef.current?.setCameraOrbit(
+      splatAlignment.position,
+      splatAlignment.sceneCenter,
+      splatAlignment.fovY,
+    )
+  }, [
+    splatAlignment?.source,
+    splatAlignment?.splatToShot,
+    splatAlignment?.renderVersionId,
+    splatAlignment?.worldId,
+    splatAlignment?.splatUrl,
+  ])
 
   const resetSplatAlignmentToBase = () => {
     if (!splatBaseAlignment) return
@@ -959,10 +990,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     } catch { /* ignore */ }
   }
 
-  const applyMarbleShotTransform = (alignment: SplatAlignment, manifest: any, baseAlignment?: SplatAlignment | null, forceRecalculate = false): SplatAlignment => {
-    // Herbereken altijd: de formule gebruikt de actuele camera en sceneCenter.
-    // Vroegere opgeslagen waarden (groupScale, basisRotationY etc.) worden niet meer hergebruikt.
-
+  const applyMarbleShotTransform = (alignment: SplatAlignment, manifest: any, _baseAlignment?: SplatAlignment | null, _forceRecalculate = false): SplatAlignment => {
     const cameraPos = manifest?.camera?.position
     const cameraTarget = manifest?.camera?.target
     if (!Array.isArray(cameraPos) || !Array.isArray(cameraTarget)) {
@@ -974,24 +1002,19 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
     const shotCamera = new THREE.Vector3(Number(cameraPos[0]), Number(cameraPos[1]), Number(cameraPos[2]))
     const shotTarget = new THREE.Vector3(Number(cameraTarget[0]), Number(cameraTarget[1]), Number(cameraTarget[2]))
-
-    const rawSceneCenter = baseAlignment?.sceneCenter ?? alignment.sceneCenter
-    const sceneCenter3 = rawSceneCenter
-      ? new THREE.Vector3(Number(rawSceneCenter[0]), Number(rawSceneCenter[1]), Number(rawSceneCenter[2]))
-      : new THREE.Vector3(0, 0, -1)
-
-    // Eikpunt: splat op COLMAP-oorsprong, camera op [0,0,0] kijkend naar [0,0,-1].
-    // Dit is identiek aan de World Labs viewer: camera.position=[0,0,0], camera.lookAt=[0,0,-1],
-    // splatMesh.rotation.x = Math.PI (= Q_xflip hieronder).
-    // De PS-camera en vaas worden hier buiten beschouwing gelaten.
-    const Q_xflip = new THREE.Quaternion(1, 0, 0, 0) // 180° om X-as: OpenCV +Y-down → THREE.js Y-up
+    const shotObject = new THREE.PerspectiveCamera(WORLDLABS_REFERENCE_FOV_Y, 16 / 9, 0.1, 1000)
+    shotObject.position.copy(shotCamera)
+    shotObject.up.set(0, 1, 0)
+    shotObject.lookAt(shotTarget)
+    shotObject.updateMatrixWorld(true)
+    const shotQuaternion = shotObject.quaternion.clone().normalize()
 
     return {
       ...alignment,
       source: 'marble',
       splatToShot: true,
-      transformPosition: [0, 0, 0],
-      transformQuaternion: [Q_xflip.x, Q_xflip.y, Q_xflip.z, Q_xflip.w],
+      transformPosition: [shotCamera.x, shotCamera.y, shotCamera.z],
+      transformQuaternion: [shotQuaternion.x, shotQuaternion.y, shotQuaternion.z, shotQuaternion.w],
       transformScale: 1,
       basisRotationY: 0,
       bubbleRadius: 0,
@@ -1005,10 +1028,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       groupMaskOffsetX: 0,
       groupMaskOffsetY: 0,
       groupMaskOffsetZ: 0,
-      sceneCenter: alignment.sceneCenter ?? [0, 0, 0],
+      sceneCenter: [shotTarget.x, shotTarget.y, shotTarget.z],
       position: cameraPos as [number, number, number],
-      quaternion: alignment.quaternion ?? [0, 0, 0, 1],
-      fovY: alignment.fovY ?? (manifest?.camera?.fov ?? 60),
+      quaternion: [shotQuaternion.x, shotQuaternion.y, shotQuaternion.z, shotQuaternion.w],
+      fovY: WORLDLABS_REFERENCE_FOV_Y,
       width: alignment.width ?? 1920,
       height: alignment.height ?? 1080,
     }
@@ -1605,15 +1628,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!manifest?.camera?.position || !manifest?.camera?.target || !studioRef.current) return
 
     if (viewportOverlay === 'bgComposite') {
-      // Marble eikpunt: camera op oorsprong (= Marble viewer), niet op render-camera.
-      if (splatAlignment?.source === 'marble') {
-        studioRef.current.setCameraOrbit([0, 0, 0], [0, 0, -1], splatAlignment.fovY ?? 60)
-      } else {
-        // Herstel camera naar render-positie met originele FOV.
-        studioRef.current.setCameraOrbit(manifest.camera.position, manifest.camera.target, manifest.camera.fov)
-      }
+      // Herstel camera naar render-positie met originele FOV.
+      studioRef.current.setCameraOrbit(manifest.camera.position, manifest.camera.target, manifest.camera.fov)
     }
-  }, [viewportOverlay, splatAlignment])
+  }, [viewportOverlay])
 
   async function hydrateLatestState(projectId = getStoredProjectId(project), showBusy = true) {
     if (!projectId) return
@@ -2673,10 +2691,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             // Voor marble is het reset-anker de berekende shot-uitlijning (niet de ruwe COLMAP base).
             // Zo gaat Reset terug naar de automatisch berekende positie, niet naar de import-state.
             applySplatAlignment(alignment, enriched.source === 'marble' ? alignment : base)
-            // Eikpunt: marble camera op [0,0,0] kijkend naar [0,0,-1], zelfde als World Labs viewer.
-            if (alignment.source === 'marble') {
-              studioRef.current?.setCameraOrbit([0, 0, 0], [0, 0, -1], alignment.fovY ?? 60)
-            }
           } else {
             setSplatBaseAlignment(null)
             setSplatAlignment(null)
@@ -2714,7 +2728,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 const nextAlignment = applyMarbleShotTransform(baseAlignmentForShot, manifest, baseAlignmentForShot)
                 setSplatBaseAlignment((prev) => prev ?? cloneSplatAlignment(nextAlignment))
                 setSplatAlignment((prev) => prev ?? nextAlignment) // loadSceneAlignment al ingesteld
-                studioRef.current?.setCameraOrbit([0, 0, 0], [0, 0, -1], nextAlignment.fovY ?? 60)
               }
             }).catch(() => {})
           }
@@ -4524,6 +4537,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     : viewportOverlay === 'bgComposite'
     ? undefined  // handled separately as layered composite
     : viewportOverlay ? overlayPasses.find((p) => p.key === viewportOverlay)?.src : undefined
+  const splatFrameSpzSrc = localPathToHupheFileUrl(splatAlignment?.spzPath)
+  const splatFrameSplatSrc = splatAlignment?.splatUrl ?? null
+  const splatFrameViewerSrc = splatFramePreferSpz && splatFrameSpzSrc
+    ? splatFrameSpzSrc
+    : splatFrameSplatSrc ?? splatFrameSpzSrc
+  const splatFrameCompositeSrc = finalCompositeUrl ?? project.finalRender?.src ?? backgroundPlateUrl ?? project.sourceImage?.src
 
   const viewportContent = (
     <div ref={viewportShellRef} className="relative h-full w-full">
@@ -4767,6 +4786,74 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       })()}
       <ReconstructingOverlay visible={envReconstructing} label="Reconstructing environment" />
       <ReconstructingOverlay visible={finalLoading || !!busy} label={busy || 'Composing image'} />
+      {splatFrameViewerOpen && splatFrameViewerSrc && (
+        <div className="pointer-events-none absolute inset-4 z-[45] flex items-center justify-center">
+          <div
+            className="pointer-events-auto relative overflow-hidden rounded-sm border border-cyan-300/55 bg-black shadow-2xl"
+            style={{ aspectRatio: '16 / 9', width: 'min(92%, calc((100vh - 180px) * 16 / 9))' }}
+          >
+            <SplatFrameViewer src={splatFrameViewerSrc} xFlip={splatFrameXFlip} />
+            {splatFrameCompositeSrc && splatFrameCompositeOpacity > 0 && (
+              <img
+                src={splatFrameCompositeSrc}
+                draggable={false}
+                className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+                style={{ opacity: splatFrameCompositeOpacity }}
+              />
+            )}
+            <div className="pointer-events-none absolute left-2 top-2 rounded-full border border-white/10 bg-black/70 px-2.5 py-1 text-[10px] font-semibold text-cyan-100 shadow-lg backdrop-blur">
+              WorldLabs frame · cam 0,0,0 → -Z
+            </div>
+            <div className="absolute bottom-2 left-2 right-2 flex flex-wrap items-center justify-between gap-2 rounded-full border border-white/10 bg-black/72 px-3 py-2 shadow-xl backdrop-blur-md">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-medium text-white/45">Composite</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={splatFrameCompositeOpacity}
+                  onChange={(e) => setSplatFrameCompositeOpacity(Number(e.currentTarget.value))}
+                  className="h-1 w-28 accent-cyan-300"
+                />
+                <span className="w-7 text-right text-[10px] font-medium text-white/45">
+                  {Math.round(splatFrameCompositeOpacity * 100)}%
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {splatFrameSpzSrc && splatFrameSplatSrc && (
+                  <button
+                    type="button"
+                    onClick={() => setSplatFramePreferSpz((v) => !v)}
+                    className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[10px] font-semibold text-white/55 transition-colors hover:bg-white/[0.10]"
+                  >
+                    {splatFramePreferSpz ? 'SPZ' : 'SPLAT'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSplatFrameXFlip((v) => !v)}
+                  className={[
+                    'rounded-full border px-2.5 py-1 text-[10px] font-semibold transition-colors',
+                    splatFrameXFlip
+                      ? 'border-cyan-300/35 bg-cyan-400/15 text-cyan-100'
+                      : 'border-white/10 bg-white/[0.04] text-white/45 hover:bg-white/[0.08]',
+                  ].join(' ')}
+                >
+                  X flip {splatFrameXFlip ? 'aan' : 'uit'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSplatFrameViewerOpen(false)}
+                  className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[10px] font-semibold text-white/55 transition-colors hover:bg-white/[0.10]"
+                >
+                  Sluiten
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {!splatViewerUrl && (
         <Scene3DEditor
           ref={studioRef}
@@ -4788,6 +4875,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           viewMode={viewMode}
           environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
           splatAlignment={splatVisible ? splatAlignment : null}
+          onOrbitChange={(position, target) => setCurrentCameraState({ position, target })}
         />
       )}
       {sourceReady && (
@@ -4956,6 +5044,30 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </div>
               </button>
             )}
+            {splatFrameViewerSrc && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSplatViewerUrl(null)
+                  setSplatFrameViewerOpen((v) => !v)
+                }}
+                className={[
+                  'group/btn relative flex h-8 items-center gap-1 rounded-full px-2 transition-colors',
+                  splatFrameViewerOpen
+                    ? 'bg-cyan-400/20 text-cyan-200'
+                    : 'text-white/50 hover:bg-white/10 hover:text-white/80',
+                ].join(' ')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="5" width="18" height="14" rx="2" />
+                  <path d="M8 9h8M8 13h5" />
+                </svg>
+                <span className="text-[10px] font-semibold">WL</span>
+                <div className="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 rounded-full border border-white/[0.12] bg-white px-2.5 py-1 text-[10px] font-semibold text-black opacity-0 shadow-lg transition-opacity duration-150 group-hover/btn:opacity-100 whitespace-nowrap">
+                  WorldLabs splat in fotokader
+                </div>
+              </button>
+            )}
             <div className="mx-0.5 h-5 w-px bg-white/15" />
             {overlayPasses.map((pass) => (
               <button
@@ -5055,6 +5167,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               onUpdateObject={sceneControls.updateObject}
               onUpdateLight={sceneControls.updateLight}
               onEnvironmentChange={sceneControls.setEnvironment}
+              cameraState={currentCameraState ?? sceneControls.getOrbitState()}
+              onSetCamera={(position, target) => {
+                setCurrentCameraState({ position, target })
+                studioRef.current?.setCameraOrbit(position, target)
+              }}
               inline
             />
           </div>

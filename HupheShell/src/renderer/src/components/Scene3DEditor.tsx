@@ -77,7 +77,8 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   viewMode?: ViewMode
   environmentMeshUrls?: string[]
   splatAlignment?: SplatAlignment | null
-}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, overlayOpacity = 1, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls, splatAlignment }, ref) {
+  onOrbitChange?: (position: [number, number, number], target: [number, number, number]) => void
+}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, overlayOpacity = 1, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls, splatAlignment, onOrbitChange }, ref) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
@@ -346,9 +347,10 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           onDeselectAll={() => { setSelectedObjectId(null); setSelectedLightId(null) }}
           onObjectTransformed={transformDirtyObject}
           onActivateCamera={(id) => { markSceneDirty(); setActiveCameraId(scene.activeCameraId === id ? null : id) }}
-          onDeactivateCamera={() => { if (scene.activeCameraId) { markSceneDirty(); setActiveCameraId(null) } }}
-          onViewChanged={markSceneDirty}
-          orbitStateRef={orbitStateRef}
+	          onDeactivateCamera={() => { if (scene.activeCameraId) { markSceneDirty(); setActiveCameraId(null) } }}
+	          onViewChanged={markSceneDirty}
+	          onOrbitChange={onOrbitChange}
+	          orbitStateRef={orbitStateRef}
           debugRings={debugRings}
           environmentMeshUrls={environmentMeshUrls}
           transparentCanvas={transparentCanvas}

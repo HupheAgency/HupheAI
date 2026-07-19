@@ -157,6 +157,30 @@ function Vec3Row({ label, value, onChange }: {
   )
 }
 
+function formatCoord(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  return (Math.round(value * 100) / 100).toFixed(2).replace(/\.00$/, '')
+}
+
+function CameraReadout({ label, value }: {
+  label: string
+  value: [number, number, number]
+}) {
+  return (
+    <div>
+      <p className="mb-1 text-[10px] text-white/40">{label}</p>
+      <div className="grid grid-cols-3 gap-1">
+        {(['X', 'Y', 'Z'] as const).map((axis, i) => (
+          <div key={axis} className="rounded border border-white/[0.06] bg-white/[0.03] px-1.5 py-1">
+            <span className="mr-1 text-[9px] text-white/25">{axis}</span>
+            <span className="font-mono text-[10px] text-white/70">{formatCoord(value[i])}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function ObjectItem({ obj, selected, onSelect, onUpdate, onDelete }: {
   obj: Scene3DObject; selected: boolean; onSelect: () => void
   onUpdate: (patch: Partial<Scene3DObject>) => void; onDelete: () => void
@@ -315,6 +339,7 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc, externa
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const fullscreenViewportRef = useRef<Scene3DViewportHandle>(null)
   const orbitStateRef = useRef<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
+  const [orbitDisplayState, setOrbitDisplayState] = useState<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
   const [viewportOpen, setViewportOpen] = useState(true)
   const [subjectsOpen, setSubjectsOpen] = useState(true)
   const [cameraOpen, setCameraOpen] = useState(false)
@@ -342,11 +367,44 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc, externa
     setEnvironment, updateBackground, onObjectTransformed, resetScene,
   } = externalControls ?? localScene
 
+  const publishOrbitState = useCallback((state: { position: [number, number, number]; target: [number, number, number] } | null) => {
+    if (!state) return
+    setOrbitDisplayState((prev) => {
+      if (
+        prev &&
+        prev.position[0] === state.position[0] &&
+        prev.position[1] === state.position[1] &&
+        prev.position[2] === state.position[2] &&
+        prev.target[0] === state.target[0] &&
+        prev.target[1] === state.target[1] &&
+        prev.target[2] === state.target[2]
+      ) return prev
+      return {
+        position: [...state.position] as [number, number, number],
+        target: [...state.target] as [number, number, number],
+      }
+    })
+  }, [])
+
+  useEffect(() => {
+    let frame: number
+    const tick = () => {
+      publishOrbitState(externalControls?.getOrbitState?.() ?? orbitStateRef.current)
+      frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [externalControls, publishOrbitState])
+
+  const handleOrbitChange = useCallback((position: [number, number, number], target: [number, number, number]) => {
+    publishOrbitState({ position, target })
+  }, [publishOrbitState])
+
   const handleSaveCurrentView = useCallback(() => {
-    const state = externalControls?.getOrbitState?.() ?? orbitStateRef.current
+    const state = externalControls?.getOrbitState?.() ?? orbitDisplayState ?? orbitStateRef.current
     if (!state) return
     addCamera(state.position, state.target, scene.cameras[0]?.fov ?? 50)
-  }, [addCamera, scene.cameras, externalControls])
+  }, [addCamera, scene.cameras, externalControls, orbitDisplayState])
 
   const handleActivateCamera = useCallback((id: string) => {
     setActiveCameraId(scene.activeCameraId === id ? null : id)
@@ -438,6 +496,24 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc, externa
 
   const controlsPanel = (
     <>
+      <div className="border-b border-white/[0.06] px-3 py-3">
+        <div className="mb-2 flex items-center justify-between">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-white/55">Huidige camera</p>
+          <button type="button" onClick={handleSaveCurrentView}
+            className="rounded-md border border-purple-400/20 px-2 py-1 text-[10px] text-purple-400/60 hover:bg-purple-400/[0.06] hover:text-purple-300/80">
+            Opslaan
+          </button>
+        </div>
+        {orbitDisplayState ? (
+          <div className="flex flex-col gap-2">
+            <CameraReadout label="Positie" value={orbitDisplayState.position} />
+            <CameraReadout label="Doel" value={orbitDisplayState.target} />
+          </div>
+        ) : (
+          <p className="text-[10px] text-white/25">Beweeg door de ruimte om je positie te zien.</p>
+        )}
+      </div>
+
       {/* Onderwerp (Objects) */}
       <div className="border-b border-white/[0.06]">
         <SectionHeader title="Onderwerp" open={subjectsOpen} onToggle={() => setSubjectsOpen(!subjectsOpen)}
@@ -644,6 +720,7 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc, externa
             onObjectTransformed={onObjectTransformed}
             onActivateCamera={handleActivateCamera}
             onDeactivateCamera={handleDeactivateCamera}
+            onOrbitChange={handleOrbitChange}
             orbitStateRef={orbitStateRef}
           />
         </div>
@@ -681,6 +758,7 @@ export default function Scene3DEditorInline({ onResult, currentImageSrc, externa
                 onObjectTransformed={onObjectTransformed}
                 onActivateCamera={handleActivateCamera}
                 onDeactivateCamera={handleDeactivateCamera}
+                onOrbitChange={handleOrbitChange}
                 orbitStateRef={orbitStateRef}
               />
             </div>
