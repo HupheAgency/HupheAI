@@ -328,7 +328,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
         onDelete={deleteDirtySelected}
         hasSelection={!!selectedObjectId}
       />
-      <div className="relative flex-1">
+      <div className="relative flex-1" data-scene-editor-viewport="true">
         {backgroundPlateSrc && (
           <div className="pointer-events-none absolute inset-4 z-0 flex items-center justify-center">
             <div className="relative w-full max-w-[min(92%,calc((100vh-180px)*16/9))]" style={{ aspectRatio: '16 / 9' }}>

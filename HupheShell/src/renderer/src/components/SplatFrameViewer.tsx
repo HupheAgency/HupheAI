@@ -1,22 +1,81 @@
 import { useEffect, useRef, useState } from 'react'
 
+export interface SplatReferencePose {
+  position: [number, number, number]
+  quaternion: [number, number, number, number]
+  target: [number, number, number]
+  fovY: number
+}
+
 interface SplatFrameViewerProps {
   src: string
   xFlip?: boolean
+  onPoseChange?: (pose: SplatReferencePose) => void
+  onReadyPose?: (pose: SplatReferencePose) => void
 }
 
-export function SplatFrameViewer({ src, xFlip = true }: SplatFrameViewerProps) {
+export function SplatFrameViewer({ src, xFlip = true, onPoseChange, onReadyPose }: SplatFrameViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<any>(null)
+  const onPoseChangeRef = useRef(onPoseChange)
+  const onReadyPoseRef = useRef(onReadyPose)
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [progress, setProgress] = useState(0)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  useEffect(() => { onPoseChangeRef.current = onPoseChange }, [onPoseChange])
+  useEffect(() => { onReadyPoseRef.current = onReadyPose }, [onReadyPose])
 
   useEffect(() => {
     if (!containerRef.current || !src) return
 
     let disposed = false
+    let loadSettled = false
+    let resourcesDisposed = false
     let blobUrl: string | null = null
+    let viewer: any = null
+    let poseFrame = 0
+    let lastPoseSignature = ''
+
+    const readPose = (): SplatReferencePose | null => {
+      const camera = viewer?.camera
+      if (!camera?.position || !camera?.quaternion) return null
+      const target = viewer?.controls?.target
+      const fallbackTarget = camera.position.clone().add(
+        new (camera.position.constructor)(0, 0, -1).applyQuaternion(camera.quaternion),
+      )
+      const resolvedTarget = target ?? fallbackTarget
+      return {
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        quaternion: [camera.quaternion.x, camera.quaternion.y, camera.quaternion.z, camera.quaternion.w],
+        target: [resolvedTarget.x, resolvedTarget.y, resolvedTarget.z],
+        fovY: Number.isFinite(camera.fov) ? camera.fov : 50,
+      }
+    }
+
+    const watchPose = () => {
+      if (disposed) return
+      const pose = readPose()
+      if (pose) {
+        const signature = [...pose.position, ...pose.quaternion, ...pose.target, pose.fovY]
+          .map((value) => value.toFixed(6))
+          .join(',')
+        if (signature !== lastPoseSignature) {
+          lastPoseSignature = signature
+          onPoseChangeRef.current?.(pose)
+        }
+      }
+      poseFrame = window.requestAnimationFrame(watchPose)
+    }
+
+    const disposeResources = () => {
+      if (resourcesDisposed) return
+      resourcesDisposed = true
+      try { void Promise.resolve(viewer?.dispose()).catch(() => undefined) } catch {}
+      if (viewerRef.current === viewer) viewerRef.current = null
+      if (blobUrl) URL.revokeObjectURL(blobUrl)
+      window.cancelAnimationFrame(poseFrame)
+    }
 
     async function init() {
       try {
@@ -33,7 +92,7 @@ export function SplatFrameViewer({ src, xFlip = true }: SplatFrameViewerProps) {
 
         if (disposed) return
 
-        const viewer = new GaussianSplats3D.Viewer({
+        viewer = new GaussianSplats3D.Viewer({
           rootElement: containerRef.current!,
           selfDrivenMode: true,
           useBuiltInControls: true,
@@ -49,14 +108,14 @@ export function SplatFrameViewer({ src, xFlip = true }: SplatFrameViewerProps) {
 
         const ext = src.split('?')[0].split('.').pop()?.toLowerCase()
         const SceneFormat = (GaussianSplats3D as any).SceneFormat
-        const format = ext === 'spz' && SceneFormat?.SPZ != null
-          ? SceneFormat.SPZ
-          : SceneFormat?.Splat ?? undefined
+        const spzFormat = SceneFormat?.Spz ?? SceneFormat?.SPZ
+        const format = ext === 'spz' && spzFormat != null ? spzFormat : SceneFormat?.Splat ?? undefined
 
+        const isSpz = format === spzFormat
         await viewer.addSplatScene(blobUrl, {
           ...(format != null ? { format } : {}),
           splatAlphaRemovalThreshold: 5,
-          progressiveLoad: true,
+          progressiveLoad: !isSpz,
           position: [0, 0, 0],
           rotation: xFlip ? [1, 0, 0, 0] : [0, 0, 0, 1],
           scale: [1, 1, 1],
@@ -66,6 +125,11 @@ export function SplatFrameViewer({ src, xFlip = true }: SplatFrameViewerProps) {
         if (disposed) return
 
         viewer.start()
+        poseFrame = window.requestAnimationFrame(() => {
+          const pose = readPose()
+          if (pose) onReadyPoseRef.current?.(pose)
+          watchPose()
+        })
         setStatus('ready')
       } catch (err: any) {
         if (!disposed) {
@@ -73,6 +137,9 @@ export function SplatFrameViewer({ src, xFlip = true }: SplatFrameViewerProps) {
           setErrorMsg(String(err?.message ?? err))
           setStatus('error')
         }
+      } finally {
+        loadSettled = true
+        if (disposed) disposeResources()
       }
     }
 
@@ -80,9 +147,7 @@ export function SplatFrameViewer({ src, xFlip = true }: SplatFrameViewerProps) {
 
     return () => {
       disposed = true
-      try { viewerRef.current?.dispose() } catch {}
-      viewerRef.current = null
-      if (blobUrl) URL.revokeObjectURL(blobUrl)
+      if (loadSettled) disposeResources()
     }
   }, [src, xFlip])
 

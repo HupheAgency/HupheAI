@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import * as THREE from 'three'
-import { SplatFrameViewer } from './SplatFrameViewer'
+import { SplatFrameViewer, type SplatReferencePose } from './SplatFrameViewer'
 import { SplatViewer } from './SplatViewer'
 import { notifyIfCreditsRequired } from '../lib/credits-required'
 import Scene3DEditor, { type Scene3DEditorHandle, type Scene3DRenderPacketPreview, type Scene3DSceneControls } from './Scene3DEditor'
@@ -616,6 +616,9 @@ function cloneSplatAlignment(alignment: SplatAlignment): SplatAlignment {
     sceneCenter: [...alignment.sceneCenter] as [number, number, number],
     transformPosition: alignment.transformPosition ? [...alignment.transformPosition] as [number, number, number] : undefined,
     transformQuaternion: alignment.transformQuaternion ? [...alignment.transformQuaternion] as [number, number, number, number] : undefined,
+    worldReferencePosition: alignment.worldReferencePosition ? [...alignment.worldReferencePosition] as [number, number, number] : undefined,
+    worldReferenceQuaternion: alignment.worldReferenceQuaternion ? [...alignment.worldReferenceQuaternion] as [number, number, number, number] : undefined,
+    worldReferenceTarget: alignment.worldReferenceTarget ? [...alignment.worldReferenceTarget] as [number, number, number] : undefined,
   }
 }
 
@@ -658,6 +661,373 @@ function manifestProductPosition(manifest: any): [number, number, number] | null
   return null
 }
 
+function archiveProductTransform(manifest: any, productTransform: {
+  position?: [number, number, number]
+  rotation?: [number, number, number]
+  scale?: [number, number, number]
+}): {
+  position?: [number, number, number]
+  rotation?: [number, number, number]
+  scale?: [number, number, number]
+} {
+  const cameraPosition = manifest?.camera?.position
+  const cameraTarget = manifest?.camera?.target
+  const screenBbox = manifest?.product?.screenBbox
+  const worldMin = manifest?.product?.worldBounds?.min
+  const worldMax = manifest?.product?.worldBounds?.max
+  const viewportWidth = finiteNumber(manifest?.viewport?.width, 0)
+  const viewportHeight = finiteNumber(manifest?.viewport?.height, 0)
+  const fovScale = finiteNumber(manifest?.viewport?.fovScale, 1)
+  const position = productTransform.position
+
+  if (
+    !position || !Array.isArray(cameraPosition) || !Array.isArray(cameraTarget)
+    || !Array.isArray(worldMin) || !Array.isArray(worldMax)
+    || !screenBbox || viewportWidth <= 0 || viewportHeight <= 0
+    || fovScale <= 0 || fovScale >= 0.999
+  ) return productTransform
+
+  const frameHeight = viewportHeight * fovScale
+  const frameWidth = frameHeight * (16 / 9)
+  if (frameWidth <= 0 || frameHeight <= 0) return productTransform
+
+  const frameLeft = (viewportWidth - frameWidth) / 2
+  const frameTop = (viewportHeight - frameHeight) / 2
+  const targetMinX = ((finiteNumber(screenBbox.x, 0) - frameLeft) / frameWidth) * 2 - 1
+  const targetMaxX = ((finiteNumber(screenBbox.x, 0) + finiteNumber(screenBbox.width, 0) - frameLeft) / frameWidth) * 2 - 1
+  const targetMaxY = 1 - ((finiteNumber(screenBbox.y, 0) - frameTop) / frameHeight) * 2
+  const targetMinY = 1 - ((finiteNumber(screenBbox.y, 0) + finiteNumber(screenBbox.height, 0) - frameTop) / frameHeight) * 2
+
+  const camera = new THREE.PerspectiveCamera(
+    finiteNumber(manifest?.camera?.fov, WORLDLABS_REFERENCE_FOV_Y),
+    16 / 9,
+    0.1,
+    1000,
+  )
+  camera.position.fromArray(cameraPosition)
+  camera.lookAt(new THREE.Vector3().fromArray(cameraTarget))
+  camera.updateMatrixWorld(true)
+
+  const bounds = new THREE.Box3(
+    new THREE.Vector3().fromArray(worldMin),
+    new THREE.Vector3().fromArray(worldMax),
+  )
+  if (bounds.isEmpty()) return productTransform
+
+  const projected: THREE.Vector3[] = []
+  for (const x of [bounds.min.x, bounds.max.x]) {
+    for (const y of [bounds.min.y, bounds.max.y]) {
+      for (const z of [bounds.min.z, bounds.max.z]) {
+        projected.push(new THREE.Vector3(x, y, z).project(camera))
+      }
+    }
+  }
+  const currentMinX = Math.min(...projected.map((point) => point.x))
+  const currentMaxX = Math.max(...projected.map((point) => point.x))
+  const currentMinY = Math.min(...projected.map((point) => point.y))
+  const currentMaxY = Math.max(...projected.map((point) => point.y))
+  const currentWidth = currentMaxX - currentMinX
+  const currentHeight = currentMaxY - currentMinY
+  const targetWidth = targetMaxX - targetMinX
+  const targetHeight = targetMaxY - targetMinY
+  if (currentWidth <= 0 || currentHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) return productTransform
+
+  const scaleFactor = Math.sqrt((targetWidth / currentWidth) * (targetHeight / currentHeight))
+  if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) return productTransform
+
+  const boundsCenter = bounds.getCenter(new THREE.Vector3())
+  const viewCenter = boundsCenter.clone().applyMatrix4(camera.matrixWorldInverse)
+  const depth = -viewCenter.z
+  if (depth <= 0) return productTransform
+  const focalY = 1 / Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)
+  const targetCenterX = (targetMinX + targetMaxX) / 2
+  const targetCenterY = (targetMinY + targetMaxY) / 2
+  const desiredViewCenter = new THREE.Vector3(
+    targetCenterX * depth * camera.aspect / focalY,
+    targetCenterY * depth / focalY,
+    viewCenter.z,
+  )
+  const desiredWorldCenter = boundsCenter.clone().add(
+    desiredViewCenter.sub(viewCenter).applyQuaternion(camera.quaternion),
+  )
+  const oldPosition = new THREE.Vector3().fromArray(position)
+  const scaledCenterOffset = boundsCenter.clone().sub(oldPosition).multiplyScalar(scaleFactor)
+  const correctedPosition = desiredWorldCenter.sub(scaledCenterOffset)
+  const baseScale = productTransform.scale ?? [1, 1, 1]
+
+  return {
+    ...productTransform,
+    position: correctedPosition.toArray() as [number, number, number],
+    scale: baseScale.map((value) => finiteNumber(value, 1) * scaleFactor) as [number, number, number],
+  }
+}
+
+type ArchiveProductTransform = {
+  position?: [number, number, number]
+  rotation?: [number, number, number]
+  scale?: [number, number, number]
+}
+
+type MaskedSplatProductFit = {
+  surfaceDepth: number
+  viewMinX: number
+  viewMaxX: number
+  viewMinY: number
+  viewMaxY: number
+}
+
+const maskedSplatDepthCache = new Map<string, Promise<MaskedSplatProductFit | null>>()
+
+async function loadMaskPixels(url: string): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`Masker kon niet worden geladen (HTTP ${response.status}).`)
+  const bitmap = await createImageBitmap(await response.blob())
+  const canvas = document.createElement('canvas')
+  canvas.width = bitmap.width
+  canvas.height = bitmap.height
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) throw new Error('Geen 2D-canvas beschikbaar voor objectmasker.')
+  context.drawImage(bitmap, 0, 0)
+  bitmap.close()
+  return {
+    data: context.getImageData(0, 0, canvas.width, canvas.height).data,
+    width: canvas.width,
+    height: canvas.height,
+  }
+}
+
+/**
+ * Meet de voorste, dominante splatlaag binnen het productmasker. WorldLabs
+ * bewaart de zichtbare productvorm in dezelfde referentieprojectie als frame 1;
+ * zo krijgen we de ontbrekende diepte zonder de al uitgelijnde wereld te bewegen.
+ */
+function estimateMaskedSplatSurfaceDepth(
+  alignment: SplatAlignment,
+  manifest: any,
+  objectMaskUrl: string,
+): Promise<MaskedSplatProductFit | null> {
+  const cacheKey = JSON.stringify([
+    alignment.splatUrl,
+    objectMaskUrl,
+    alignment.transformPosition,
+    alignment.transformQuaternion,
+    alignment.transformScale,
+    alignment.groupPositionX,
+    alignment.groupPositionY,
+    alignment.groupPositionZ,
+    alignment.groupScale,
+    alignment.groupTiltX,
+    alignment.basisRotationY,
+    alignment.groupTiltZ,
+    alignment.worldReferencePosition,
+    alignment.worldReferenceQuaternion,
+    alignment.worldReferenceFovY,
+  ])
+  const cached = maskedSplatDepthCache.get(cacheKey)
+  if (cached) return cached
+
+  const pending = (async () => {
+    if (!isMarbleAlignment(alignment) || !alignment.splatUrl.includes('.splat')) return null
+    const cameraPosition = manifest?.camera?.position
+    const cameraTarget = manifest?.camera?.target
+    if (!Array.isArray(cameraPosition) || !Array.isArray(cameraTarget)) return null
+
+    const [splatResponse, mask] = await Promise.all([
+      fetch(alignment.splatUrl),
+      loadMaskPixels(objectMaskUrl),
+    ])
+    if (!splatResponse.ok) throw new Error(`Splat kon niet worden gemeten (HTTP ${splatResponse.status}).`)
+    const splat = await splatResponse.arrayBuffer()
+    const bytes = new Uint8Array(splat)
+    const values = new DataView(splat)
+
+    const referencePosition = new THREE.Vector3(...(alignment.worldReferencePosition ?? [0, 0, 0]))
+    const referenceQuaternionInverse = new THREE.Quaternion(...(alignment.worldReferenceQuaternion ?? [0, 0, 0, 1])).invert()
+    const referenceFov = finiteNumber(alignment.worldReferenceFovY, WORLDLABS_REFERENCE_FOV_Y)
+    const focalY = 1 / Math.tan(THREE.MathUtils.degToRad(referenceFov) / 2)
+    const aspect = mask.width / mask.height
+
+    const shotCamera = new THREE.PerspectiveCamera(WORLDLABS_REFERENCE_FOV_Y, aspect, 0.1, 1000)
+    shotCamera.position.fromArray(cameraPosition)
+    shotCamera.lookAt(new THREE.Vector3().fromArray(cameraTarget))
+    shotCamera.updateMatrixWorld(true)
+
+    const scenePosition = new THREE.Vector3(...(alignment.transformPosition ?? cameraPosition)).add(new THREE.Vector3(
+      finiteNumber(alignment.groupPositionX, 0),
+      finiteNumber(alignment.groupPositionY, 0),
+      finiteNumber(alignment.groupPositionZ, 0),
+    ))
+    const sceneQuaternion = new THREE.Quaternion(...(alignment.transformQuaternion ?? [0, 0, 0, 1]))
+      .multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(
+        finiteNumber(alignment.groupTiltX, 0),
+        finiteNumber(alignment.basisRotationY, 0),
+        finiteNumber(alignment.groupTiltZ, 0),
+        'XYZ',
+      )))
+      .multiply(new THREE.Quaternion(1, 0, 0, 0))
+      .normalize()
+    const sceneScale = finiteNumber(alignment.transformScale, 1) * finiteNumber(alignment.groupScale, 1)
+    const x180 = new THREE.Quaternion(1, 0, 0, 0)
+    const referencePoint = new THREE.Vector3()
+    const worldPoint = new THREE.Vector3()
+    const maskedPoints: Array<{ depth: number; x: number; y: number }> = []
+
+    for (let offset = 0; offset + 32 <= splat.byteLength; offset += 32) {
+      if (bytes[offset + 27] <= 5) continue
+      const rawX = values.getFloat32(offset, true)
+      const rawY = values.getFloat32(offset + 4, true)
+      const rawZ = values.getFloat32(offset + 8, true)
+      if (!Number.isFinite(rawX) || !Number.isFinite(rawY) || !Number.isFinite(rawZ)) continue
+
+      referencePoint.set(rawX, rawY, rawZ).applyQuaternion(x180)
+      referencePoint.sub(referencePosition).applyQuaternion(referenceQuaternionInverse)
+      const referenceDepth = -referencePoint.z
+      if (referenceDepth <= 0.05) continue
+      const ndcX = (referencePoint.x / referenceDepth) * focalY / aspect
+      const ndcY = (referencePoint.y / referenceDepth) * focalY
+      const pixelX = Math.round((ndcX + 1) * 0.5 * (mask.width - 1))
+      const pixelY = Math.round((1 - ndcY) * 0.5 * (mask.height - 1))
+      if (pixelX < 0 || pixelY < 0 || pixelX >= mask.width || pixelY >= mask.height) continue
+      const maskOffset = (pixelY * mask.width + pixelX) * 4
+      if (mask.data[maskOffset] < 128 || mask.data[maskOffset + 3] < 128) continue
+
+      worldPoint.set(rawX, rawY, rawZ).multiplyScalar(sceneScale).applyQuaternion(sceneQuaternion).add(scenePosition)
+      worldPoint.applyMatrix4(shotCamera.matrixWorldInverse)
+      const shotDepth = -worldPoint.z
+      if (shotDepth > 0.05 && Number.isFinite(shotDepth)) {
+        maskedPoints.push({ depth: shotDepth, x: worldPoint.x, y: worldPoint.y })
+      }
+    }
+    const depths = maskedPoints.map((point) => point.depth)
+    if (depths.length < 50) return null
+
+    depths.sort((a, b) => a - b)
+    const range = depths[depths.length - 1] - depths[0]
+    const binWidth = Math.max(0.02 * Math.max(sceneScale, 0.001), range / 120)
+    const histogram = new Map<number, number>()
+    for (const depth of depths) {
+      const bin = Math.round(depth / binWidth)
+      histogram.set(bin, (histogram.get(bin) ?? 0) + 1)
+    }
+    const modeBin = [...histogram.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
+    if (modeBin == null) return null
+    const modeDepths = depths.filter((depth) => Math.abs(depth / binWidth - modeBin) <= 2)
+    const surfaceDepth = modeDepths[Math.floor(modeDepths.length / 2)]
+    const surfacePoints = maskedPoints.filter((point) => Math.abs(point.depth / binWidth - modeBin) <= 2)
+    const quantile = (values: number[], fraction: number) => {
+      const sorted = [...values].sort((a, b) => a - b)
+      return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * fraction)))]
+    }
+    const fit: MaskedSplatProductFit = {
+      surfaceDepth,
+      viewMinX: quantile(surfacePoints.map((point) => point.x), 0.02),
+      viewMaxX: quantile(surfacePoints.map((point) => point.x), 0.98),
+      viewMinY: quantile(surfacePoints.map((point) => point.y), 0.02),
+      viewMaxY: quantile(surfacePoints.map((point) => point.y), 0.98),
+    }
+    console.info('[ProductStudio] splat-productfit gemeten', JSON.stringify({
+      pointsInMask: depths.length,
+      ...fit,
+      modePoints: modeDepths.length,
+    }))
+    return fit
+  })().catch((error) => {
+    console.warn('[ProductStudio] productdiepte uit splat meten mislukt:', error)
+    return null
+  })
+
+  maskedSplatDepthCache.set(cacheKey, pending)
+  return pending
+}
+
+function moveArchiveProductToSplatDepth(
+  manifest: any,
+  sourceTransform: ArchiveProductTransform,
+  correctedTransform: ArchiveProductTransform,
+  fit: MaskedSplatProductFit,
+): ArchiveProductTransform {
+  const cameraPositionValues = manifest?.camera?.position
+  const cameraTargetValues = manifest?.camera?.target
+  const worldMin = manifest?.product?.worldBounds?.min
+  const worldMax = manifest?.product?.worldBounds?.max
+  if (
+    !correctedTransform.position || !Array.isArray(cameraPositionValues) || !Array.isArray(cameraTargetValues)
+    || !Array.isArray(worldMin) || !Array.isArray(worldMax) || !sourceTransform.position
+  ) return correctedTransform
+
+  const camera = new THREE.PerspectiveCamera(WORLDLABS_REFERENCE_FOV_Y, 16 / 9, 0.1, 1000)
+  camera.position.fromArray(cameraPositionValues)
+  camera.lookAt(new THREE.Vector3().fromArray(cameraTargetValues))
+  camera.updateMatrixWorld(true)
+
+  const sourcePosition = new THREE.Vector3().fromArray(sourceTransform.position)
+  const correctedPosition = new THREE.Vector3().fromArray(correctedTransform.position)
+  const sourceScale = sourceTransform.scale ?? [1, 1, 1]
+  const correctedScale = correctedTransform.scale ?? sourceScale
+  const scaleFactor = correctedScale.reduce((sum, value, index) => (
+    sum + finiteNumber(value, 1) / Math.max(Math.abs(finiteNumber(sourceScale[index], 1)), 0.000001)
+  ), 0) / 3
+
+  let nearestDepth = Number.POSITIVE_INFINITY
+  let currentMinX = Number.POSITIVE_INFINITY
+  let currentMaxX = Number.NEGATIVE_INFINITY
+  let currentMinY = Number.POSITIVE_INFINITY
+  let currentMaxY = Number.NEGATIVE_INFINITY
+  for (const x of [Number(worldMin[0]), Number(worldMax[0])]) {
+    for (const y of [Number(worldMin[1]), Number(worldMax[1])]) {
+      for (const z of [Number(worldMin[2]), Number(worldMax[2])]) {
+        const correctedCorner = new THREE.Vector3(x, y, z)
+          .sub(sourcePosition)
+          .multiplyScalar(scaleFactor)
+          .add(correctedPosition)
+          .applyMatrix4(camera.matrixWorldInverse)
+        nearestDepth = Math.min(nearestDepth, -correctedCorner.z)
+        currentMinX = Math.min(currentMinX, correctedCorner.x)
+        currentMaxX = Math.max(currentMaxX, correctedCorner.x)
+        currentMinY = Math.min(currentMinY, correctedCorner.y)
+        currentMaxY = Math.max(currentMaxY, correctedCorner.y)
+      }
+    }
+  }
+  if (!Number.isFinite(nearestDepth) || nearestDepth <= 0.05 || fit.surfaceDepth <= 0.05) return correctedTransform
+
+  const currentWidth = currentMaxX - currentMinX
+  const currentHeight = currentMaxY - currentMinY
+  const targetWidth = fit.viewMaxX - fit.viewMinX
+  const targetHeight = fit.viewMaxY - fit.viewMinY
+  if (currentWidth <= 0 || currentHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) return correctedTransform
+  const fitScale = Math.sqrt((targetWidth / currentWidth) * (targetHeight / currentHeight))
+  if (!Number.isFinite(fitScale) || fitScale < 0.05 || fitScale > 20) return correctedTransform
+
+  const sourceBoundsCenter = new THREE.Box3(
+    new THREE.Vector3().fromArray(worldMin),
+    new THREE.Vector3().fromArray(worldMax),
+  ).getCenter(new THREE.Vector3())
+  const correctedBoundsCenter = sourceBoundsCenter.sub(sourcePosition).multiplyScalar(scaleFactor).add(correctedPosition)
+  const correctedCenterView = correctedBoundsCenter.clone().applyMatrix4(camera.matrixWorldInverse)
+  const frontHalfDepth = Math.max(0, -correctedCenterView.z - nearestDepth) * fitScale
+  const targetCenterView = new THREE.Vector3(
+    (fit.viewMinX + fit.viewMaxX) / 2,
+    (fit.viewMinY + fit.viewMaxY) / 2,
+    -(fit.surfaceDepth + frontHalfDepth),
+  )
+  const targetCenterWorld = targetCenterView.applyMatrix4(camera.matrixWorld)
+  const fittedPosition = targetCenterWorld.sub(
+    correctedBoundsCenter.sub(correctedPosition).multiplyScalar(fitScale),
+  )
+  console.info('[ProductStudio] product op gekoppelde splatpunten geplaatst', JSON.stringify({
+    nearestDepth,
+    surfaceDepth: fit.surfaceDepth,
+    fitScale,
+    position: fittedPosition.toArray(),
+  }))
+  return {
+    ...correctedTransform,
+    position: fittedPosition.toArray() as [number, number, number],
+    scale: correctedScale.map((value) => finiteNumber(value, 1) * fitScale) as [number, number, number],
+  }
+}
+
 export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   initialImageSrc?: string | null
   renderLayout?: (sidebar: React.ReactNode, viewport: React.ReactNode) => React.ReactNode
@@ -666,6 +1036,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const contactSheetInputRef = useRef<HTMLInputElement>(null)
   const objectMaskInputRef = useRef<HTMLInputElement>(null)
   const studioRef = useRef<Scene3DEditorHandle>(null)
+  const splatShotManifestRef = useRef<any>(null)
   const promptBarRef = useRef<AtelierPromptBarHandle>(null)
   const [backgroundLocked, setBackgroundLocked] = useState(false)
   const [envReconstructing, setEnvReconstructing] = useState(false)
@@ -715,6 +1086,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [splatFrameCompositeOpacity, setSplatFrameCompositeOpacity] = useState(0.5)
   const [splatFrameXFlip, setSplatFrameXFlip] = useState(true)
   const [splatFramePreferSpz, setSplatFramePreferSpz] = useState(true)
+  const [splatFramePose, setSplatFramePose] = useState<SplatReferencePose | null>(null)
   const [splatAlignment, setSplatAlignment] = useState<SplatAlignment | null>(null)
   const [splatBaseAlignment, setSplatBaseAlignment] = useState<SplatAlignment | null>(null)
   const [splatVisible, setSplatVisible] = useState(true)
@@ -726,24 +1098,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setSplatBaseAlignment(base)
     setSplatAlignment(current)
   }
-
-  // Bij het laden van een archiefshot is de WorldLabs-nulcamera precies de
-  // camera waarmee die foto is gemaakt. Alleen bij een nieuwe koppeling/reset
-  // springen we naar dit anker; vrij rondkijken blijft daarna ongemoeid.
-  useEffect(() => {
-    if (splatAlignment?.source !== 'marble' || !splatAlignment.splatToShot) return
-    studioRef.current?.setCameraOrbit(
-      splatAlignment.position,
-      splatAlignment.sceneCenter,
-      splatAlignment.fovY,
-    )
-  }, [
-    splatAlignment?.source,
-    splatAlignment?.splatToShot,
-    splatAlignment?.renderVersionId,
-    splatAlignment?.worldId,
-    splatAlignment?.splatUrl,
-  ])
 
   const resetSplatAlignmentToBase = () => {
     if (!splatBaseAlignment) return
@@ -931,7 +1285,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
   }
 
-  // Berekent de marbleToShot transform: Marble origin (= frame_0001 camera) → shot camera.
+  // Berekent marbleToShot vanuit de echte referentiecamera van de WorldLabs-viewer.
   // Stappenplan:
   //   1. OpenCV → Three.js coördinatenconversie: 180° om X-as (Q_x180)
   //   2. Roteer Marble's startrichting naar de shot camera richting (Q_view)
@@ -951,21 +1305,40 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     groupMaskOffsetX?: number
     groupMaskOffsetY?: number
     groupMaskOffsetZ?: number
+    worldReferencePosition?: [number, number, number]
+    worldReferenceQuaternion?: [number, number, number, number]
+    worldReferenceTarget?: [number, number, number]
+    worldReferenceFovY?: number
   }
 
-  const marbleCalibrationKey = (worldId: string) => `marble-cal-${worldId}`
+  const marbleCalibrationIdentity = (alignment?: SplatAlignment | null): string | null => {
+    if (!alignment) return null
+    if (alignment.worldId) return `world:${alignment.worldId}`
+    const metaWorldId = alignment.marbleMeta && typeof alignment.marbleMeta === 'object'
+      ? (alignment.marbleMeta as { worldId?: unknown }).worldId
+      : undefined
+    if (typeof metaWorldId === 'string' && metaWorldId) return `world:${metaWorldId}`
+    if (!alignment.splatUrl) return null
+    const stableSource = alignment.splatUrl
+      .split('?')[0]
+      .replace(/(?:world(?:_hq)?\.(?:splat|spz)|[^/]+\.ply)$/i, '')
+    return `source:${stableSource}`
+  }
 
-  const loadMarbleCalibration = (worldId?: string): MarbleCalibration | null => {
-    if (!worldId) return null
+  const marbleCalibrationKey = (identity: string) => `marble-cal-${identity}`
+
+  const loadMarbleCalibration = (alignment?: SplatAlignment | null): MarbleCalibration | null => {
+    const identity = marbleCalibrationIdentity(alignment)
+    if (!identity) return null
     try {
-      const raw = localStorage.getItem(marbleCalibrationKey(worldId))
+      const raw = localStorage.getItem(marbleCalibrationKey(identity))
       return raw ? (JSON.parse(raw) as MarbleCalibration) : null
     } catch { return null }
   }
 
   const saveMarbleCalibration = (alignment: SplatAlignment) => {
-    const worldId = alignment.worldId
-    if (!worldId || !alignment.splatToShot || !Array.isArray(alignment.transformPosition)) return
+    const identity = marbleCalibrationIdentity(alignment)
+    if (!identity || !alignment.splatToShot || !Array.isArray(alignment.transformPosition)) return
     const tx = finiteNumber(alignment.transformPosition[0], 0)
     const ty = finiteNumber(alignment.transformPosition[1], 0)
     const tz = finiteNumber(alignment.transformPosition[2], 0)
@@ -984,9 +1357,19 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       groupMaskOffsetX: finiteNumber(alignment.groupMaskOffsetX, 0),
       groupMaskOffsetY: finiteNumber(alignment.groupMaskOffsetY, 0),
       groupMaskOffsetZ: finiteNumber(alignment.groupMaskOffsetZ, 0),
+      worldReferencePosition: alignment.worldReferencePosition
+        ? [...alignment.worldReferencePosition] as [number, number, number]
+        : undefined,
+      worldReferenceQuaternion: alignment.worldReferenceQuaternion
+        ? [...alignment.worldReferenceQuaternion] as [number, number, number, number]
+        : undefined,
+      worldReferenceTarget: alignment.worldReferenceTarget
+        ? [...alignment.worldReferenceTarget] as [number, number, number]
+        : undefined,
+      worldReferenceFovY: alignment.worldReferenceFovY,
     }
     try {
-      localStorage.setItem(marbleCalibrationKey(worldId), JSON.stringify(cal))
+      localStorage.setItem(marbleCalibrationKey(identity), JSON.stringify(cal))
     } catch { /* ignore */ }
   }
 
@@ -1002,20 +1385,45 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
     const shotCamera = new THREE.Vector3(Number(cameraPos[0]), Number(cameraPos[1]), Number(cameraPos[2]))
     const shotTarget = new THREE.Vector3(Number(cameraTarget[0]), Number(cameraTarget[1]), Number(cameraTarget[2]))
-    const shotObject = new THREE.PerspectiveCamera(WORLDLABS_REFERENCE_FOV_Y, 16 / 9, 0.1, 1000)
+    const calibration = loadMarbleCalibration(alignment)
+    const referenceFovY = alignment.worldReferenceFovY ?? calibration?.worldReferenceFovY
+    // WorldLabs reconstrueert de wereld vanuit zijn eigen referentieprojectie.
+    // manifest.camera.fov kan al voor de editor-viewport gecorrigeerd zijn en
+    // zou hier een tweede crop/zoom veroorzaken. Gebruik daarom de gemeten FOV
+    // van de WorldLabs-referentiecamera voor dezelfde beeldkadering.
+    const worldFovY = finiteNumber(referenceFovY, WORLDLABS_REFERENCE_FOV_Y)
+    const shotObject = new THREE.PerspectiveCamera(worldFovY, 16 / 9, 0.1, 1000)
     shotObject.position.copy(shotCamera)
     shotObject.up.set(0, 1, 0)
     shotObject.lookAt(shotTarget)
     shotObject.updateMatrixWorld(true)
     const shotQuaternion = shotObject.quaternion.clone().normalize()
+    const referencePositionValues = alignment.worldReferencePosition ?? calibration?.worldReferencePosition
+    const referenceQuaternionValues = alignment.worldReferenceQuaternion ?? calibration?.worldReferenceQuaternion
+    const referenceTargetValues = alignment.worldReferenceTarget ?? calibration?.worldReferenceTarget
+    const referencePosition = Array.isArray(referencePositionValues)
+      ? new THREE.Vector3(...referencePositionValues)
+      : new THREE.Vector3(0, 0, 0)
+    const referenceQuaternion = Array.isArray(referenceQuaternionValues)
+      ? new THREE.Quaternion(...referenceQuaternionValues).normalize()
+      : new THREE.Quaternion()
+    const transformQuaternion = shotQuaternion.clone().multiply(referenceQuaternion.clone().invert()).normalize()
+    const transformScale = finiteNumber(alignment.transformScale, 1)
+    const transformPosition = shotCamera.clone().sub(
+      referencePosition.clone().applyQuaternion(transformQuaternion).multiplyScalar(transformScale),
+    )
 
     return {
       ...alignment,
       source: 'marble',
       splatToShot: true,
-      transformPosition: [shotCamera.x, shotCamera.y, shotCamera.z],
-      transformQuaternion: [shotQuaternion.x, shotQuaternion.y, shotQuaternion.z, shotQuaternion.w],
-      transformScale: 1,
+      transformPosition: [transformPosition.x, transformPosition.y, transformPosition.z],
+      transformQuaternion: [transformQuaternion.x, transformQuaternion.y, transformQuaternion.z, transformQuaternion.w],
+      transformScale,
+      worldReferencePosition: referencePositionValues,
+      worldReferenceQuaternion: referenceQuaternionValues,
+      worldReferenceTarget: referenceTargetValues,
+      worldReferenceFovY: referenceFovY,
       basisRotationY: 0,
       bubbleRadius: 0,
       groupPositionX: 0,
@@ -1031,10 +1439,27 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       sceneCenter: [shotTarget.x, shotTarget.y, shotTarget.z],
       position: cameraPos as [number, number, number],
       quaternion: [shotQuaternion.x, shotQuaternion.y, shotQuaternion.z, shotQuaternion.w],
-      fovY: WORLDLABS_REFERENCE_FOV_Y,
+      fovY: worldFovY,
       width: alignment.width ?? 1920,
       height: alignment.height ?? 1080,
     }
+  }
+
+  const useWorldLabsReferencePose = (pose: SplatReferencePose, force = false) => {
+    setSplatAlignment((current) => {
+      if (!current || current.source !== 'marble') return current
+      if (current.worldReferencePosition && !force) return current
+      const withReference: SplatAlignment = {
+        ...current,
+        worldReferencePosition: [...pose.position],
+        worldReferenceQuaternion: [...pose.quaternion],
+        worldReferenceTarget: [...pose.target],
+        worldReferenceFovY: pose.fovY,
+        transformScale: 1,
+      }
+      saveMarbleCalibration(withReference)
+      return applyMarbleShotTransform(withReference, splatShotManifestRef.current ?? renderManifestRef.current, splatBaseAlignment, true)
+    })
   }
 
   const [splatPuntMode, setSplatPuntMode] = useState<'off' | 'foto' | 'scene'>('off')
@@ -1624,7 +2049,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const prev = prevOverlayRef.current
     prevOverlayRef.current = viewportOverlay
 
-    const manifest = renderManifestRef.current as any
+    const manifest = (splatShotManifestRef.current ?? renderManifestRef.current) as any
     if (!manifest?.camera?.position || !manifest?.camera?.target || !studioRef.current) return
 
     if (viewportOverlay === 'bgComposite') {
@@ -2374,6 +2799,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
   async function captureRenderPacket(promptOverride?: string) {
     activeArchiveVersionId.current = null
+    splatShotManifestRef.current = null
     const packet = await studioRef.current?.captureRenderPacketPreview()
     if (!packet?.beauty && !packet?.passes) {
       setFinalError('Kan nog geen preview uit de studio maken.')
@@ -2588,29 +3014,41 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const packet = result.packet as RenderPacket
       const scene = result.scene as StudioSceneVersion | null
       const manifest = packet.scene_manifest as any
+      const shotManifest = manifest
+      splatShotManifestRef.current = shotManifest
+      let restoredProductSourceTransform: ArchiveProductTransform | null = null
+      let restoredProductTransform: ArchiveProductTransform | null = null
 
-      // Restore camera orbit position + FOV
-      // fovScale is een render-time correctie (frame vs canvas), geen scene camera parameter — NIET toepassen op live camera
-      if (manifest?.camera?.position && manifest?.camera?.target) {
-        studioRef.current?.setCameraOrbit(manifest.camera.position, manifest.camera.target, manifest.camera.fov)
+      // Het renderpacket bewaart de live camera waarmee deze specifieke foto is
+      // opgebouwd. Die camera is ook het projectieanker van de gekoppelde splat.
+      if (shotManifest?.camera?.position && shotManifest?.camera?.target) {
+        studioRef.current?.setCameraOrbit(
+          shotManifest.camera.position,
+          shotManifest.camera.target,
+          shotManifest.camera.fov,
+        )
       }
 
-      // Restore model transform: eerst uit lokale cache, dan uit database
-      const cached = archiveTransformCache.current[version.id]
-      if (cached && studioRef.current) {
-        const controls = studioRef.current.getSceneControls()
-        const productObj = controls?.scene.objects.find((o) => o.type === 'gltf')
-        if (controls && productObj) {
-          controls.onObjectTransformed(productObj.id, cached.position, cached.rotation, cached.scale)
-        }
-      } else if (scene?.product_transform && studioRef.current) {
+      // De studioscene is de versiegebonden bron voor de producttransform. Een
+      // tijdelijke editorcache van een eerdere sessie mag een archiefshot niet
+      // overschrijven; anders staat de wereld goed maar het product verkeerd.
+      if (scene?.product_transform && studioRef.current) {
         const controls = studioRef.current.getSceneControls()
         if (controls) {
           const productObj = controls.scene.objects.find((o) => o.type === 'gltf')
           if (productObj) {
-            const pt = scene.product_transform as { position?: [number, number, number]; rotation?: [number, number, number]; scale?: [number, number, number] }
+            restoredProductSourceTransform = scene.product_transform as ArchiveProductTransform
+            const pt = archiveProductTransform(manifest, restoredProductSourceTransform)
+            restoredProductTransform = pt
             if (pt.position) controls.onObjectTransformed(productObj.id, pt.position, pt.rotation ?? productObj.rotation, pt.scale ?? productObj.scale)
           }
+        }
+      } else {
+        const cached = archiveTransformCache.current[version.id]
+        const controls = studioRef.current?.getSceneControls()
+        const productObj = controls?.scene.objects.find((o) => o.type === 'gltf')
+        if (cached && controls && productObj) {
+          controls.onObjectTransformed(productObj.id, cached.position, cached.rotation, cached.scale)
         }
       }
 
@@ -2674,6 +3112,30 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const projectId = project.backendProject?.id
       if (projectId) {
         const splatApi = getProductStudioApi()
+        const alignRestoredProductToSplat = async (alignment: SplatAlignment) => {
+          const maskUrl = (packet as any).object_mask_url
+            ?? project.objectMaskUrl
+            ?? project.objectMaskAsset?.url
+          if (!maskUrl || !restoredProductSourceTransform || !restoredProductTransform) return
+          const productFit = await estimateMaskedSplatSurfaceDepth(alignment, shotManifest, maskUrl)
+          if (productFit == null || activeArchiveVersionId.current !== version.id) return
+          const depthCorrected = moveArchiveProductToSplatDepth(
+            shotManifest,
+            restoredProductSourceTransform,
+            restoredProductTransform,
+            productFit,
+          )
+          const controls = studioRef.current?.getSceneControls()
+          const productObj = controls?.scene.objects.find((object) => object.type === 'gltf')
+          if (controls && productObj && depthCorrected.position) {
+            controls.onObjectTransformed(
+              productObj.id,
+              depthCorrected.position,
+              depthCorrected.rotation ?? productObj.rotation,
+              depthCorrected.scale ?? productObj.scale,
+            )
+          }
+        }
         splatApi?.loadSceneAlignment?.({ projectId, renderVersionId: version.id }).then((res) => {
           if (res?.ok && res.alignment?.splatUrl && res.renderVersionId === version.id) {
             // Opgeslagen alignment gevonden.
@@ -2686,11 +3148,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               ? { ...res.alignment, metricScaleFactor: marbleGen.metricScaleFactor ?? undefined, groundPlaneOffset: res.alignment.groundPlaneOffset ?? marbleGen.groundPlaneOffset ?? undefined }
               : res.alignment
             const alignment = enriched.source === 'marble'
-              ? applyMarbleShotTransform(enriched, manifest, base)
+              ? applyMarbleShotTransform(enriched, shotManifest, base)
               : enriched
             // Voor marble is het reset-anker de berekende shot-uitlijning (niet de ruwe COLMAP base).
             // Zo gaat Reset terug naar de automatisch berekende positie, niet naar de import-state.
             applySplatAlignment(alignment, enriched.source === 'marble' ? alignment : base)
+            void alignRestoredProductToSplat(alignment)
           } else {
             setSplatBaseAlignment(null)
             setSplatAlignment(null)
@@ -2725,9 +3188,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   bubbleRadius: DEFAULT_BUBBLE_RADIUS,
                   bubbleFeather: DEFAULT_BUBBLE_FEATHER,
                 }
-                const nextAlignment = applyMarbleShotTransform(baseAlignmentForShot, manifest, baseAlignmentForShot)
+                const nextAlignment = applyMarbleShotTransform(baseAlignmentForShot, shotManifest, baseAlignmentForShot)
                 setSplatBaseAlignment((prev) => prev ?? cloneSplatAlignment(nextAlignment))
                 setSplatAlignment((prev) => prev ?? nextAlignment) // loadSceneAlignment al ingesteld
+                void alignRestoredProductToSplat(nextAlignment)
               }
             }).catch(() => {})
           }
@@ -3761,7 +4225,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             >
               {splatAlignment?.source === 'marble' ? '↺ Achtergrond op shot uitlijnen' : '3D achtergrond uitlijnen (COLMAP)'}
             </button>
-            {splatAlignment?.splatToShot && splatAlignment.worldId && (
+            {splatAlignment?.splatToShot && marbleCalibrationIdentity(splatAlignment) && (
               <div className="mt-1.5 flex items-center gap-2">
                 <button
                   type="button"
@@ -3774,7 +4238,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   ✓ Sla op als standaard
                 </button>
                 {(() => {
-                  const cal = loadMarbleCalibration(splatAlignment.worldId)
+                  const cal = loadMarbleCalibration(splatAlignment)
                   return cal ? (
                     <span className="text-[10px] text-emerald-400/60" title={`Opgeslagen: schaal ${cal.groupScale.toFixed(2)}, rotatie ${(cal.basisRotationY * 180 / Math.PI).toFixed(1)}°`}>
                       ✓ opgeslagen
@@ -4537,8 +5001,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     : viewportOverlay === 'bgComposite'
     ? undefined  // handled separately as layered composite
     : viewportOverlay ? overlayPasses.find((p) => p.key === viewportOverlay)?.src : undefined
-  const splatFrameSpzSrc = localPathToHupheFileUrl(splatAlignment?.spzPath)
   const splatFrameSplatSrc = splatAlignment?.splatUrl ?? null
+  const derivedFrameSpzSrc = splatFrameSplatSrc?.replace(/world_hq\.splat(?=\?|$)/i, 'world.spz') ?? null
+  const splatFrameSpzSrc = localPathToHupheFileUrl(splatAlignment?.spzPath)
+    ?? (derivedFrameSpzSrc !== splatFrameSplatSrc ? derivedFrameSpzSrc : null)
   const splatFrameViewerSrc = splatFramePreferSpz && splatFrameSpzSrc
     ? splatFrameSpzSrc
     : splatFrameSplatSrc ?? splatFrameSpzSrc
@@ -4792,7 +5258,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             className="pointer-events-auto relative overflow-hidden rounded-sm border border-cyan-300/55 bg-black shadow-2xl"
             style={{ aspectRatio: '16 / 9', width: 'min(92%, calc((100vh - 180px) * 16 / 9))' }}
           >
-            <SplatFrameViewer src={splatFrameViewerSrc} xFlip={splatFrameXFlip} />
+            <SplatFrameViewer
+              src={splatFrameViewerSrc}
+              xFlip={splatFrameXFlip}
+              onPoseChange={setSplatFramePose}
+              onReadyPose={(pose) => useWorldLabsReferencePose(pose)}
+            />
             {splatFrameCompositeSrc && splatFrameCompositeOpacity > 0 && (
               <img
                 src={splatFrameCompositeSrc}
@@ -4802,7 +5273,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               />
             )}
             <div className="pointer-events-none absolute left-2 top-2 rounded-full border border-white/10 bg-black/70 px-2.5 py-1 text-[10px] font-semibold text-cyan-100 shadow-lg backdrop-blur">
-              WorldLabs frame · cam 0,0,0 → -Z
+              {splatFramePose
+                ? `WorldLabs frame · cam ${splatFramePose.position.map((value) => value.toFixed(2)).join(', ')}`
+                : 'WorldLabs frame · camera laden'}
             </div>
             <div className="absolute bottom-2 left-2 right-2 flex flex-wrap items-center justify-between gap-2 rounded-full border border-white/10 bg-black/72 px-3 py-2 shadow-xl backdrop-blur-md">
               <div className="flex items-center gap-2">
@@ -4821,6 +5294,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </span>
               </div>
               <div className="flex items-center gap-1.5">
+                {splatFramePose && (
+                  <button
+                    type="button"
+                    onClick={() => useWorldLabsReferencePose(splatFramePose, true)}
+                    className="rounded-full border border-cyan-300/35 bg-cyan-400/15 px-2.5 py-1 text-[10px] font-semibold text-cyan-100 transition-colors hover:bg-cyan-400/25"
+                  >
+                    Gebruik huidige view als basis
+                  </button>
+                )}
                 {splatFrameSpzSrc && splatFrameSplatSrc && (
                   <button
                     type="button"

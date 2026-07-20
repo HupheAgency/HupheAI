@@ -28,7 +28,7 @@ function applyOutputFrameProjection(camera: THREE.Camera, canvas: HTMLCanvasElem
   const canvasRect = canvas.getBoundingClientRect()
   if (canvasRect.width <= 0 || canvasRect.height <= 0) return
 
-  const editorRoot = canvas.parentElement?.parentElement
+  const editorRoot = canvas.closest<HTMLElement>('[data-scene-editor-viewport="true"]')
   const frame = editorRoot?.querySelector<HTMLElement>('[data-scene-frame="true"]')
   const frameRect = frame?.getBoundingClientRect()
   const canonicalFov = canonicalCameraFov(camera)
@@ -49,7 +49,7 @@ function OutputFrameProjection() {
 
   useEffect(() => {
     const canvas = gl.domElement
-    const editorRoot = canvas.parentElement?.parentElement
+    const editorRoot = canvas.closest<HTMLElement>('[data-scene-editor-viewport="true"]')
     const apply = () => applyOutputFrameProjection(camera, canvas)
     const resizeObserver = new ResizeObserver(apply)
     resizeObserver.observe(canvas)
@@ -71,11 +71,21 @@ function OutputFrameProjection() {
   return null
 }
 
-function splatSourceUrl(alignment: SplatAlignment): string {
-  const path = alignment.spzPath
-  if (!path) return alignment.splatUrl
+function localSplatUrl(path: string): string {
   if (/^(huphe:\/\/file\/|https?:\/\/|blob:|data:)/.test(path)) return path
   return `huphe://file/${encodeURIComponent(decodeURIComponent(path.replace(/^file:\/\//, '')))}`
+}
+
+function splatSourceUrls(alignment: SplatAlignment): { src: string; fallbackSrc?: string } {
+  const explicitSpz = alignment.spzPath ? localSplatUrl(alignment.spzPath) : undefined
+  const derivedSpz = alignment.splatUrl.replace(/world_hq\.splat(?=\?|$)/i, 'world.spz')
+  const spzSrc = explicitSpz ?? (derivedSpz !== alignment.splatUrl ? derivedSpz : undefined)
+
+  // De WorldLabs-preview gebruikt de volledige SPZ-scene. De afgeleide SPLAT
+  // blijft een fallback voor oudere worlds zonder SPZ-export.
+  return spzSrc
+    ? { src: spzSrc, fallbackSrc: alignment.splatUrl }
+    : { src: alignment.splatUrl }
 }
 
 function EnvironmentMesh({ url }: { url: string }) {
@@ -1056,7 +1066,7 @@ function SceneContent({
   transparentCanvas?: boolean
 }) {
   const orbitRef = useRef<OrbitControlsImpl>(null)
-  const { camera: threeCamera } = useThree()
+  const { camera: threeCamera, gl } = useThree()
   const camerasRef = useRef(scene.cameras)
   camerasRef.current = scene.cameras
 
@@ -1311,7 +1321,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
         />
         {splatAlignment?.source === 'marble' && splatAlignment.splatToShot && splatAlignment.transformPosition && splatAlignment.transformQuaternion ? (
           <WorldLabsSplatBackground
-            src={splatSourceUrl(splatAlignment)}
+            {...splatSourceUrls(splatAlignment)}
             anchorPosition={splatAlignment.transformPosition}
             anchorQuaternion={splatAlignment.transformQuaternion}
             anchorScale={finiteNumber(splatAlignment.transformScale, 1) * finiteNumber(splatAlignment.groupScale, 1)}
