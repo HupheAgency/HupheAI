@@ -27,7 +27,7 @@ export function WorldLabsSplatBackground({
   correctionRotation = [0, 0, 0],
 }: WorldLabsSplatBackgroundProps) {
   const [viewerObject, setViewerObject] = useState<THREE.Object3D | null>(null)
-  const { invalidate } = useThree()
+  const { camera, gl, invalidate } = useThree()
 
   // gaussian-splats-3d sorteert asynchroon en heeft na camera- of
   // sceneveranderingen meerdere renders nodig. Deze Canvas gebruikt
@@ -97,6 +97,21 @@ export function WorldLabsSplatBackground({
               .multiply(new THREE.Quaternion(1, 0, 0, 0))
               .normalize()
             const sceneScale = Number.isFinite(anchorScale) && anchorScale > 0 ? anchorScale : 1
+            ;(window as any).__hupheSplatDebug = {
+              anchorPosition: scenePosition.toArray(),
+              anchorQuaternion: sceneQuaternion.toArray(),
+              anchorScale: sceneScale,
+              correctionRotation: [...correctionRotation],
+              cameraPosition: camera.position.toArray(),
+              cameraQuaternion: camera.quaternion.toArray(),
+              cameraFov: (camera as THREE.PerspectiveCamera).fov,
+              outputFovY: (camera as THREE.PerspectiveCamera).userData.__outputFovY,
+              cameraMatrixWorld: camera.matrixWorld.elements.slice(),
+              canvasRect: (() => {
+                const rect = gl.domElement.getBoundingClientRect()
+                return [rect.x, rect.y, rect.width, rect.height]
+              })(),
+            }
             await candidateViewer.addSplatScene(candidateBlobUrl, {
               ...(format != null ? { format } : {}),
               splatAlphaRemovalThreshold: 5,

@@ -71,6 +71,33 @@ function OutputFrameProjection() {
   return null
 }
 
+function SceneCameraDebug() {
+  const { camera, gl } = useThree()
+
+  useFrame(() => {
+    const perspective = camera as THREE.PerspectiveCamera
+    const frame = gl.domElement.closest('[data-scene-editor]')
+      ?.querySelector<HTMLElement>('[data-scene-frame="true"]')
+    const frameRect = frame?.getBoundingClientRect()
+    const canvasRect = gl.domElement.getBoundingClientRect()
+    ;(window as any).__hupheSceneDebug = {
+      camera: {
+        position: camera.position.toArray(),
+        quaternion: camera.quaternion.toArray(),
+        up: camera.up.toArray(),
+        fov: perspective.fov,
+        outputFovY: perspective.userData.__outputFovY,
+        matrixWorld: camera.matrixWorld.elements.slice(),
+        matrixWorldInverse: camera.matrixWorldInverse.elements.slice(),
+      },
+      canvasRect: [canvasRect.x, canvasRect.y, canvasRect.width, canvasRect.height],
+      frameRect: frameRect ? [frameRect.x, frameRect.y, frameRect.width, frameRect.height] : null,
+    }
+  })
+
+  return null
+}
+
 function localSplatUrl(path: string): string {
   if (/^(huphe:\/\/file\/|https?:\/\/|blob:|data:)/.test(path)) return path
   return `huphe://file/${encodeURIComponent(decodeURIComponent(path.replace(/^file:\/\//, '')))}`
@@ -191,7 +218,12 @@ export interface Scene3DViewportHandle {
   captureAllPasses: (fovScale?: number) => RenderPasses | null
   captureRenderManifest: () => Scene3DRenderManifest | null
   getCanvasElement: () => HTMLCanvasElement | null
-  setCameraOrbit: (position: [number, number, number], target: [number, number, number], fov?: number) => void
+  setCameraOrbit: (
+    position: [number, number, number],
+    target: [number, number, number],
+    fov?: number,
+    viewMatrix?: number[],
+  ) => void
 }
 
 const EDITOR_ONLY_USER_DATA = { __editorOnly: true, __helper: true }
@@ -1060,7 +1092,12 @@ function SceneContent({
   onViewChanged?: () => void
   onOrbitChange?: (position: [number, number, number], target: [number, number, number]) => void
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
-  setCameraOrbitRef: React.MutableRefObject<((pos: [number, number, number], tgt: [number, number, number], fov?: number) => void) | null>
+  setCameraOrbitRef: React.MutableRefObject<((
+    pos: [number, number, number],
+    tgt: [number, number, number],
+    fov?: number,
+    viewMatrix?: number[],
+  ) => void) | null>
   debugRings?: { spacing: number; width: number }
   environmentMeshUrls?: string[]
   transparentCanvas?: boolean
@@ -1090,10 +1127,39 @@ function SceneContent({
 
   // Expose setCameraOrbit to parent via ref
   useEffect(() => {
-    setCameraOrbitRef.current = (pos: [number, number, number], tgt: [number, number, number], fov?: number) => {
+    setCameraOrbitRef.current = (
+      pos: [number, number, number],
+      tgt: [number, number, number],
+      fov?: number,
+      viewMatrix?: number[],
+    ) => {
       if (!orbitRef.current) return
-      threeCamera.position.set(pos[0], pos[1], pos[2])
-      orbitRef.current.target.set(tgt[0], tgt[1], tgt[2])
+      const storedTarget = new THREE.Vector3(...tgt)
+      const hasExactView = Array.isArray(viewMatrix)
+        && viewMatrix.length === 16
+        && viewMatrix.every(Number.isFinite)
+
+      if (hasExactView) {
+        const worldMatrix = new THREE.Matrix4().fromArray(viewMatrix).invert()
+        const exactPosition = new THREE.Vector3()
+        const exactQuaternion = new THREE.Quaternion()
+        worldMatrix.decompose(exactPosition, exactQuaternion, new THREE.Vector3())
+        const targetDistance = Math.max(exactPosition.distanceTo(storedTarget), 0.001)
+        const exactTarget = new THREE.Vector3(0, 0, -1)
+          .applyQuaternion(exactQuaternion)
+          .multiplyScalar(targetDistance)
+          .add(exactPosition)
+
+        threeCamera.position.copy(exactPosition)
+        // OrbitControls gebruikt camera.up bij update(). Bewaar daarmee ook de
+        // roll uit de opgeslagen viewMatrix in plaats van hem naar wereld-Y te wissen.
+        threeCamera.up.set(0, 1, 0).applyQuaternion(exactQuaternion).normalize()
+        orbitRef.current.target.copy(exactTarget)
+      } else {
+        threeCamera.position.set(pos[0], pos[1], pos[2])
+        threeCamera.up.set(0, 1, 0)
+        orbitRef.current.target.copy(storedTarget)
+      }
       if (fov !== undefined && 'fov' in threeCamera) {
         const perspectiveCamera = threeCamera as THREE.PerspectiveCamera
         perspectiveCamera.userData.__outputFovY = fov
@@ -1242,12 +1308,18 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
   transparentCanvas?: boolean
   splatAlignment?: SplatAlignment | null
 }>(function Scene3DViewport({ scene, selectedObjectId, selectedLightId, transformMode, viewMode, onSelectObject, onDeselectAll, onObjectTransformed, onActivateCamera, onDeactivateCamera, onViewChanged, onOrbitChange, orbitStateRef, debugRings, environmentMeshUrls, transparentCanvas, splatAlignment }, ref) {
+  ;(window as any).__hupheSceneStateDebug = scene
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const passRef = useRef<((fovScale?: number) => RenderPasses | null) | null>(null)
   const cleanScreenshotRef = useRef<((fovScale?: number) => string | null) | null>(null)
   const quickScreenshotRef = useRef<(() => string | null) | null>(null)
   const manifestRef = useRef<(() => Scene3DRenderManifest | null) | null>(null)
-  const setCameraOrbitRef = useRef<((pos: [number, number, number], tgt: [number, number, number], fov?: number) => void) | null>(null)
+  const setCameraOrbitRef = useRef<((
+    pos: [number, number, number],
+    tgt: [number, number, number],
+    fov?: number,
+    viewMatrix?: number[],
+  ) => void) | null>(null)
 
   useImperativeHandle(ref, () => ({
     captureScreenshot() {
@@ -1266,9 +1338,9 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     getCanvasElement() {
       return canvasRef.current
     },
-    setCameraOrbit(position: [number, number, number], target: [number, number, number], fov?: number) {
+    setCameraOrbit(position: [number, number, number], target: [number, number, number], fov?: number, viewMatrix?: number[]) {
       orbitStateRef.current = { position, target }
-      setCameraOrbitRef.current?.(position, target, fov)
+      setCameraOrbitRef.current?.(position, target, fov, viewMatrix)
     },
   }))
 
@@ -1296,6 +1368,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
       >
         <DynamicDpr />
         <OutputFrameProjection />
+        <SceneCameraDebug />
         <QuickScreenshotCapture captureRef={quickScreenshotRef} />
         <CleanScreenshotCapture captureRef={cleanScreenshotRef} />
         <RenderPassCapture passRef={passRef} />

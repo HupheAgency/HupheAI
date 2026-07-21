@@ -39,6 +39,11 @@ export interface SplatAlignment {
   transformPosition?: [number, number, number]
   transformQuaternion?: [number, number, number, number]
   transformScale?: number
+  depthCalibratedScale?: number
+  productExclusionBounds?: {
+    min: [number, number, number]
+    max: [number, number, number]
+  }
   worldReferencePosition?: [number, number, number]
   worldReferenceQuaternion?: [number, number, number, number]
   worldReferenceTarget?: [number, number, number]

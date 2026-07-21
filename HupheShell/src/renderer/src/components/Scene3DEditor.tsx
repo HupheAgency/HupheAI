@@ -24,7 +24,12 @@ export interface Scene3DEditorHandle {
   getScene: () => Scene3DState
   addModelFromUrl: (url: string, name?: string) => void
   getSceneControls: () => Scene3DSceneControls | null
-  setCameraOrbit: (position: [number, number, number], target: [number, number, number], fov?: number) => void
+  setCameraOrbit: (
+    position: [number, number, number],
+    target: [number, number, number],
+    fov?: number,
+    viewMatrix?: number[],
+  ) => void
 }
 
 export interface Scene3DSceneControls {
@@ -300,8 +305,8 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
         setSelectedLightId,
       }
     },
-    setCameraOrbit(position: [number, number, number], target: [number, number, number], fov?: number) {
-      viewportRef.current?.setCameraOrbit(position, target, fov)
+    setCameraOrbit(position: [number, number, number], target: [number, number, number], fov?: number, viewMatrix?: number[]) {
+      viewportRef.current?.setCameraOrbit(position, target, fov, viewMatrix)
     },
   }), [addDirtyObject, addDirtyLight, addCamera, clearAllGltfObjects, clearNonGltfObjects, deleteObject, deleteLight, deleteDirtySelected, markSceneDirty, resetScene, scene, selectedObjectId, selectedLightId, setSelectedObjectId, setSelectedLightId, setActiveCameraId, transformMode, setTransformMode, updateBackground, updateCamera, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, transformDirtyObject, showFrame])
 
@@ -356,8 +361,13 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
           transparentCanvas={transparentCanvas}
           splatAlignment={splatAlignment}
         />
-        {showFrame && (
-          <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center">
+        <div
+          aria-hidden={!showFrame}
+          className={[
+            'pointer-events-none absolute inset-4 z-10 flex items-center justify-center',
+            showFrame ? 'visible' : 'invisible',
+          ].join(' ')}
+        >
             <div
               ref={frameRef}
               data-scene-frame="true"
@@ -379,8 +389,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
                 1920x1080
               </div>
             </div>
-          </div>
-        )}
+        </div>
       </div>
       {!hideProperties && (
         <Scene3DPropertiesPanel
