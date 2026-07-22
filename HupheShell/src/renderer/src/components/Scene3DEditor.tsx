@@ -90,11 +90,16 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   const orbitStateRef = useRef<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
   const [orbitDisplayState, setOrbitDisplayState] = useState<{ position: [number, number, number]; target: [number, number, number] } | null>(null)
 
-  // Poll orbitStateRef via rAF — orbitStateRef wordt direct bijgehouden door de orbit handler.
-  // React's bail-out (prev === prev) zorgt dat re-renders alleen plaatsvinden bij echte verandering.
+  // Poll orbitStateRef via rAF — orbitStateRef wordt direct bijgehouden door de
+  // orbit handler. Gethrottled naar 5x/s: elke state-update re-rendert de hele
+  // editor-tree, en dat op 60fps tijdens het orbiten maakt de viewport schokkerig.
+  // Voor de cijfertjes in het Properties-paneel is 5 Hz ruim voldoende.
   useEffect(() => {
     let frame: number
-    const tick = () => {
+    let lastUpdate = 0
+    const tick = (now: number) => {
+      frame = requestAnimationFrame(tick)
+      if (now - lastUpdate < 200) return
       const s = orbitStateRef.current
       if (s) {
         setOrbitDisplayState((prev) => {
@@ -107,10 +112,10 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
             prev.target[1] === s.target[1] &&
             prev.target[2] === s.target[2]
           ) return prev
+          lastUpdate = now
           return { position: [...s.position] as [number, number, number], target: [...s.target] as [number, number, number] }
         })
       }
-      frame = requestAnimationFrame(tick)
     }
     frame = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(frame)

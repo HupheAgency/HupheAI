@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 
@@ -7,7 +7,7 @@ interface WorldLabsSplatBackgroundProps {
   fallbackSrc?: string
   anchorPosition: [number, number, number]
   anchorQuaternion: [number, number, number, number]
-  anchorScale?: number
+  anchorScale?: number | [number, number, number]
   offset?: [number, number, number]
   correctionRotation?: [number, number, number]
 }
@@ -27,15 +27,32 @@ export function WorldLabsSplatBackground({
   correctionRotation = [0, 0, 0],
 }: WorldLabsSplatBackgroundProps) {
   const [viewerObject, setViewerObject] = useState<THREE.Object3D | null>(null)
-  const { camera, gl, invalidate } = useThree()
+  const { invalidate } = useThree()
 
   // gaussian-splats-3d sorteert asynchroon en heeft na camera- of
   // sceneveranderingen meerdere renders nodig. Deze Canvas gebruikt
-  // frameloop="demand"; zonder dit verzoek blijft de SPZ op een vroege
-  // tussenstand staan. De standalone referentieviewer doet hetzelfde via
-  // zijn eigen requestAnimationFrame-loop.
-  useFrame(() => {
-    if (viewerObject) invalidate()
+  // frameloop="demand"; zonder extra invalidates blijft de splat op een
+  // vroege sorteer-tussenstand staan. Maar permanent elke frame invalidaten
+  // houdt de GPU continu bezig, ook als er niets beweegt. Daarom: alleen
+  // doorrenderen tot 2s na de laatste camerabeweging (orbit-interactie
+  // triggert zelf al frames, dus beweging wordt hier altijd gezien).
+  const lastMoveAtRef = useRef(0)
+  const prevCameraMatrixRef = useRef<number[] | null>(null)
+  useFrame(({ camera }) => {
+    if (!viewerObject) return
+    const els = camera.matrixWorld.elements
+    const prev = prevCameraMatrixRef.current
+    let moved = !prev
+    if (prev) {
+      for (let i = 0; i < 16; i += 1) {
+        if (prev[i] !== els[i]) { moved = true; break }
+      }
+    }
+    if (moved) {
+      prevCameraMatrixRef.current = Array.from(els)
+      lastMoveAtRef.current = performance.now()
+    }
+    if (performance.now() - lastMoveAtRef.current < 2000) invalidate()
   })
 
   useEffect(() => {
@@ -96,22 +113,11 @@ export function WorldLabsSplatBackground({
               .multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(...correctionRotation, 'XYZ')))
               .multiply(new THREE.Quaternion(1, 0, 0, 0))
               .normalize()
-            const sceneScale = Number.isFinite(anchorScale) && anchorScale > 0 ? anchorScale : 1
-            ;(window as any).__hupheSplatDebug = {
-              anchorPosition: scenePosition.toArray(),
-              anchorQuaternion: sceneQuaternion.toArray(),
-              anchorScale: sceneScale,
-              correctionRotation: [...correctionRotation],
-              cameraPosition: camera.position.toArray(),
-              cameraQuaternion: camera.quaternion.toArray(),
-              cameraFov: (camera as THREE.PerspectiveCamera).fov,
-              outputFovY: (camera as THREE.PerspectiveCamera).userData.__outputFovY,
-              cameraMatrixWorld: camera.matrixWorld.elements.slice(),
-              canvasRect: (() => {
-                const rect = gl.domElement.getBoundingClientRect()
-                return [rect.x, rect.y, rect.width, rect.height]
-              })(),
-            }
+            const sceneScale = Array.isArray(anchorScale)
+              ? anchorScale.map((value) => Number.isFinite(value) && value > 0 ? value : 1)
+              : [anchorScale, anchorScale, anchorScale].map((value) => (
+                  Number.isFinite(value) && value > 0 ? value : 1
+                ))
             await candidateViewer.addSplatScene(candidateBlobUrl, {
               ...(format != null ? { format } : {}),
               splatAlphaRemovalThreshold: 5,
@@ -121,7 +127,7 @@ export function WorldLabsSplatBackground({
               // transform wordt niet meegenomen door diens dieptesortering.
               position: scenePosition.toArray(),
               rotation: [sceneQuaternion.x, sceneQuaternion.y, sceneQuaternion.z, sceneQuaternion.w],
-              scale: [sceneScale, sceneScale, sceneScale],
+              scale: sceneScale,
             })
 
             viewer = candidateViewer
@@ -163,7 +169,7 @@ export function WorldLabsSplatBackground({
     anchorQuaternion[1],
     anchorQuaternion[2],
     anchorQuaternion[3],
-    anchorScale,
+    ...(Array.isArray(anchorScale) ? anchorScale : [anchorScale]),
     offset[0],
     offset[1],
     offset[2],

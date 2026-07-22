@@ -39,7 +39,10 @@ export interface SplatAlignment {
   transformPosition?: [number, number, number]
   transformQuaternion?: [number, number, number, number]
   transformScale?: number
-  depthCalibratedScale?: number
+  supportCalibratedScale?: number
+  supportCalibrationDolly?: number
+  supportFovDepthRatio?: number
+  supportCalibrationVersion?: number
   productExclusionBounds?: {
     min: [number, number, number]
     max: [number, number, number]

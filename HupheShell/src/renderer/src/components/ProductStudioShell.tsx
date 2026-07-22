@@ -632,6 +632,18 @@ function localPathToHupheFileUrl(path: string | null | undefined): string | null
 const DEFAULT_BUBBLE_RADIUS = 3
 const DEFAULT_BUBBLE_FEATHER = 0.1
 const WORLDLABS_REFERENCE_FOV_Y = 50
+const MARBLE_SUPPORT_CALIBRATION_VERSION = 5
+
+type MarbleSupportMeasurement = {
+  productDepth: number
+  splatDepth: number
+  scale: number
+  dolly: number
+  fovDepthRatio: number
+  pointCount: number
+}
+
+const marbleSupportMeasurementCache = new Map<string, Promise<MarbleSupportMeasurement | null>>()
 
 function cloneSplatAlignment(alignment: SplatAlignment): SplatAlignment {
   return {
@@ -693,6 +705,20 @@ type ArchiveProductTransform = {
   scale?: [number, number, number]
 }
 
+/**
+ * De werkelijke lens van de uitvoerfoto. manifest.camera.fov hoort bij het
+ * volledige editorcanvas; de foto is de kader-uitsnede (viewport.fovScale).
+ * Geverifieerd via product.screenBbox: die matcht alleen met de canvas-fov
+ * over de volledige viewport, dus de foto zelf = fov verschaald met fovScale.
+ */
+function manifestOutputFovY(manifest: any): number {
+  const fov = finiteNumber(manifest?.camera?.fov, WORLDLABS_REFERENCE_FOV_Y)
+  const fovScale = finiteNumber(manifest?.viewport?.fovScale, 1)
+  if (fovScale <= 0 || fovScale >= 0.999) return fov
+  const half = THREE.MathUtils.degToRad(fov) / 2
+  return THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(half) * fovScale))
+}
+
 function manifestProductTransform(manifest: any): ArchiveProductTransform | null {
   const product = manifest?.product
   if (!product || !Array.isArray(product.position) || product.position.length !== 3) return null
@@ -705,6 +731,103 @@ function manifestProductTransform(manifest: any): ArchiveProductTransform | null
     scale: Array.isArray(product.scale) && product.scale.length === 3
       ? product.scale.map(Number) as [number, number, number]
       : undefined,
+  }
+}
+
+/**
+ * Herpositioneert het product zodat het door de WorldLabs-lens (50°) op exact
+ * dezelfde fotopixels valt als in de originele render (gemaakt met de shot-lens).
+ * De Marble-wereld is de waarheid: het product verhuist naar de tafeldiepte van
+ * de splat langs de bredere lensstraal van zijn eigen foto-basispunt, en schaalt
+ * mee zodat de schermgrootte identiek blijft aan de foto.
+ */
+type MarbleWorldAnchor = {
+  cameraPosition: [number, number, number]
+  cameraTarget: [number, number, number]
+  viewMatrix: number[]
+  splatScale: number
+}
+
+/**
+ * Verankert de Marble-wereld aan het ONVERANDERDE product. Het product blijft
+ * exact op zijn studio-transform (positie/schaal uit het render-packet); in
+ * plaats daarvan verhuist het hele ensemble van shot-camera + splat.
+ *
+ * Constructie: de camera behoudt zijn orientatie maar komt op diepte
+ * D/lensRatio van de productbasis, met dezelfde laterale cameraruimte-offset.
+ * Daardoor projecteert het product door de 50°-referentielens op exact
+ * dezelfde fotopixels als in de originele render (17.94°-lens op afstand D).
+ * De splatschaal wordt zo gekozen dat het gemeten tafelvlak precies door de
+ * productbasis loopt; een uniforme schaal rond de camera verandert het
+ * standpuntbeeld niet, dus de splat blijft pixelgelijk aan de foto.
+ */
+function anchorMarbleWorldToProduct(
+  manifest: any,
+  splatTableDepth: number | null,
+  metricScale: number,
+): MarbleWorldAnchor | null {
+  const cameraPosition = manifest?.camera?.position
+  const cameraTarget = manifest?.camera?.target
+  const worldMin = manifest?.product?.worldBounds?.min
+  const worldMax = manifest?.product?.worldBounds?.max
+  if (
+    !Array.isArray(cameraPosition) || !Array.isArray(cameraTarget)
+    || !Array.isArray(worldMin) || !Array.isArray(worldMax)
+  ) return null
+
+  // De werkelijke fotolens: camera-fov verschaald met de kader-uitsnede.
+  const shotFovY = manifestOutputFovY(manifest)
+  const camera = new THREE.PerspectiveCamera(shotFovY, 16 / 9, 0.1, 1000)
+  applyManifestCameraPose(camera, manifest, cameraPosition, cameraTarget)
+
+  const bounds = new THREE.Box3(
+    new THREE.Vector3().fromArray(worldMin),
+    new THREE.Vector3().fromArray(worldMax),
+  )
+  if (bounds.isEmpty()) return null
+  const baseWorld = new THREE.Vector3(
+    (bounds.min.x + bounds.max.x) / 2,
+    bounds.min.y,
+    (bounds.min.z + bounds.max.z) / 2,
+  )
+  const baseCam = baseWorld.clone().applyMatrix4(camera.matrixWorldInverse)
+  const depth = -baseCam.z
+  if (!Number.isFinite(depth) || depth <= 0.05) return null
+
+  const focalShot = 1 / Math.tan(THREE.MathUtils.degToRad(shotFovY) / 2)
+  const focalWorld = 1 / Math.tan(THREE.MathUtils.degToRad(WORLDLABS_REFERENCE_FOV_Y) / 2)
+  const lensRatio = focalShot / focalWorld
+  if (!Number.isFinite(lensRatio) || lensRatio <= 0) return null
+
+  const adjustedDepth = depth / lensRatio
+  // Zelfde laterale offset, kortere afstand: de basis blijft op zijn fotopixel.
+  const adjustedBaseCam = new THREE.Vector3(baseCam.x, baseCam.y, -adjustedDepth)
+  const newCameraPosition = baseWorld.clone().sub(
+    adjustedBaseCam.clone().applyQuaternion(camera.quaternion),
+  )
+
+  // Splatschaal: het gemeten tafelvlak (raw Marble-diepte) valt exact op de
+  // diepte van de productbasis. Zonder meting geldt de metrische schaal.
+  const splatScale = splatTableDepth != null && splatTableDepth > 0.05
+    ? adjustedDepth / splatTableDepth
+    : Math.max(0.001, metricScale)
+  if (!Number.isFinite(splatScale) || splatScale <= 0.001 || splatScale > 100) return null
+
+  const worldMatrix = new THREE.Matrix4().compose(
+    newCameraPosition,
+    camera.quaternion.clone(),
+    new THREE.Vector3(1, 1, 1),
+  )
+  const viewMatrix = worldMatrix.clone().invert().toArray()
+
+  // Orbit-doel: het productmidden, zodat draaien om het product scharniert.
+  const productCenter = bounds.getCenter(new THREE.Vector3())
+
+  return {
+    cameraPosition: newCameraPosition.toArray() as [number, number, number],
+    cameraTarget: productCenter.toArray() as [number, number, number],
+    viewMatrix,
+    splatScale,
   }
 }
 
@@ -905,13 +1028,6 @@ function manifestWithFittedProductBounds(
   }
 }
 
-type MaskedSplatReferenceDepth = {
-  rawSurfaceDepth: number
-  pointsInMask: number
-}
-
-const maskedSplatReferenceDepthCache = new Map<string, Promise<MaskedSplatReferenceDepth | null>>()
-
 async function loadMaskPixels(url: string): Promise<{
   data: Uint8ClampedArray
   width: number
@@ -941,44 +1057,105 @@ async function loadMaskPixels(url: string): Promise<{
   }
 }
 
-/** Meet de dominante zichtbare splatlaag van de ingebakken productvorm in frame 1. */
-function estimateMaskedSplatReferenceDepth(
+/**
+ * Bepaalt de metrische koppeling tussen de twee werelden met een punt dat in
+ * beide bestaat: het tafelvlak direct onder het product in frame 1.
+ */
+function measureMarbleSupportScale(
   alignment: SplatAlignment,
-  objectMaskUrl: string,
-): Promise<MaskedSplatReferenceDepth | null> {
+  manifest: any,
+): Promise<MarbleSupportMeasurement | null> {
+  const cameraPosition = manifest?.camera?.position
+  const cameraTarget = manifest?.camera?.target
+  const worldMin = manifest?.product?.worldBounds?.min
+  const worldMax = manifest?.product?.worldBounds?.max
+  if (
+    !isMarbleAlignment(alignment)
+    || !alignment.splatUrl.split('?')[0].toLowerCase().endsWith('.splat')
+    || !Array.isArray(cameraPosition) || !Array.isArray(cameraTarget)
+    || !Array.isArray(worldMin) || !Array.isArray(worldMax)
+  ) return Promise.resolve(null)
+
+  // De werkelijke fotolens: camera-fov verschaald met de kader-uitsnede.
+  // Alleen daarmee valt het supportpixel op dezelfde plek als in de foto.
+  const shotFovY = manifestOutputFovY(manifest)
   const cacheKey = JSON.stringify([
     alignment.splatUrl,
-    objectMaskUrl,
-    alignment.worldReferencePosition,
-    alignment.worldReferenceQuaternion,
-    alignment.worldReferenceFovY,
+    shotFovY,
+    cameraPosition,
+    cameraTarget,
+    worldMin,
+    worldMax,
+    MARBLE_SUPPORT_CALIBRATION_VERSION,
   ])
-  const cached = maskedSplatReferenceDepthCache.get(cacheKey)
+  const cached = marbleSupportMeasurementCache.get(cacheKey)
   if (cached) return cached
 
   const pending = (async () => {
-    if (!isMarbleAlignment(alignment) || !alignment.splatUrl.split('?')[0].endsWith('.splat')) return null
-    const [splatResponse, mask] = await Promise.all([
-      fetch(alignment.splatUrl),
-      loadMaskPixels(objectMaskUrl),
-    ])
-    if (!splatResponse.ok) throw new Error(`Splat kon niet worden gemeten (HTTP ${splatResponse.status}).`)
+    const camera = new THREE.PerspectiveCamera(shotFovY, 16 / 9, 0.1, 1000)
+    applyManifestCameraPose(camera, manifest, cameraPosition, cameraTarget)
+    const bounds = new THREE.Box3(
+      new THREE.Vector3().fromArray(worldMin),
+      new THREE.Vector3().fromArray(worldMax),
+    )
+    if (bounds.isEmpty()) return null
 
-    const splat = await splatResponse.arrayBuffer()
-    const bytes = new Uint8Array(splat)
-    const values = new DataView(splat)
-    const referencePosition = new THREE.Vector3(...(alignment.worldReferencePosition ?? [0, 0, 0]))
-    const referenceQuaternionInverse = new THREE.Quaternion(
-      ...(alignment.worldReferenceQuaternion ?? [0, 0, 0, 1]),
-    ).invert()
+    const supportWorld = new THREE.Vector3(
+      (bounds.min.x + bounds.max.x) / 2,
+      bounds.min.y,
+      (bounds.min.z + bounds.max.z) / 2,
+    )
+    const supportView = supportWorld.clone().applyMatrix4(camera.matrixWorldInverse)
+    const productDepth = -supportView.z
+    const supportNdc = supportWorld.clone().project(camera)
+    if (
+      !Number.isFinite(productDepth) || productDepth <= 0.05
+      || !Number.isFinite(supportNdc.x) || !Number.isFinite(supportNdc.y)
+    ) return null
+
+    const projectedCorners: THREE.Vector3[] = []
+    for (const x of [bounds.min.x, bounds.max.x]) {
+      for (const y of [bounds.min.y, bounds.max.y]) {
+        for (const z of [bounds.min.z, bounds.max.z]) {
+          projectedCorners.push(new THREE.Vector3(x, y, z).project(camera))
+        }
+      }
+    }
+    const projectedWidth = Math.max(...projectedCorners.map((point) => point.x))
+      - Math.min(...projectedCorners.map((point) => point.x))
+    const projectedHeight = Math.max(...projectedCorners.map((point) => point.y))
+      - Math.min(...projectedCorners.map((point) => point.y))
+    const radiusX = THREE.MathUtils.clamp(projectedWidth * 0.16, 0.012, 0.055)
+    const above = THREE.MathUtils.clamp(projectedHeight * 0.015, 0.003, 0.012)
+    const below = THREE.MathUtils.clamp(projectedHeight * 0.09, 0.025, 0.085)
+
+    const response = await fetch(alignment.splatUrl)
+    if (!response.ok) throw new Error(`Splat kon niet worden gemeten (HTTP ${response.status}).`)
+    const buffer = await response.arrayBuffer()
+    const bytes = new Uint8Array(buffer)
+    const values = new DataView(buffer)
+    // De splat is vanuit de vaste WorldLabs-referentielens opgebouwd. Het
+    // doelpixel komt uit de shotcamera, maar de ruwe splatpunten moeten met
+    // hun eigen bronlens worden geprojecteerd om hetzelfde beeldpunt te vinden.
+    const focalY = 1 / Math.tan(THREE.MathUtils.degToRad(WORLDLABS_REFERENCE_FOV_Y) / 2)
+    const shotHalfFov = THREE.MathUtils.degToRad(shotFovY) / 2
+    const referenceHalfFov = THREE.MathUtils.degToRad(WORLDLABS_REFERENCE_FOV_Y) / 2
+    const fovDepthRatio = Math.tan(referenceHalfFov) / Math.tan(shotHalfFov)
+    if (!Number.isFinite(fovDepthRatio) || fovDepthRatio <= 0.05) return null
+    // De Marble-wereld reproduceert de VOLLEDIGE foto door de 50 graden lens
+    // (geverifieerd: de referentieviewer op fov 50 toont exact de foto). Een
+    // fotopixel heeft in de bron-view dus DEZELFDE ndc — niet gedeeld door de
+    // lensverhouding; dat zou bij het beeldcentrum zoeken (de achterwand).
+    const sourceSupportNdc = new THREE.Vector2(supportNdc.x, supportNdc.y)
     const x180 = new THREE.Quaternion(1, 0, 0, 0)
-    const referenceFov = finiteNumber(alignment.worldReferenceFovY, WORLDLABS_REFERENCE_FOV_Y)
-    const focalY = 1 / Math.tan(THREE.MathUtils.degToRad(referenceFov) / 2)
-    const aspect = mask.width / Math.max(mask.height, 1)
     const point = new THREE.Vector3()
-    const depths: number[] = []
+    const candidates: Array<{ depth: number; distance: number }> = []
+    // Marble-splats zijn lokaal soms dun bemonsterd. Zoek daarom maximaal
+    // tweemaal de product-afhankelijke steunpixelstrook af en laat de
+    // genormaliseerde afstand hieronder de meest lokale punten kiezen.
+    const searchMultiplier = 2
 
-    for (let offset = 0; offset + 32 <= splat.byteLength; offset += 32) {
+    for (let offset = 0; offset + 32 <= buffer.byteLength; offset += 32) {
       if (bytes[offset + 27] <= 5) continue
       const x = values.getFloat32(offset, true)
       const y = values.getFloat32(offset + 4, true)
@@ -986,71 +1163,55 @@ function estimateMaskedSplatReferenceDepth(
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue
 
       point.set(x, y, z).applyQuaternion(x180)
-      point.sub(referencePosition).applyQuaternion(referenceQuaternionInverse)
       const depth = -point.z
       if (depth <= 0.05) continue
-      const ndcX = (point.x / depth) * focalY / aspect
+      const ndcX = (point.x / depth) * focalY / camera.aspect
       const ndcY = (point.y / depth) * focalY
-      const pixelX = Math.round((ndcX + 1) * 0.5 * (mask.width - 1))
-      const pixelY = Math.round((1 - ndcY) * 0.5 * (mask.height - 1))
-      if (pixelX < 0 || pixelY < 0 || pixelX >= mask.width || pixelY >= mask.height) continue
-      const maskOffset = (pixelY * mask.width + pixelX) * 4
-      const insideMask = mask.useAlpha
-        ? mask.data[maskOffset + 3] >= 32
-        : Math.max(mask.data[maskOffset], mask.data[maskOffset + 1], mask.data[maskOffset + 2]) >= 128
-      if (!insideMask) continue
-      depths.push(depth)
+      const dx = Math.abs(ndcX - sourceSupportNdc.x)
+      const dy = sourceSupportNdc.y - ndcY
+      if (
+        dx > radiusX * searchMultiplier
+        || dy < -above * searchMultiplier
+        || dy > below * searchMultiplier
+      ) continue
+      candidates.push({
+        depth,
+        distance: (dx / radiusX) ** 2 + (Math.max(0, dy) / below) ** 2,
+      })
     }
-    if (depths.length < 50) return null
+    if (candidates.length < 8) return null
 
-    depths.sort((a, b) => a - b)
-    const range = depths[depths.length - 1] - depths[0]
-    const binWidth = Math.max(0.01, range / 160)
-    const histogram = new Map<number, number>()
-    for (const depth of depths) {
-      const bin = Math.round(depth / binWidth)
-      histogram.set(bin, (histogram.get(bin) ?? 0) + 1)
-    }
-    const modeBin = [...histogram.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
-    if (modeBin == null) return null
-    const modeDepths = depths.filter((depth) => Math.abs(depth / binWidth - modeBin) <= 2)
-    if (modeDepths.length === 0) return null
-    return {
-      rawSurfaceDepth: modeDepths[Math.floor(modeDepths.length / 2)],
-      pointsInMask: depths.length,
-    }
+    // De dichtst bij het steunpixel geprojecteerde splats bevatten twee lagen:
+    // het tafelvlak (dichtbij) en — precies op het basispixel — vaak het
+    // oppervlak ACHTER de tafelrand (de lege kamer heeft daar geen vaas).
+    // Neem daarom het nabije cluster en gebruik het diepe uiteinde daarvan:
+    // dat benadert het contactpunt van de productbasis op de tafel.
+    candidates.sort((a, b) => a.distance - b.distance)
+    const localDepths = candidates
+      .slice(0, Math.min(candidates.length, 600))
+      .map((candidate) => candidate.depth)
+      .sort((a, b) => a - b)
+    const nearReference = localDepths[Math.floor(localDepths.length * 0.25)]
+    const nearCluster = localDepths.filter((depth) => depth <= nearReference * 1.75)
+    if (nearCluster.length < 8) return null
+    const splatDepth = nearCluster[Math.min(nearCluster.length - 1, Math.floor(nearCluster.length * 0.8))]
+    // Een uniforme schaal rond de broncamera verandert de frame-1-projectie
+    // niet. Hij bepaalt wel waar het tafelvlak in de Product Studio-ruimte ligt.
+    const scale = productDepth / splatDepth
+    const dolly = 0
+    if (
+      !Number.isFinite(scale) || scale < 0.05 || scale > 50
+      || !Number.isFinite(dolly)
+    ) return null
+
+    return { productDepth, splatDepth, scale, dolly, fovDepthRatio, pointCount: candidates.length }
   })().catch((error) => {
-    console.warn('[ProductStudio] splat-referentiediepte meten mislukt:', error)
+    console.warn('[ProductStudio] automatische tafelkalibratie mislukt:', error)
     return null
   })
 
-  maskedSplatReferenceDepthCache.set(cacheKey, pending)
+  marbleSupportMeasurementCache.set(cacheKey, pending)
   return pending
-}
-
-function manifestProductFrontDepth(manifest: any): number | null {
-  const cameraPosition = manifest?.camera?.position
-  const cameraTarget = manifest?.camera?.target
-  const worldMin = manifest?.product?.worldBounds?.min
-  const worldMax = manifest?.product?.worldBounds?.max
-  if (
-    !Array.isArray(cameraPosition) || !Array.isArray(cameraTarget)
-    || !Array.isArray(worldMin) || !Array.isArray(worldMax)
-  ) return null
-
-  const camera = new THREE.PerspectiveCamera()
-  applyManifestCameraPose(camera, manifest, cameraPosition, cameraTarget)
-  const bounds = new THREE.Box3(
-    new THREE.Vector3().fromArray(worldMin),
-    new THREE.Vector3().fromArray(worldMax),
-  )
-  if (bounds.isEmpty()) return null
-  const center = bounds.getCenter(new THREE.Vector3())
-  const ray = new THREE.Ray(camera.position.clone(), center.sub(camera.position).normalize())
-  const hit = ray.intersectBox(bounds, new THREE.Vector3())
-  if (!hit) return null
-  const depth = -hit.applyMatrix4(camera.matrixWorldInverse).z
-  return Number.isFinite(depth) && depth > 0.05 ? depth : null
 }
 
 export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
@@ -1115,7 +1276,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [splatAlignment, setSplatAlignment] = useState<SplatAlignment | null>(null)
   const [splatBaseAlignment, setSplatBaseAlignment] = useState<SplatAlignment | null>(null)
   const [splatVisible, setSplatVisible] = useState(true)
-  const activeMarbleCalibrationRef = useRef<string | null>(null)
   const viewportShellRef = useRef<HTMLDivElement>(null)
 
   const applySplatAlignment = (alignment: SplatAlignment, baseAlignment?: SplatAlignment | null) => {
@@ -1312,94 +1472,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
   }
 
-  // Berekent marbleToShot vanuit de echte referentiecamera van de WorldLabs-viewer.
-  // Stappenplan:
-  //   1. OpenCV → Three.js coördinatenconversie: 180° om X-as (Q_x180)
-  //   2. Roteer Marble's startrichting naar de shot camera richting (Q_view)
-  //   3. Verplaats origin naar shot camera positie
-  //   4. Schaal met metric_scale_factor
-  // Kalibratie per Marble-wereld opslaan/laden via localStorage.
-  // marbleOriginInPS: vaste positie van Marble frame_0001 in de PS-wereld (onafhankelijk van camerahoek).
-  // Voor elke nieuwe shot: groupPosition = marbleOriginInPS - transformPosition (nieuwe camera).
-  interface MarbleCalibration {
-    marbleOriginInPS: [number, number, number]
-    groupScale: number
-    basisRotationY: number
-    groupTiltX: number
-    groupTiltZ: number
-    bubbleRadius: number
-    groupMaskSize: number
-    groupMaskOffsetX?: number
-    groupMaskOffsetY?: number
-    groupMaskOffsetZ?: number
-    worldReferencePosition?: [number, number, number]
-    worldReferenceQuaternion?: [number, number, number, number]
-    worldReferenceTarget?: [number, number, number]
-    worldReferenceFovY?: number
-  }
-
-  const marbleCalibrationIdentity = (alignment?: SplatAlignment | null): string | null => {
-    if (!alignment) return null
-    if (alignment.worldId) return `world:${alignment.worldId}`
-    const metaWorldId = alignment.marbleMeta && typeof alignment.marbleMeta === 'object'
-      ? (alignment.marbleMeta as { worldId?: unknown }).worldId
-      : undefined
-    if (typeof metaWorldId === 'string' && metaWorldId) return `world:${metaWorldId}`
-    if (!alignment.splatUrl) return null
-    const stableSource = alignment.splatUrl
-      .split('?')[0]
-      .replace(/(?:world(?:_hq)?\.(?:splat|spz)|[^/]+\.ply)$/i, '')
-    return `source:${stableSource}`
-  }
-
-  const marbleCalibrationKey = (identity: string) => `marble-cal-${identity}`
-
-  const loadMarbleCalibration = (alignment?: SplatAlignment | null): MarbleCalibration | null => {
-    const identity = marbleCalibrationIdentity(alignment)
-    if (!identity) return null
-    try {
-      const raw = localStorage.getItem(marbleCalibrationKey(identity))
-      return raw ? (JSON.parse(raw) as MarbleCalibration) : null
-    } catch { return null }
-  }
-
-  const saveMarbleCalibration = (alignment: SplatAlignment) => {
-    const identity = marbleCalibrationIdentity(alignment)
-    if (!identity || !alignment.splatToShot || !Array.isArray(alignment.transformPosition)) return
-    const tx = finiteNumber(alignment.transformPosition[0], 0)
-    const ty = finiteNumber(alignment.transformPosition[1], 0)
-    const tz = finiteNumber(alignment.transformPosition[2], 0)
-    const cal: MarbleCalibration = {
-      marbleOriginInPS: [
-        tx + finiteNumber(alignment.groupPositionX, 0),
-        ty + finiteNumber(alignment.groupPositionY, 0),
-        tz + finiteNumber(alignment.groupPositionZ, 0),
-      ],
-      groupScale: finiteNumber(alignment.groupScale, 1),
-      basisRotationY: finiteNumber(alignment.basisRotationY, 0),
-      groupTiltX: finiteNumber(alignment.groupTiltX, 0),
-      groupTiltZ: finiteNumber(alignment.groupTiltZ, 0),
-      bubbleRadius: finiteNumber(alignment.bubbleRadius, 0),
-      groupMaskSize: finiteNumber(alignment.groupMaskSize, 20),
-      groupMaskOffsetX: finiteNumber(alignment.groupMaskOffsetX, 0),
-      groupMaskOffsetY: finiteNumber(alignment.groupMaskOffsetY, 0),
-      groupMaskOffsetZ: finiteNumber(alignment.groupMaskOffsetZ, 0),
-      worldReferencePosition: alignment.worldReferencePosition
-        ? [...alignment.worldReferencePosition] as [number, number, number]
-        : undefined,
-      worldReferenceQuaternion: alignment.worldReferenceQuaternion
-        ? [...alignment.worldReferenceQuaternion] as [number, number, number, number]
-        : undefined,
-      worldReferenceTarget: alignment.worldReferenceTarget
-        ? [...alignment.worldReferenceTarget] as [number, number, number]
-        : undefined,
-      worldReferenceFovY: alignment.worldReferenceFovY,
-    }
-    try {
-      localStorage.setItem(marbleCalibrationKey(identity), JSON.stringify(cal))
-    } catch { /* ignore */ }
-  }
-
   const applyMarbleShotTransform = (alignment: SplatAlignment, manifest: any, _baseAlignment?: SplatAlignment | null, _forceRecalculate = false): SplatAlignment => {
     const cameraPos = manifest?.camera?.position
     const cameraTarget = manifest?.camera?.target
@@ -1411,14 +1483,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
 
     const storedShotTarget = new THREE.Vector3(Number(cameraTarget[0]), Number(cameraTarget[1]), Number(cameraTarget[2]))
-    const calibration = loadMarbleCalibration(alignment)
-    const referenceFovY = alignment.worldReferenceFovY ?? calibration?.worldReferenceFovY
-    // WorldLabs reconstrueert de wereld vanuit zijn eigen referentieprojectie.
-    // manifest.camera.fov kan al voor de editor-viewport gecorrigeerd zijn en
-    // zou hier een tweede crop/zoom veroorzaken. Gebruik daarom de gemeten FOV
-    // van de WorldLabs-referentiecamera voor dezelfde beeldkadering.
-    const worldFovY = finiteNumber(referenceFovY, WORLDLABS_REFERENCE_FOV_Y)
-    const shotObject = new THREE.PerspectiveCamera(worldFovY, 16 / 9, 0.1, 1000)
+    const fullCanvasFovY = finiteNumber(manifest?.camera?.fov, WORLDLABS_REFERENCE_FOV_Y)
+    const shotFovY = manifestOutputFovY(manifest)
+    const shotObject = new THREE.PerspectiveCamera(fullCanvasFovY, 16 / 9, 0.1, 1000)
     applyManifestCameraPose(shotObject, manifest, cameraPos, cameraTarget)
     const shotCamera = shotObject.position.clone()
     const shotQuaternion = shotObject.quaternion.clone().normalize()
@@ -1427,9 +1494,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       .applyQuaternion(shotQuaternion)
       .multiplyScalar(shotTargetDistance)
       .add(shotCamera)
-    const referencePositionValues = alignment.worldReferencePosition ?? calibration?.worldReferencePosition
-    const referenceQuaternionValues = alignment.worldReferenceQuaternion ?? calibration?.worldReferenceQuaternion
-    const referenceTargetValues = alignment.worldReferenceTarget ?? calibration?.worldReferenceTarget
+    const referenceFovY = WORLDLABS_REFERENCE_FOV_Y
+    // De Marble-route wordt altijd vanuit frame 1 opgebouwd. In het export-
+    // coördinatenstelsel is dat de canonieke referentiecamera op de oorsprong.
+    // Oude handmatige viewerposes mogen deze vaste basis niet overschrijven.
+    const referencePositionValues: [number, number, number] = [0, 0, 0]
+    const referenceQuaternionValues: [number, number, number, number] = [0, 0, 0, 1]
+    const referenceTargetValues: [number, number, number] = [0, 0, -1]
     const referencePosition = Array.isArray(referencePositionValues)
       ? new THREE.Vector3(...referencePositionValues)
       : new THREE.Vector3(0, 0, 0)
@@ -1437,12 +1508,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       ? new THREE.Quaternion(...referenceQuaternionValues).normalize()
       : new THREE.Quaternion()
     const transformQuaternion = shotQuaternion.clone().multiply(referenceQuaternion.clone().invert()).normalize()
-    // Marble levert raw_xyz * metricScaleFactor in metrische eenheden. Schaal
-    // rond de WorldLabs-referentiecamera: frame 1 blijft daardoor pixelvast,
-    // terwijl afstanden tot het losse 3D-product dezelfde metrische basis krijgen.
+    // Universele camera-basis-transform van Marble naar Product Studio:
+    // R = Qshot * inverse(Qframe1), t = Cshot - R * (s * Cframe1).
+    // De Marble-origin ligt exact op de shot-camera. Schalen rond dit punt
+    // verandert de projectie van frame 1 niet en houdt de studiovaas volledig
+    // los van de splatkalibratie.
+    // OpenCV -> Three wordt uitsluitend in WorldLabsSplatBackground toegepast
+    // en hoort dus niet in deze transform.
     const transformScale = Math.max(0.001, finiteNumber(alignment.metricScaleFactor, 1))
     const transformPosition = shotCamera.clone().sub(
-      referencePosition.clone().applyQuaternion(transformQuaternion).multiplyScalar(transformScale),
+      referencePosition.clone().multiplyScalar(transformScale).applyQuaternion(transformQuaternion),
     )
 
     return {
@@ -1452,11 +1527,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       transformPosition: [transformPosition.x, transformPosition.y, transformPosition.z],
       transformQuaternion: [transformQuaternion.x, transformQuaternion.y, transformQuaternion.z, transformQuaternion.w],
       transformScale,
-      // Marble is opgebouwd uit de schone achtergrondvideo. Het objectmasker
-      // van de composite hoort daarom niet bij dezelfde 3D-punten en mag de
-      // splat niet schalen of lokaal uitsnijden.
-      depthCalibratedScale: undefined,
       productExclusionBounds: undefined,
+      // Dolly-zoom- en squeezevelden uit oudere kalibraties mogen niet
+      // doorsijpelen: de splat staat altijd uniform op zijn schaal met de
+      // origin op de camera.
+      supportCalibratedScale: undefined,
+      supportCalibrationDolly: undefined,
+      supportFovDepthRatio: undefined,
+      supportCalibrationVersion: undefined,
       worldReferencePosition: referencePositionValues,
       worldReferenceQuaternion: referenceQuaternionValues,
       worldReferenceTarget: referenceTargetValues,
@@ -1476,67 +1554,48 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       sceneCenter: [shotTarget.x, shotTarget.y, shotTarget.z],
       position: [shotCamera.x, shotCamera.y, shotCamera.z],
       quaternion: [shotQuaternion.x, shotQuaternion.y, shotQuaternion.z, shotQuaternion.w],
-      // De editor bewaart de canonieke FOV van het uitvoerkader. De grotere
-      // canvas-FOV wordt centraal door applyOutputFrameProjection afgeleid.
-      fovY: finiteNumber(manifest?.camera?.fov, worldFovY),
+      // De composietcamera kijkt door de WorldLabs-referentielens: daarmee is
+      // de splat vanaf het (verankerde) standpunt pixelgelijk aan de foto.
+      fovY: WORLDLABS_REFERENCE_FOV_Y,
       width: alignment.width ?? 1920,
       height: alignment.height ?? 1080,
     }
   }
 
-  const calibrateMarbleDepthToProduct = async (
+  // Het product is de vaste waarheid: het blijft exact op zijn studio-transform
+  // uit het renderpacket. Het hele Marble-ensemble (shot-camera + splat) wordt
+  // om het product heen geschaald en verplaatst via anchorMarbleWorldToProduct.
+  // Een uniforme schaal rond het camerastandpunt verandert het beeld niet, dus
+  // de foto-match blijft intact terwijl het product op zijn canvas-plek staat
+  // en de splat onvervormd blijft (geen anamorfe X/Y-squeeze — die maakt de
+  // wereld onbruikbaar om doorheen te lopen).
+  const calibrateMarbleToProductSupport = async (
     alignment: SplatAlignment,
     manifest: any,
-    objectMaskUrl: string | null | undefined,
-  ): Promise<SplatAlignment> => {
-    if (!objectMaskUrl || !isMarbleAlignment(alignment)) return alignment
+  ): Promise<{ alignment: SplatAlignment; anchor: MarbleWorldAnchor | null }> => {
+    const shotAlignment = applyMarbleShotTransform(alignment, manifest)
+    if (!isMarbleAlignment(alignment)) return { alignment: shotAlignment, anchor: null }
 
-    const [splatDepth, productDepth] = await Promise.all([
-      estimateMaskedSplatReferenceDepth(alignment, objectMaskUrl),
-      Promise.resolve(manifestProductFrontDepth(manifest)),
-    ])
-    if (!splatDepth || productDepth == null || splatDepth.rawSurfaceDepth <= 0.05) return alignment
-
-    const depthCalibratedScale = productDepth / splatDepth.rawSurfaceDepth
-    if (!Number.isFinite(depthCalibratedScale) || depthCalibratedScale < 0.01 || depthCalibratedScale > 100) {
-      console.warn('[ProductStudio] splat-dieptekalibratie verworpen:', {
-        rawSplatDepth: splatDepth.rawSurfaceDepth,
-        productDepth,
-        depthCalibratedScale,
-      })
-      return alignment
-    }
-
-    console.info('[ProductStudio] splat op productdiepte gekalibreerd', {
-      pointsInMask: splatDepth.pointsInMask,
-      rawSplatDepth: splatDepth.rawSurfaceDepth,
-      productDepth,
-      metricScaleFactor: alignment.metricScaleFactor,
-      depthCalibratedScale,
-    })
-    return applyMarbleShotTransform(
-      { ...alignment, depthCalibratedScale },
+    const measurement = await measureMarbleSupportScale(shotAlignment, manifest)
+    if (measurement) console.info('[ProductStudio] Marble tafeldiepte gemeten', measurement)
+    const anchor = anchorMarbleWorldToProduct(
       manifest,
-      alignment,
-      true,
+      measurement?.splatDepth ?? null,
+      finiteNumber(shotAlignment.transformScale, 1),
     )
-  }
+    if (!anchor) return { alignment: shotAlignment, anchor: null }
 
-  const useWorldLabsReferencePose = (pose: SplatReferencePose, force = false) => {
-    setSplatAlignment((current) => {
-      if (!current || current.source !== 'marble') return current
-      if (current.worldReferencePosition && !force) return current
-      const withReference: SplatAlignment = {
-        ...current,
-        worldReferencePosition: [...pose.position],
-        worldReferenceQuaternion: [...pose.quaternion],
-        worldReferenceTarget: [...pose.target],
-        worldReferenceFovY: pose.fovY,
-        transformScale: 1,
-      }
-      saveMarbleCalibration(withReference)
-      return applyMarbleShotTransform(withReference, splatShotManifestRef.current ?? renderManifestRef.current, splatBaseAlignment, true)
-    })
+    console.info('[ProductStudio] Marble-wereld verankerd aan product', anchor)
+    return {
+      alignment: {
+        ...shotAlignment,
+        transformPosition: [...anchor.cameraPosition],
+        transformScale: anchor.splatScale,
+        position: [...anchor.cameraPosition],
+        sceneCenter: [...anchor.cameraTarget],
+      },
+      anchor,
+    }
   }
 
   const [splatPuntMode, setSplatPuntMode] = useState<'off' | 'foto' | 'scene'>('off')
@@ -1884,10 +1943,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
   useEffect(() => {
     if (rightTab !== 'properties' && rightTab !== 'editor') return
-    const id = setInterval(() => {
-      setSceneControls(studioRef.current?.getSceneControls() ?? null)
-    }, 200)
-    setSceneControls(studioRef.current?.getSceneControls() ?? null)
+    // getSceneControls() geeft elke call een nieuw object terug. Zonder deze
+    // bail-out re-rendert de hele shell 5x per seconde, ook als er niets
+    // veranderd is — dat maakt de complete app merkbaar stroperig.
+    const update = () => {
+      setSceneControls((prev) => {
+        const next = studioRef.current?.getSceneControls() ?? null
+        if (
+          prev && next
+          && prev.scene === next.scene
+          && prev.selectedObjectId === next.selectedObjectId
+          && prev.selectedLightId === next.selectedLightId
+          && prev.transformMode === next.transformMode
+        ) return prev
+        return next
+      })
+    }
+    const id = setInterval(update, 200)
+    update()
     return () => clearInterval(id)
   }, [rightTab])
 
@@ -2131,14 +2204,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (!manifest?.camera?.position || !manifest?.camera?.target || !studioRef.current) return
 
     if (viewportOverlay === 'bgComposite') {
-      // Dit is de canonieke FOV van het uitvoerkader. De viewport rekent hem
-      // zelf om naar de grotere canvas-FOV; 50 graden invullen zou die crop-
-      // correctie dubbel toepassen.
+      // Met een actieve Marble-splat geldt de verankerde camera (positie uit de
+      // alignment, 50°-referentielens); zonder splat de originele foto-lens.
+      const marbleAnchored = splatAlignment?.source === 'marble' && splatAlignment.splatToShot
       studioRef.current.setCameraOrbit(
-        manifest.camera.position,
-        manifest.camera.target,
-        manifest.camera.fov,
-        manifest.camera.viewMatrix,
+        marbleAnchored && splatAlignment.position ? splatAlignment.position : manifest.camera.position,
+        marbleAnchored && splatAlignment.sceneCenter ? splatAlignment.sceneCenter : manifest.camera.target,
+        marbleAnchored ? finiteNumber(splatAlignment.worldReferenceFovY, WORLDLABS_REFERENCE_FOV_Y) : manifestOutputFovY(manifest),
+        marbleAnchored ? undefined : manifest.camera.viewMatrix,
       )
     }
   }, [viewportOverlay])
@@ -3109,7 +3182,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         ?? version.product_layer_url
         ?? project.objectMaskUrl
         ?? project.objectMaskAsset?.url
-
       const restoreShotCamera = (fov: number | undefined) => {
         const position = shotManifest?.camera?.position as [number, number, number] | undefined
         const target = shotManifest?.camera?.target as [number, number, number] | undefined
@@ -3166,11 +3238,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         window.setTimeout(apply, 900)
       }
 
-      // Het renderpacket bewaart de live camera waarmee deze specifieke foto is
-      // opgebouwd. De WorldLabs-lens wordt toegepast zodra de gekoppelde splat
-      // geladen is; tot die tijd gebruiken we de oorspronkelijke shotlens.
+      // Het renderpacket bewaart de lens van het volledige editorcanvas. Het
+      // fotokader is daar een uitsnede van; geef daarom overal dezelfde
+      // canonieke kaderlens door. Scene3DViewport rekent die vervolgens terug
+      // naar de volledige canvasprojectie, onafhankelijk van kader-zichtbaarheid.
       if (shotManifest?.camera?.position && shotManifest?.camera?.target) {
-        restoreShotCamera(shotManifest.camera.fov)
+        restoreShotCamera(manifestOutputFovY(shotManifest))
       }
 
       // Het renderpacket is de exacte foto-time waarheid. De studioscene kan na
@@ -3178,9 +3251,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       // verplaatsen of roteren wanneer een archiefversie wordt hersteld.
       const capturedProductTransform = manifestProductTransform(shotManifest)
       if (capturedProductTransform) {
-        // De manifest-transform is de exacte toestand op het moment van de foto.
-        // Een 2D-masker mag de splat helpen kalibreren, maar mag het losse GLB
-        // nooit opnieuw schalen of naar een andere diepte verplaatsen.
         restoredProductSourceTransform = capturedProductTransform
         restoreProductTransform(restoredProductSourceTransform)
       } else if (scene?.product_transform) {
@@ -3254,17 +3324,44 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const projectId = project.backendProject?.id
       if (projectId) {
         const splatApi = getProductStudioApi()
+        const applyAnchoredCamera = (anchor: MarbleWorldAnchor) => {
+          const apply = () => {
+            if (activeArchiveVersionId.current !== version.id) return
+            studioRef.current?.setCameraOrbit(
+              anchor.cameraPosition,
+              anchor.cameraTarget,
+              WORLDLABS_REFERENCE_FOV_Y,
+              anchor.viewMatrix,
+            )
+            setCurrentCameraState({ position: [...anchor.cameraPosition], target: [...anchor.cameraTarget] })
+          }
+          apply()
+          requestAnimationFrame(() => requestAnimationFrame(apply))
+          window.setTimeout(apply, 120)
+          window.setTimeout(apply, 400)
+          window.setTimeout(apply, 900)
+        }
         const persistShotAlignment = async (alignment: SplatAlignment) => {
           if (activeArchiveVersionId.current !== version.id) return
-          applySplatAlignment(alignment, alignment)
+          const { alignment: shotAlignment, anchor } = await calibrateMarbleToProductSupport(alignment, alignmentManifest)
+          if (activeArchiveVersionId.current !== version.id) return
+          applySplatAlignment(shotAlignment, shotAlignment)
           splatApi?.saveSceneAlignment?.({
             projectId,
             renderVersionId: version.id,
-            alignment: alignment as unknown as Record<string, unknown>,
-            baseAlignment: alignment as unknown as Record<string, unknown>,
+            alignment: shotAlignment as unknown as Record<string, unknown>,
+            baseAlignment: shotAlignment as unknown as Record<string, unknown>,
           }).catch((error: unknown) => console.warn('[scene.json] shot-uitlijning opslaan mislukt:', error))
-          restoreShotCamera(shotManifest?.camera?.fov)
-          if (restoredProductSourceTransform) restoreProductTransform(restoredProductSourceTransform)
+          // De camera verhuist mee met het verankerde ensemble; het product
+          // blijft onaangeroerd op zijn studio-transform uit het renderpacket.
+          if (anchor) {
+            applyAnchoredCamera(anchor)
+          } else {
+            restoreShotCamera(finiteNumber(shotAlignment.worldReferenceFovY, WORLDLABS_REFERENCE_FOV_Y))
+          }
+          if (restoredProductSourceTransform) {
+            restoreProductTransform(restoredProductSourceTransform)
+          }
         }
         const applyRestoredWorldLabsProjection = async (alignment: SplatAlignment) => {
           if (alignment.source !== 'marble' || activeArchiveVersionId.current !== version.id) return
@@ -3272,7 +3369,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           // De shot-camera en het product zijn de vaste waarheid. De editor
           // vertaalt de canonieke shot-FOV zelf naar de canvasprojectie van het
           // fotokader; WorldLabs-FOV hier nogmaals toepassen zou dubbel zoomen.
-          restoreShotCamera(shotManifest?.camera?.fov)
+          restoreShotCamera(manifestOutputFovY(shotManifest))
           if (restoredProductSourceTransform) {
             restoreProductTransform(restoredProductSourceTransform)
           }
@@ -3288,14 +3385,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             const enriched: SplatAlignment = (res.alignment.source === 'marble' && res.alignment.metricScaleFactor == null)
               ? { ...res.alignment, metricScaleFactor: marbleGen.metricScaleFactor ?? undefined, groundPlaneOffset: res.alignment.groundPlaneOffset ?? marbleGen.groundPlaneOffset ?? undefined }
               : res.alignment
-            const alignment = enriched.source === 'marble'
-              ? applyMarbleShotTransform(enriched, alignmentManifest, base)
-              : enriched
-            // Voor marble is het reset-anker de berekende shot-uitlijning (niet de ruwe COLMAP base).
-            // Zo gaat Reset terug naar de automatisch berekende positie, niet naar de import-state.
-            applySplatAlignment(alignment, enriched.source === 'marble' ? alignment : base)
-            void applyRestoredWorldLabsProjection(alignment)
-            if (enriched.source === 'marble') void persistShotAlignment(alignment)
+            if (enriched.source === 'marble') {
+              await persistShotAlignment(enriched)
+            } else {
+              applySplatAlignment(enriched, base)
+              void applyRestoredWorldLabsProjection(enriched)
+            }
           } else {
             setSplatBaseAlignment(null)
             setSplatAlignment(null)
@@ -3330,11 +3425,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   bubbleRadius: DEFAULT_BUBBLE_RADIUS,
                   bubbleFeather: DEFAULT_BUBBLE_FEATHER,
                 }
-                const nextAlignment = applyMarbleShotTransform(baseAlignmentForShot, alignmentManifest, baseAlignmentForShot)
-                setSplatBaseAlignment((prev) => prev ?? cloneSplatAlignment(nextAlignment))
-                setSplatAlignment((prev) => prev ?? nextAlignment) // loadSceneAlignment al ingesteld
-                void applyRestoredWorldLabsProjection(nextAlignment)
-                void persistShotAlignment(nextAlignment)
+                await persistShotAlignment(baseAlignmentForShot)
               }
             }).catch(() => {})
           }
@@ -4309,20 +4400,22 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 }
 
                 if (splatAlignment && isMarbleAlignment({ ...splatAlignment, splatUrl: currentSplatUrl })) {
-                  // Live manifest heeft de actuele camerahoek; render-packet manifest is de fallback.
-                  const liveManifest = studioRef.current?.captureRenderManifest?.()
-                  const manifest = liveManifest ?? renderManifestRef.current
-                  // forceRecalculate=true: knop herberekent altijd de shot-positie (nieuw camerastandpunt).
-                  // Kalibratie (groupScale, basisRotationY, tilt) wordt via wasCalibrated meegenomen;
-                  // groupPosition wordt gereset (is per-shot).
-                  const nextAlignment = applyMarbleShotTransform(
+                  // De Marble-koppeling hoort altijd bij het foto-standpunt van het
+                  // render-packet; het live manifest is alleen de fallback.
+                  const manifest = renderManifestRef.current ?? studioRef.current?.captureRenderManifest?.()
+                  const { alignment: nextAlignment, anchor } = await calibrateMarbleToProductSupport(
                     { ...splatAlignment, splatUrl: currentSplatUrl, plyPath: currentPlyPath, spzPath: currentSpzPath, source: 'marble' as const },
                     manifest,
-                    null,
-                    true,
                   )
                   setSplatViewerUrl(null)
                   applySplatAlignment(nextAlignment, nextAlignment)
+                  // Camera naar de verankerde pose; het product blijft onaangeroerd.
+                  studioRef.current?.setCameraOrbit(
+                    anchor?.cameraPosition ?? nextAlignment.position,
+                    anchor?.cameraTarget ?? nextAlignment.sceneCenter,
+                    WORLDLABS_REFERENCE_FOV_Y,
+                    anchor?.viewMatrix,
+                  )
                   return
                 }
 
@@ -4368,28 +4461,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             >
               {splatAlignment?.source === 'marble' ? '↺ Achtergrond op shot uitlijnen' : '3D achtergrond uitlijnen (COLMAP)'}
             </button>
-            {splatAlignment?.splatToShot && marbleCalibrationIdentity(splatAlignment) && (
-              <div className="mt-1.5 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!splatAlignment) return
-                    saveMarbleCalibration(splatAlignment)
-                  }}
-                  className="flex-1 rounded-md border border-emerald-400/25 bg-emerald-500/10 py-1.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20"
-                >
-                  ✓ Sla op als standaard
-                </button>
-                {(() => {
-                  const cal = loadMarbleCalibration(splatAlignment)
-                  return cal ? (
-                    <span className="text-[10px] text-emerald-400/60" title={`Opgeslagen: schaal ${cal.groupScale.toFixed(2)}, rotatie ${(cal.basisRotationY * 180 / Math.PI).toFixed(1)}°`}>
-                      ✓ opgeslagen
-                    </span>
-                  ) : null
-                })()}
-              </div>
-            )}
             {splatAlignment && (
               <>
                 <div className="mt-2 rounded-md border border-white/[0.08] bg-black/20 p-2">
@@ -5405,7 +5476,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               src={splatFrameViewerSrc}
               xFlip={splatFrameXFlip}
               onPoseChange={setSplatFramePose}
-              onReadyPose={(pose) => useWorldLabsReferencePose(pose)}
             />
             {splatFrameCompositeSrc && splatFrameCompositeOpacity > 0 && (
               <img
@@ -5437,15 +5507,6 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 </span>
               </div>
               <div className="flex items-center gap-1.5">
-                {splatFramePose && (
-                  <button
-                    type="button"
-                    onClick={() => useWorldLabsReferencePose(splatFramePose, true)}
-                    className="rounded-full border border-cyan-300/35 bg-cyan-400/15 px-2.5 py-1 text-[10px] font-semibold text-cyan-100 transition-colors hover:bg-cyan-400/25"
-                  >
-                    Gebruik huidige view als basis
-                  </button>
-                )}
                 {splatFrameSpzSrc && splatFrameSplatSrc && (
                   <button
                     type="button"

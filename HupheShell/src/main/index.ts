@@ -21,6 +21,9 @@ app.setName('HupheAI')
 // Hardware WebGL: Metal op macOS, standaard (D3D11/OpenGL) op andere platforms.
 // ignore-gpu-blocklist zorgt dat geblokkeerde drivers toch hardware-rendering proberen.
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
+if (process.env.HUPHE_DEBUG_CDP === '1') {
+  app.commandLine.appendSwitch('remote-debugging-port', '9222')
+}
 if (process.platform === 'darwin') {
   // Metal is de native GPU-API op macOS (Intel én Apple Silicon).
   app.commandLine.appendSwitch('use-angle', 'metal')

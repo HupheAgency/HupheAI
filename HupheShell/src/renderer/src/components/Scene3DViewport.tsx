@@ -35,6 +35,9 @@ function applyOutputFrameProjection(camera: THREE.Camera, canvas: HTMLCanvasElem
 
   camera.aspect = canvasRect.width / canvasRect.height
   if (frameRect && frameRect.height > 0) {
+    // De opgeslagen FOV hoort bij het 16:9-uitvoerkader, niet bij het volledige
+    // editorcanvas. Het kader blijft meetbaar als de overlay verborgen is, zodat
+    // het aan/uitzetten nooit de 3D-projectie verandert.
     const verticalCoverage = Math.min(1, frameRect.height / canvasRect.height)
     const halfFov = THREE.MathUtils.degToRad(canonicalFov) / 2
     camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(halfFov) / verticalCoverage))
@@ -60,7 +63,12 @@ function OutputFrameProjection() {
       if (nextFrame) resizeObserver.observe(nextFrame)
       apply()
     }) : null
-    mutationObserver?.observe(editorRoot!, { childList: true, subtree: true })
+    mutationObserver?.observe(editorRoot!, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-scene-frame'],
+    })
     apply()
     return () => {
       resizeObserver.disconnect()
@@ -73,8 +81,14 @@ function OutputFrameProjection() {
 
 function SceneCameraDebug() {
   const { camera, gl } = useThree()
+  const frameCounterRef = useRef(0)
 
+  // DOM-layout lezen (getBoundingClientRect + querySelector) forceert reflow;
+  // dat elke frame doen maakt het orbiten schokkerig. Eén keer per ~30 frames
+  // is ruim genoeg voor een debug-snapshot.
   useFrame(() => {
+    frameCounterRef.current += 1
+    if (frameCounterRef.current % 30 !== 1) return
     const perspective = camera as THREE.PerspectiveCamera
     const frame = gl.domElement.closest('[data-scene-editor]')
       ?.querySelector<HTMLElement>('[data-scene-frame="true"]')
@@ -108,11 +122,21 @@ function splatSourceUrls(alignment: SplatAlignment): { src: string; fallbackSrc?
   const derivedSpz = alignment.splatUrl.replace(/world_hq\.splat(?=\?|$)/i, 'world.spz')
   const spzSrc = explicitSpz ?? (derivedSpz !== alignment.splatUrl ? derivedSpz : undefined)
 
-  // De WorldLabs-preview gebruikt de volledige SPZ-scene. De afgeleide SPLAT
-  // blijft een fallback voor oudere worlds zonder SPZ-export.
-  return spzSrc
-    ? { src: spzSrc, fallbackSrc: alignment.splatUrl }
-    : { src: alignment.splatUrl }
+  // Interactieve editor: de HQ .splat (±194k punten) is 2.6x lichter dan de
+  // volledige SPZ (±500k) — met CPU-sortering scheelt dat direct in de
+  // vloeiendheid van het orbiten. De SPZ blijft de fallback.
+  return { src: alignment.splatUrl, fallbackSrc: spzSrc }
+}
+
+// De editorcamera keert terug naar de oorspronkelijke canvas-FOV. Om de
+// WorldLabs-bronlens (50 graden) onder die smallere camera onveranderd te
+// projecteren, worden alleen de lokale X/Y-afstanden verkleind. De uniforme
+// schaal blijft verantwoordelijk voor de echte diepte van het tafelvlak.
+function worldLabsAnchorScale(alignment: SplatAlignment): [number, number, number] {
+  const scale = finiteNumber(alignment.transformScale, 1)
+    * finiteNumber(alignment.groupScale, 1)
+  const lensRatio = Math.max(0.001, finiteNumber(alignment.supportFovDepthRatio, 1))
+  return [scale / lensRatio, scale / lensRatio, scale]
 }
 
 function EnvironmentMesh({ url }: { url: string }) {
@@ -1397,7 +1421,7 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
             {...splatSourceUrls(splatAlignment)}
             anchorPosition={splatAlignment.transformPosition}
             anchorQuaternion={splatAlignment.transformQuaternion}
-            anchorScale={finiteNumber(splatAlignment.transformScale, 1) * finiteNumber(splatAlignment.groupScale, 1)}
+            anchorScale={worldLabsAnchorScale(splatAlignment)}
             offset={[
               finiteNumber(splatAlignment.groupPositionX, 0),
               finiteNumber(splatAlignment.groupPositionY, 0),
