@@ -49,6 +49,10 @@ ipcRenderer.on('product-studio:orbit-step', (_event, step) => {
   g.dispatchEvent(new g.CustomEvent('product-studio:orbit-step', { detail: step }))
 })
 
+ipcRenderer.on('product-studio:neutral-step', (_event, step) => {
+  g.dispatchEvent(new g.CustomEvent('product-studio:neutral-step', { detail: step }))
+})
+
 ipcRenderer.on('product-studio:assets-step', (_event, step) => {
   g.dispatchEvent(new g.CustomEvent('product-studio:assets-step', { detail: step }))
 })
@@ -355,6 +359,7 @@ contextBridge.exposeInMainWorld('api', {
       poseMethod?: 'colmap' | 'replicate' | 'fal'
     }) => ipcRenderer.invoke('product-studio:test-orbit-splat', args),
     checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' | 'minimax' | 'kling' }) => ipcRenderer.invoke('product-studio:check-orbit-video', args),
+    generateNeutralPhoto: (args: { projectId: string; renderVersionId?: string; imageUrl: string; force?: boolean }) => ipcRenderer.invoke('product-studio:generate-neutral-photo', args),
     prepareAssets: (args: { projectId: string; renderVersionId?: string }) => ipcRenderer.invoke('product-studio:prepare-assets', args),
     loadSplat: (args?: { defaultDir?: string }) => ipcRenderer.invoke('product-studio:load-splat', args),
     getSplatPose: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string }) => ipcRenderer.invoke('product-studio:get-splat-pose', args),

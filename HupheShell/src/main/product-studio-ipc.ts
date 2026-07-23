@@ -3769,6 +3769,17 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
     const resolvedColmap = (wsDir?: string) => colmapFromDb ?? checkColmap(wsDir)
 
+    // Neutrale heropname (Stap 1b) staat al vóór een Marble-wereld bestaat, dus los
+    // van resolveMarble() zoeken zodat de UI 'm meteen na video-generatie kan tonen.
+    const resolveNeutralUrl = (wsDir?: string): string | undefined => {
+      const dirs = wsDir ? [wsDir, ...marbleSearchDirs] : marbleSearchDirs
+      for (const d of dirs) {
+        const p = join(d, 'neutral.png')
+        if (existsSync(p)) return `huphe://file/${encodeURIComponent(p)}`
+      }
+      return undefined
+    }
+
     // Marble zoeklocaties in volgorde van meest naar minst betrouwbaar:
     // 1. orbit run directory (werkelijk opslagpad van marble)
     // 2. renderVersionId directory (legacy/backup)
@@ -3792,6 +3803,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       panoUrl?: string
       colliderMeshUrl?: string
       totalCredits?: number
+      neutralSource?: boolean
+      neutralPath?: string
     } | null> => {
       for (const baseDir of marbleSearchDirs) {
         try {
@@ -3860,6 +3873,10 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
             panoUrl: meta.panoUrl,
             colliderMeshUrl: meta.colliderMeshUrl,
             totalCredits: meta.totalCredits,
+            // Een orbit-run met neutral.png is gebouwd vanaf de waterpas
+            // heropname: de wereld is dan gravity-consistent met het canvas.
+            neutralSource: existsSync(join(baseDir, 'neutral.png')),
+            neutralPath: existsSync(join(baseDir, 'neutral.png')) ? join(baseDir, 'neutral.png') : undefined,
           }
         } catch {}
       }
@@ -3890,17 +3907,103 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const found = existsSync(orbitRunVideoPath)
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} orbitRunId=${orbitRunId} localPath=${activeLocalPath} videoExists=${found}`)
       if (found) {
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: await resolveMarble() }
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: await resolveMarble(), neutralUrl: resolveNeutralUrl(activeLocalPath) }
       }
     } else {
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} jwt=${!!jwt} activeRun=${!!activeRun} — geen local_path in DB`)
     }
 
     if (existsSync(primaryPath)) {
-      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir), marble: await resolveMarble() }
+      return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir), marble: await resolveMarble(), neutralUrl: resolveNeutralUrl(primaryDir) }
     }
     console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} — niet gevonden (primaryPath=${primaryPath})`)
     return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }
+  })
+
+  ipcMain.handle('product-studio:generate-neutral-photo', async (_e, args: {
+    projectId: string
+    renderVersionId?: string
+    imageUrl: string
+    force?: boolean
+  }) => {
+    const pushStep = (step: string, progress: number) => {
+      console.log(`[neutral-photo] (${progress}%) ${step}`)
+      try { if (!_e.sender.isDestroyed()) _e.sender.send('product-studio:neutral-step', { step, progress }) } catch { /* renderer navigated away */ }
+    }
+
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+
+    // Losse, door de gebruiker goed te keuren stap: hergebruikt dezelfde
+    // run-workspace als de orbit-video (zodat test-orbit-splat 'm later oppikt).
+    const existingRun = await getActiveOrbitRun(jwt, args.projectId, args.renderVersionId).catch(() => null)
+    let orbitRunId: string
+    let wsDir: string
+    if (existingRun?.local_path) {
+      orbitRunId = existingRun.id
+      wsDir = existingRun.local_path
+    } else {
+      orbitRunId = await createOrbitRun(jwt, args.projectId, args.renderVersionId, 'seedance', 'colmap')
+      wsDir = orbitRunsDir(args.projectId, orbitRunId)
+    }
+    await mkdir(wsDir, { recursive: true })
+
+    const { existsSync: existsSyncNG, unlinkSync: unlinkSyncNG } = await import('fs')
+    const neutralPath = join(wsDir, 'neutral.png')
+    if (existsSyncNG(neutralPath)) {
+      if (!args.force) {
+        return { ok: true, orbitRunId, neutralUrl: `huphe://file/${encodeURIComponent(neutralPath)}`, cached: true }
+      }
+      unlinkSyncNG(neutralPath)
+    }
+
+    try {
+      pushStep('Foto laden...', 5)
+      let imageDataUrl = args.imageUrl
+      if (args.imageUrl.startsWith('huphe://file/')) {
+        const raw = decodeURIComponent(args.imageUrl.split('?')[0].slice('huphe://file/'.length))
+        const buf = await readFile(raw)
+        const ext = raw.split('.').pop() ?? 'jpg'
+        imageDataUrl = `data:image/${ext};base64,${buf.toString('base64')}`
+      } else if (!args.imageUrl.startsWith('data:')) {
+        const res = await fetch(args.imageUrl)
+        const buf = Buffer.from(await res.arrayBuffer())
+        imageDataUrl = `data:image/jpeg;base64,${buf.toString('base64')}`
+      }
+
+      pushStep('Neutrale camerahoek genereren (Nano Banana)...', 20)
+      const { callFalProxy } = await import('./lib/proxy')
+      const neutralPrompt = [
+        'Re-photograph this exact same room from a neutral standing eye-level camera position.',
+        'The horizon must be perfectly level: no tilt, no roll, no downward or upward pitch.',
+        'Keep the same viewing direction toward the main table as the original photo.',
+        'Keep every piece of furniture, wall, floor, window, decoration, material and lighting exactly identical to the original photo.',
+        'Show the room slightly wider so more of the floor and ceiling context is visible.',
+        'Do not add, remove, move or restyle any object. Photorealistic, sharp, no people.',
+      ].join(' ')
+      const result = await callFalProxy('fal-ai/nano-banana-2/edit', {
+        image_urls: [imageDataUrl],
+        prompt: neutralPrompt,
+        num_images: 1,
+        aspect_ratio: '16:9',
+        resolution: '2K',
+      }, jwt) as any
+      const neutralUrl = result?.images?.[0]?.url
+      if (!neutralUrl) {
+        return { ok: false, error: `Nano Banana gaf geen afbeelding terug: ${JSON.stringify(result).slice(0, 300)}` }
+      }
+      pushStep('Resultaat downloaden...', 80)
+      const nRes = await fetch(neutralUrl)
+      if (!nRes.ok) return { ok: false, error: `Download van resultaat mislukt (${nRes.status}).` }
+      const nBuf = Buffer.from(await nRes.arrayBuffer())
+      await writeFile(neutralPath, nBuf)
+      await updateOrbitRun(jwt, orbitRunId, { status: 'done' }).catch(() => {})
+      pushStep('Neutrale camerahoek klaar.', 100)
+      return { ok: true, orbitRunId, neutralUrl: `huphe://file/${encodeURIComponent(neutralPath)}` }
+    } catch (err: any) {
+      console.error('[neutral-photo]', err?.message ?? err)
+      return { ok: false, error: err?.message ?? 'Neutrale camerahoek genereren mislukt.' }
+    }
   })
 
   ipcMain.handle('product-studio:test-orbit-splat', async (_e, args: {
@@ -3941,10 +4044,12 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       orbitRunId = activeRun.id
       wsDir = activeRun.local_path
     } else if (!args.force) {
-      // force=false: hergebruik bestaande run als video al op schijf staat
+      // force=false: hergebruik bestaande run-workspace — ook als er alleen al
+      // een goedgekeurde neutral.png staat (van generate-neutral-photo) maar nog
+      // geen video, zodat die neutrale foto als videobron gebruikt wordt.
       const { existsSync: existsSyncEarly } = await import('fs')
       const existingRun = await getActiveOrbitRun(jwt, args.projectId, args.renderVersionId).catch(() => null)
-      if (existingRun?.local_path && existsSyncEarly(join(existingRun.local_path, 'orbit.mp4'))) {
+      if (existingRun?.local_path && (existsSyncEarly(join(existingRun.local_path, 'orbit.mp4')) || existsSyncEarly(join(existingRun.local_path, 'neutral.png')))) {
         orbitRunId = existingRun.id
         wsDir = existingRun.local_path
       } else {
@@ -3952,8 +4057,18 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         wsDir = orbitRunsDir(args.projectId, orbitRunId)
       }
     } else {
+      // force=true: altijd een verse run, maar een reeds goedgekeurde neutral.png
+      // (van de vorige run) blijft meekomen — force regenereert de video, niet
+      // de al goedgekeurde neutrale foto.
+      const { existsSync: existsSyncForceCopy, copyFileSync: copyFileSyncForce } = await import('fs')
+      const prevRun = await getActiveOrbitRun(jwt, args.projectId, args.renderVersionId).catch(() => null)
       orbitRunId = await createOrbitRun(jwt, args.projectId, args.renderVersionId, model, poseMethod)
       wsDir = orbitRunsDir(args.projectId, orbitRunId)
+      await mkdir(wsDir, { recursive: true })
+      const prevNeutralPath = prevRun?.local_path ? join(prevRun.local_path, 'neutral.png') : null
+      if (prevNeutralPath && existsSyncForceCopy(prevNeutralPath)) {
+        copyFileSyncForce(prevNeutralPath, join(wsDir, 'neutral.png'))
+      }
     }
 
     const videoPath = join(wsDir, 'orbit.mp4')
@@ -4215,6 +4330,19 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         const res = await fetch(args.imageUrl)
         const buf = Buffer.from(await res.arrayBuffer())
         imageDataUrl = `data:image/jpeg;base64,${buf.toString('base64')}`
+      }
+
+      // Stap 1b: neutrale heropname. Dit is nu een losse, door de gebruiker
+      // vooraf goedgekeurde stap (product-studio:generate-neutral-photo) — hier
+      // wordt alleen de reeds gecachete neutral.png gebruikt als die bestaat.
+      {
+        const { existsSync: existsSyncN } = await import('fs')
+        const neutralPath = join(wsDir, 'neutral.png')
+        if (existsSyncN(neutralPath)) {
+          const nBuf = await readFile(neutralPath)
+          imageDataUrl = `data:image/png;base64,${nBuf.toString('base64')}`
+          pushStep('Neutrale camerahoek uit cache geladen.', 2)
+        }
       }
 
       // Stap 2: Seedance 2.0 image-to-video via fal.ai direct (sla over als video al bestaat)
@@ -4577,6 +4705,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
 
       await updateOrbitRun(jwt, orbitRunId, { status: 'done', registered_frames: colmapResult.registered, frame_count: frameCount, registration_pct: colmapResult.pct })
+      const { existsSync: existsSyncNU } = await import('fs')
+      const neutralPathOut = join(wsDir, 'neutral.png')
       return {
         ok: true,
         orbitRunId,
@@ -4585,6 +4715,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         framesDir,
         frameCount,
         colmap: colmapResult,
+        neutralUrl: existsSyncNU(neutralPathOut) ? `huphe://file/${encodeURIComponent(neutralPathOut)}` : undefined,
       }
     } catch (err: any) {
       console.error('[orbit-splat]', err?.message ?? err)

@@ -51,6 +51,7 @@ export interface SplatAlignment {
   worldReferenceQuaternion?: [number, number, number, number]
   worldReferenceTarget?: [number, number, number]
   worldReferenceFovY?: number
+  neutralSource?: boolean
   basisRotationY?: number
   position: [number, number, number]
   quaternion: [number, number, number, number] // [qx, qy, qz, qw]

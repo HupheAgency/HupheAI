@@ -182,7 +182,8 @@ type ProductStudioApi = {
   }) => Promise<any>
   finalizeBake: (args: { projectId: string }) => Promise<any>
   testOrbitSplat: (args: { projectId: string; renderVersionId?: string; imageUrl: string; arcDegrees?: number; force?: boolean; model?: 'seedance'; videoOnly?: boolean; poseOnly?: boolean; poseMethod?: 'colmap' | 'replicate' | 'fal' | 'runpod-vggt' }) => Promise<any>
-  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any; sampleClayUrls?: string[]; marble?: MarbleRunState | null }>
+  checkOrbitVideo: (args: { projectId: string; renderVersionId?: string; model?: 'seedance' }) => Promise<{ exists: boolean; videoUrl: string | null; orbitRunId?: string | null; colmap?: any; sampleClayUrls?: string[]; marble?: MarbleRunState | null; neutralUrl?: string }>
+  generateNeutralPhoto: (args: { projectId: string; renderVersionId?: string; imageUrl: string; force?: boolean }) => Promise<{ ok: boolean; orbitRunId?: string; neutralUrl?: string; cached?: boolean; error?: string }>
   loadSplat: (args?: { defaultDir?: string }) => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number; plyPath?: string }>
   getSplatPose: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
   saveSceneAlignment?: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown>; baseAlignment?: Record<string, unknown> | null }) => Promise<{ ok: boolean; error?: string }>
@@ -208,6 +209,7 @@ interface MarbleRunState {
   panoUrl?: string
   colliderMeshUrl?: string
   totalCredits?: number
+  neutralSource?: boolean
   error?: string
 }
 
@@ -1250,7 +1252,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [envPanoramaUrl, setEnvPanoramaUrl] = useState<string | null>(null)
   const [envMappingEnabled, setEnvMappingEnabled] = useState(false)
   const [bakeProgress, setBakeProgress] = useState<{ phase: 'idle' | 'baking' | 'done' | 'error'; currentFrame: number; totalFrames: number; error?: string }>({ phase: 'idle', currentFrame: 0, totalFrames: 12 })
-  const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; renderVersionId?: string | null; videoUrl?: string; orbitRunId?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
+  const [orbitTest, setOrbitTest] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; renderVersionId?: string | null; videoUrl?: string; orbitRunId?: string; error?: string; neutralUrl?: string }>({ phase: 'idle', step: '', progress: 0 })
+  const [neutralGen, setNeutralGen] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; neutralUrl?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [assetsPrep, setAssetsPrep] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; sampleClayUrls?: string[]; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [marbleGen, setMarbleGen] = useState<MarbleRunState>(() => {
@@ -1844,6 +1847,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   useEffect(() => {
     const handler = (e: Event) => {
       const { step, progress } = (e as CustomEvent<{ step: string; progress: number }>).detail
+      setNeutralGen((prev) => prev.phase === 'running' ? { ...prev, step, progress } : prev)
+    }
+    window.addEventListener('product-studio:neutral-step', handler)
+    return () => window.removeEventListener('product-studio:neutral-step', handler)
+  }, [])
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { step, progress } = (e as CustomEvent<{ step: string; progress: number }>).detail
       setAssetsPrep((prev) => prev.phase === 'running' ? { ...prev, step, progress } : prev)
     }
     window.addEventListener('product-studio:assets-step', handler)
@@ -1872,7 +1884,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       if (cancelled) return
       if (res.exists && res.videoUrl) {
         setOrbitTest((prev) => prev.phase === 'idle' || prev.phase === 'done'
-          ? { phase: 'done', step: '', progress: 100, renderVersionId, videoUrl: res.videoUrl!, orbitRunId: res.orbitRunId ?? prev.orbitRunId }
+          ? { phase: 'done', step: '', progress: 100, renderVersionId, videoUrl: res.videoUrl!, orbitRunId: res.orbitRunId ?? prev.orbitRunId, neutralUrl: res.neutralUrl }
           : prev
         )
         // Herstel assetsPrep colmap + clay frames vanuit opgeslagen data (na herstart)
@@ -1897,6 +1909,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               groundPlaneOffset: res.marble!.groundPlaneOffset,
               panoUrl: res.marble!.panoUrl,
               totalCredits: res.marble!.totalCredits,
+              neutralSource: res.marble!.neutralSource,
             }
           })
           // splatAlignment wordt geladen via restoreRenderState (niet hier), zodat de marble
@@ -2023,6 +2036,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     ...(scenePreviewUrl ? [['Scene', scenePreviewUrl] as [string, string | null | undefined]] : []),
     ['Composite', finalCompositeUrl ?? project.finalRender?.src],
     ['Background', backgroundPlateUrl],
+    ...(orbitTest.neutralUrl ? [['Gestabiliseerd', orbitTest.neutralUrl] as [string, string | null | undefined]] : []),
     ...(shadowLayerUrl ? [['Shadow', shadowLayerUrl] as [string, string | null | undefined]] : []),
     ...(envPanoramaUrl ? [['Panorama 360°', envPanoramaUrl] as [string, string | null | undefined]] : []),
     ...envViewUrls.map((url, i) => [['Front', 'Rechts', 'Achter', 'Links', 'Boven'][i], url] as [string, string | null | undefined]),
@@ -2731,6 +2745,29 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setFinalError(null)
   }
 
+  async function runGenerateNeutral(force = false) {
+    const api = getProductStudioApi()
+    if (!api || !project.backendProject) return
+    const imageUrl = backgroundPlateUrl ?? project.sourceImage?.src
+    if (!imageUrl) {
+      setNeutralGen({ phase: 'error', step: '', progress: 0, error: 'Geen achtergrond foto geselecteerd.' })
+      return
+    }
+    const renderVersionId = project.finalRenderRecord?.id
+    setNeutralGen({ phase: 'running', step: 'Neutrale foto genereren...', progress: 2 })
+    try {
+      const result = await api.generateNeutralPhoto({ projectId: project.backendProject.id, renderVersionId, imageUrl, force })
+      if (!result.ok) {
+        setNeutralGen({ phase: 'error', step: '', progress: 0, error: result.error ?? 'Onbekende fout.' })
+        return
+      }
+      setNeutralGen({ phase: 'done', step: '', progress: 100, neutralUrl: result.neutralUrl })
+      setOrbitTest((prev) => ({ ...prev, neutralUrl: result.neutralUrl }))
+    } catch (err: any) {
+      setNeutralGen({ phase: 'error', step: '', progress: 0, error: err?.message ?? 'Neutrale foto genereren mislukt.' })
+    }
+  }
+
   async function runOrbitTest(force = false) {
     const api = getProductStudioApi()
     if (!api || !project.backendProject) return
@@ -2757,7 +2794,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         setOrbitTest({ phase: 'error', step: '', progress: 0, renderVersionId, error: result.error ?? 'Onbekende fout.' })
         return
       }
-      setOrbitTest({ phase: 'done', step: '', progress: 100, renderVersionId, videoUrl: result.videoUrl, orbitRunId: result.orbitRunId })
+      setOrbitTest({ phase: 'done', step: '', progress: 100, renderVersionId, videoUrl: result.videoUrl, orbitRunId: result.orbitRunId, neutralUrl: result.neutralUrl })
     } catch (err: any) {
       setOrbitTest({ phase: 'error', step: '', progress: 0, renderVersionId, error: err?.message ?? 'Orbit test mislukt.' })
     }
@@ -3411,6 +3448,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   route: orbitRes.marble.route,
                   metricScaleFactor: orbitRes.marble.metricScaleFactor,
                   groundPlaneOffset: orbitRes.marble.groundPlaneOffset,
+                  neutralSource: orbitRes.marble.neutralSource,
                   marbleMeta: {
                     panoUrl: orbitRes.marble.panoUrl,
                     colliderMeshUrl: orbitRes.marble.colliderMeshUrl,
@@ -4124,9 +4162,46 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           </section>
 
           <section className="mt-4 rounded-lg border border-white/[0.07] bg-white/[0.03] p-3">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] pb-3">
               <div>
-                <p className="text-xs font-semibold text-white/70">Orbit splat test</p>
+                <p className="text-xs font-semibold text-white/70">Stap 1 · Neutrale camerahoek</p>
+                <p className="mt-1 text-xs text-white/36">Maakt een heropname op ooghoogte met waterpas horizon, zodat de orbit-video (en Marble-wereld) straks een zwaartekracht oplevert die klopt met het studio-canvas. Bekijk het resultaat voordat je een orbit-video start.</p>
+              </div>
+              <div className="flex shrink-0 flex-col gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void runGenerateNeutral(neutralGen.phase === 'done' || Boolean(orbitTest.neutralUrl))}
+                  disabled={neutralGen.phase === 'running' || !project.backendProject || (!backgroundPlateUrl && !project.sourceImage?.src)}
+                  className="rounded-full border border-amber-400/25 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-400/10 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:text-white/24"
+                >
+                  {neutralGen.phase === 'running' ? 'Bezig...' : (neutralGen.phase === 'done' || orbitTest.neutralUrl) ? 'Opnieuw' : 'Maken'}
+                </button>
+              </div>
+            </div>
+            {neutralGen.phase === 'running' && (
+              <div className="mt-3">
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-[10px] text-white/50">{neutralGen.step}</p>
+                  <p className="text-[10px] text-white/30">{neutralGen.progress}%</p>
+                </div>
+                <div className="h-1 w-full rounded-full bg-white/[0.06]">
+                  <div className="h-1 rounded-full bg-amber-400/70 transition-all duration-500" style={{ width: `${neutralGen.progress}%` }} />
+                </div>
+              </div>
+            )}
+            {neutralGen.phase === 'error' && (
+              <p className="mt-2 rounded-md border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-200">{neutralGen.error}</p>
+            )}
+            {(neutralGen.neutralUrl ?? orbitTest.neutralUrl) && (
+              <div className="mt-3">
+                <img src={neutralGen.neutralUrl ?? orbitTest.neutralUrl} className="w-full rounded-md border border-white/[0.07]" style={{ maxHeight: 200, objectFit: 'contain' }} />
+                <p className="mt-1 text-[10px] text-white/36">Klopt de horizon en de kamer? Zo ja, start hieronder de orbit-video — die neemt deze foto automatisch als bron.</p>
+              </div>
+            )}
+
+            <div className="mt-4 flex items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
+              <div>
+                <p className="text-xs font-semibold text-white/70">Stap 2 · Orbit splat test</p>
                 <p className="mt-1 text-xs text-white/36">Genereert een orbit-video van de achtergrond en test of VGGT de frames kan reconstrueren. Diagnose: ≥80% = bruikbaar voor splat-training.</p>
               </div>
               <div className="flex shrink-0 flex-col gap-1.5">
@@ -4439,6 +4514,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   route: splatAlignment?.route,
                   metricScaleFactor: splatAlignment?.metricScaleFactor,
                   groundPlaneOffset: splatAlignment?.groundPlaneOffset,
+                  neutralSource: splatAlignment?.neutralSource,
                   marbleMeta: splatAlignment?.marbleMeta,
                   ...poseResult.pose,
                   groupPositionX: poseResult.pose.groupPositionX ?? 0,
