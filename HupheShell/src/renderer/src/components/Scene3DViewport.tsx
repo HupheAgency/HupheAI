@@ -23,7 +23,7 @@ function canonicalCameraFov(camera: THREE.PerspectiveCamera): number {
   return finiteNumber(camera.userData.__outputFovY, camera.fov)
 }
 
-function applyOutputFrameProjection(camera: THREE.Camera, canvas: HTMLCanvasElement): void {
+function applyOutputFrameProjection(camera: THREE.Camera, canvas: HTMLCanvasElement, attempt = 0): void {
   if (!(camera instanceof THREE.PerspectiveCamera)) return
   const canvasRect = canvas.getBoundingClientRect()
   if (canvasRect.width <= 0 || canvasRect.height <= 0) return
@@ -34,6 +34,21 @@ function applyOutputFrameProjection(camera: THREE.Camera, canvas: HTMLCanvasElem
   const canonicalFov = canonicalCameraFov(camera)
 
   camera.aspect = canvasRect.width / canvasRect.height
+
+  if (frame && (!frameRect || frameRect.height <= 0)) {
+    // Het kader-element bestaat wel, maar is nog niet gelayout (async mount
+    // tijdens tab-wissel/archief-restore). NOOIT hier terugvallen op de rauwe
+    // kader-fov - dat zet de camera veel te dicht op het product. Wacht tot de
+    // layout stabiel is en probeer opnieuw, in plaats van een verkeerde
+    // projectie toe te passen die pas bij de volgende externe trigger hersteld
+    // wordt (of nooit, als die niet komt).
+    camera.updateProjectionMatrix()
+    if (attempt < 15) {
+      requestAnimationFrame(() => applyOutputFrameProjection(camera, canvas, attempt + 1))
+    }
+    return
+  }
+
   if (frameRect && frameRect.height > 0) {
     // De opgeslagen FOV hoort bij het 16:9-uitvoerkader, niet bij het volledige
     // editorcanvas. Het kader blijft meetbaar als de overlay verborgen is, zodat
@@ -42,6 +57,8 @@ function applyOutputFrameProjection(camera: THREE.Camera, canvas: HTMLCanvasElem
     const halfFov = THREE.MathUtils.degToRad(canonicalFov) / 2
     camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(halfFov) / verticalCoverage))
   } else {
+    // Geen kader-concept in deze viewport-context: de canonieke fov is dan al
+    // de volledige-canvas-lens.
     camera.fov = canonicalFov
   }
   camera.updateProjectionMatrix()

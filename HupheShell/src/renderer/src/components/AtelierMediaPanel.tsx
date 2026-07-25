@@ -16,7 +16,6 @@ import { LeftToolTooltip } from './LeftPanelShell'
 import type { MediaAsset } from '../lib/media-asset-store'
 import { supabase } from '../lib/supabase'
 import { Toggle } from './Toggle'
-import Scene3DEditorInline from './Scene3DEditorInline'
 import ProductStudioBoundary from './ProductStudioBoundary'
 import ProductStudioShell from './ProductStudioShell'
 
@@ -52,6 +51,7 @@ export function AtelierMediaCreationPanel({
   const [productStudioOpen, setProductStudioOpen] = useState(false)
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const [existingProjects, setExistingProjects] = useState<any[]>([])
+  const [scene3dProjectsLoading, setScene3dProjectsLoading] = useState(false)
   const promptInputRef = useRef<HTMLInputElement>(null)
   const projectCreatedRef = useRef(false)
 
@@ -63,6 +63,37 @@ export function AtelierMediaCreationPanel({
   useEffect(() => {
     setActiveToolId('select')
   }, [mediaType]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const refreshScene3DProjects = () => {
+    const api = (window as any).api?.productStudio
+    if (!api?.listProjects) return
+    setScene3dProjectsLoading(true)
+    api.listProjects().then((result: any) => {
+      setExistingProjects(result?.projects ?? [])
+    }).catch(() => {}).finally(() => setScene3dProjectsLoading(false))
+  }
+
+  useEffect(() => {
+    if (activeToolId !== 'scene3d') return
+    refreshScene3DProjects()
+  }, [activeToolId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleSelectScene3DProject = (projectId: string) => {
+    try { sessionStorage.setItem('huphe:resume-project-id', projectId) } catch { /* ignore */ }
+    setProductStudioOpen(true)
+  }
+
+  const handleNewScene3DProject = () => {
+    create3dInputRef.current?.click()
+  }
+
+  const handleDeleteScene3DProject = async (projectId: string) => {
+    const api = (window as any).api?.productStudio
+    if (!api?.deleteProject) return
+    setExistingProjects((prev) => prev.filter((p) => p.id !== projectId))
+    const result = await api.deleteProject({ projectId }).catch((err: any) => ({ ok: false, error: err?.message }))
+    if (!result?.ok) refreshScene3DProjects()
+  }
 
   useEffect(() => {
     if (!initialImageSrc || !mediaType || !onProjectGenerated) return
@@ -883,6 +914,7 @@ export function AtelierMediaCreationPanel({
                       if (!file) return
                       const reader = new FileReader()
                       reader.onload = (ev) => {
+                        try { localStorage.removeItem('huphe:product-studio-project:v1') } catch { /* ignore */ }
                         try { sessionStorage.setItem('huphe:create3d-image', ev.target?.result as string) } catch { /* ignore */ }
                         setProductStudioOpen(true)
                       }
@@ -1051,6 +1083,11 @@ export function AtelierMediaCreationPanel({
         onRedoMask={redoMask}
         maskHistoryLen={maskHistoryLen}
         maskRedoLen={maskRedoLen}
+        scene3dProjects={existingProjects}
+        scene3dProjectsLoading={scene3dProjectsLoading}
+        onSelectScene3DProject={handleSelectScene3DProject}
+        onNewScene3DProject={handleNewScene3DProject}
+        onDeleteScene3DProject={handleDeleteScene3DProject}
         onScene3DResult={(imageUrl: string) => {
           const id = `scene3d_${Date.now()}`
           const asset: AtelierMediaAsset = { id, src: imageUrl, prompt: '', modelId: '' }
@@ -1230,6 +1267,11 @@ function AtelierMediaEditSidebar({
   maskHistoryLen,
   maskRedoLen,
   onScene3DResult,
+  scene3dProjects,
+  scene3dProjectsLoading,
+  onSelectScene3DProject,
+  onNewScene3DProject,
+  onDeleteScene3DProject,
 }: {
   mediaType: AtelierMediaProjectType
   projectsPanel?: AtelierProjectsPanelConfig
@@ -1245,14 +1287,29 @@ function AtelierMediaEditSidebar({
   maskHistoryLen?: number
   maskRedoLen?: number
   onScene3DResult?: (imageUrl: string) => void
+  scene3dProjects?: any[]
+  scene3dProjectsLoading?: boolean
+  onSelectScene3DProject?: (projectId: string) => void
+  onNewScene3DProject?: () => void
+  onDeleteScene3DProject?: (projectId: string) => void
 }) {
   const tools = mediaType === 'images' ? IMAGE_EDIT_TOOLS : VIDEO_EDIT_TOOLS
   const activeTool = tools.find((tool) => tool.id === activeToolId && tool.id !== 'select')
 
   return (
-    <AtelierRightPanel projectsPanel={projectsPanel} convertContent={<AdToHtmlToolPanel currentImageSrc={currentImageSrc} />}>
+    <AtelierRightPanel
+      projectsPanel={projectsPanel}
+      convertContent={<AdToHtmlToolPanel currentImageSrc={currentImageSrc} />}
+      editTabLabelOverride={activeToolId === 'scene3d' ? 'Projecten' : undefined}
+    >
       {activeToolId === 'scene3d' ? (
-        <Scene3DEditorInline onResult={onScene3DResult} currentImageSrc={currentImageSrc} />
+        <Scene3DProjectsInline
+          projects={scene3dProjects ?? []}
+          loading={!!scene3dProjectsLoading}
+          onSelect={(id) => onSelectScene3DProject?.(id)}
+          onNew={() => onNewScene3DProject?.()}
+          onDelete={(id) => onDeleteScene3DProject?.(id)}
+        />
       ) : (
         <AtelierToolDetailPanel
           tool={activeTool}
@@ -1268,6 +1325,110 @@ function AtelierMediaEditSidebar({
         />
       )}
     </AtelierRightPanel>
+  )
+}
+
+function Scene3DProjectsInline({
+  projects, loading, onSelect, onNew, onDelete,
+}: {
+  projects: any[]
+  loading: boolean
+  onSelect: (projectId: string) => void
+  onNew: () => void
+  onDelete: (projectId: string) => void
+}) {
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  const deleteConfirmProject = projects.find((p) => p.id === deleteConfirmId)
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-2 pt-4">
+        {loading ? (
+          <p className="px-1 py-3 text-sm text-white/30">Projecten laden…</p>
+        ) : projects.length === 0 ? (
+          <p className="px-1 py-3 text-sm leading-relaxed text-white/30">Nog geen 3D projecten. Start hieronder je eerste project.</p>
+        ) : (
+          <>
+            <p className="mb-2 px-1 text-[10px] font-medium uppercase tracking-widest text-white/30">Recent</p>
+            <div className="space-y-1.5">
+              {projects.map((p) => (
+                <div key={p.id} className="group relative">
+                  <button
+                    type="button"
+                    onClick={() => onSelect(p.id)}
+                    className="flex w-full items-center gap-3 rounded-xl px-2 py-2.5 pr-10 text-left transition-colors hover:bg-white/[0.05]"
+                  >
+                    {p.source_image_url ? (
+                      <img src={p.source_image_url} alt="" className="h-12 w-12 flex-shrink-0 rounded-lg object-cover" />
+                    ) : (
+                      <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg bg-white/[0.05]">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-white/30"><path d="M12 3l9 5v8l-9 5-9-5V8z"/></svg>
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-white/80">{p.product_name || p.name || 'Naamloos'}</p>
+                      <p className="mt-0.5 text-xs text-white/36">{new Date(p.updated_at).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', year: 'numeric' })}</p>
+                    </div>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-white/25"><path d="M9 18l6-6-6-6"/></svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(p.id) }}
+                    className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-white/35 transition-colors hover:bg-red-500/[0.10] hover:text-red-300"
+                    title="Project verwijderen"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M4 7h16" /><path d="M9 7V4h6v3" /><path d="M6 7l1 13h10l1-13" /><path d="M10 11v6" /><path d="M14 11v6" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+      <div className="flex-shrink-0 border-t border-white/[0.06] p-4">
+        <button
+          type="button"
+          onClick={onNew}
+          className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#facc15] text-sm font-semibold text-black transition-colors hover:bg-[#fde047] active:bg-[#eab308]"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M12 5v14M5 12h14"/></svg>
+          Nieuw project starten
+        </button>
+      </div>
+      {deleteConfirmProject && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-[400px] rounded-2xl border border-white/[0.08] bg-[#141414] p-5 shadow-2xl">
+            <p className="text-sm font-semibold text-white">Project verwijderen?</p>
+            <p className="mt-2 text-sm leading-relaxed text-white/50">
+              Weet je zeker dat je <span className="text-white/80">{deleteConfirmProject.product_name || deleteConfirmProject.name || 'dit project'}</span> wilt verwijderen? Alles wat bij dit project hoort (bronfoto, views, mesh en renders) wordt permanent verwijderd. Dit kan niet ongedaan worden gemaakt.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmId(null)}
+                className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-sm font-medium text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white/80"
+              >
+                Annuleren
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const id = deleteConfirmProject.id
+                  setDeleteConfirmId(null)
+                  onDelete(id)
+                }}
+                className="rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-400"
+              >
+                Permanent verwijderen
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
   )
 }
 

@@ -748,6 +748,7 @@ type MarbleWorldAnchor = {
   cameraTarget: [number, number, number]
   viewMatrix: number[]
   splatScale: number
+  floorOffsetY: number
 }
 
 /**
@@ -767,6 +768,7 @@ function anchorMarbleWorldToProduct(
   manifest: any,
   splatTableDepth: number | null,
   metricScale: number,
+  groundPlaneOffset?: number | null,
 ): MarbleWorldAnchor | null {
   const cameraPosition = manifest?.camera?.position
   const cameraTarget = manifest?.camera?.target
@@ -808,12 +810,56 @@ function anchorMarbleWorldToProduct(
     adjustedBaseCam.clone().applyQuaternion(camera.quaternion),
   )
 
-  // Splatschaal: het gemeten tafelvlak (raw Marble-diepte) valt exact op de
-  // diepte van de productbasis. Zonder meting geldt de metrische schaal.
-  const splatScale = splatTableDepth != null && splatTableDepth > 0.05
+  // Splatschaal, drie routes in volgorde van betrouwbaarheid:
+  // 1. Vloer-lock: Marble levert ground_plane_offset (afstand origin->vloer).
+  //    De origin staat op de camera, dus scale = camerahoogte/offset legt de
+  //    marble-vloer EXACT op het y=0-grondvlak van de scene. Dit is exact
+  //    zolang het product op de vloer staat.
+  // 2. Meting: het gemeten supportvlak (raw Marble-diepte op het support-
+  //    pixel) valt op de diepte van de productbasis. Nodig wanneer het
+  //    product verhoogd staat (tafel/stoel): dan is het supportvlak niet de
+  //    vloer en moet de kamervloer juist ONDER y=0 uitkomen.
+  // 3. Metrische schaal als er niets anders is.
+  // De meting beslist welk scenario geldt: wijkt ze duidelijk af van de
+  // vloer-lock, dan staat het product verhoogd en wint de meting; komt ze
+  // (binnen meetruis) overeen, dan wint de exacte vloer-lock.
+  const measuredScale = splatTableDepth != null && splatTableDepth > 0.05
     ? adjustedDepth / splatTableDepth
-    : Math.max(0.001, metricScale)
+    : null
+  const groundOffset = finiteNumber(groundPlaneOffset, 0)
+  // De vloer-hypothese hoort bij het ORIGINELE fotostandpunt: Marble's
+  // ground_plane_offset beschrijft de camerahoogte van de bronfoto. De
+  // ankercamera is langs de (gepitchte) kijkas naar binnen gedollyd en ligt
+  // daardoor lager; met die hoogte vergelijken zou een op de vloer staand
+  // product onterecht als "verhoogd support" classificeren.
+  const originalCameraHeight = camera.position.y
+  const floorScaleEstimate = groundOffset > 0.01 && originalCameraHeight > 0.01
+    ? originalCameraHeight / groundOffset
+    : null
+  // De meting zet de dieptematch (supportvlak door de productbasis); de
+  // vloerschatting is de fallback zonder meting.
+  const splatScale = measuredScale ?? floorScaleEstimate ?? Math.max(0.001, metricScale)
   if (!Number.isFinite(splatScale) || splatScale <= 0.001 || splatScale > 100) return null
+  // Staat het product op de vloer (meting ~ vloerschatting), dan pint een
+  // verticale groepsverschuiving het marble-vloervlak exact op y=0. Bij
+  // verhoogd support (tafel/stoel) blijft de shift uit: de kamervloer hoort
+  // dan juist onder y=0 te liggen.
+  const productOnFloor = floorScaleEstimate != null
+    && (measuredScale == null || Math.abs(measuredScale - floorScaleEstimate) / floorScaleEstimate <= 0.35)
+  const floorWorldY = groundOffset > 0.01 ? newCameraPosition.y - groundOffset * splatScale : null
+  const floorOffsetY = productOnFloor && floorWorldY != null ? -floorWorldY : 0
+  console.info('[ProductStudio] Marble schaalkeuze', {
+    productOnFloor,
+    groundPlaneOffset: groundOffset,
+    originalCameraHeight,
+    anchorCameraHeight: newCameraPosition.y,
+    floorScaleEstimate,
+    measuredScale,
+    metricScale,
+    gekozenSchaal: splatScale,
+    vloerVoorShift: floorWorldY,
+    floorOffsetY,
+  })
 
   const worldMatrix = new THREE.Matrix4().compose(
     newCameraPosition,
@@ -830,6 +876,7 @@ function anchorMarbleWorldToProduct(
     cameraTarget: productCenter.toArray() as [number, number, number],
     viewMatrix,
     splatScale,
+    floorOffsetY,
   }
 }
 
@@ -1510,7 +1557,26 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     const referenceQuaternion = Array.isArray(referenceQuaternionValues)
       ? new THREE.Quaternion(...referenceQuaternionValues).normalize()
       : new THREE.Quaternion()
-    const transformQuaternion = shotQuaternion.clone().multiply(referenceQuaternion.clone().invert()).normalize()
+    // De Marble-wereld is zwaartekracht-uitgelijnd: de vloer ligt exact
+    // horizontaal in wereldcoördinaten (vandaar één scalar ground_plane_offset).
+    // Alleen de yaw van de shot-camera mag de wereld draaien; pitch en roll
+    // blijven in de camera. De volledige shot-rotatie meegeven kantelt de hele
+    // vloer mee met de camerahoek — onzichtbaar vanaf het foto-standpunt, maar
+    // bij orbiten loopt de splatgrond dan niet meer gelijk met het
+    // y=0-grondvlak van de scene. Marble heeft de camerapitch al in de
+    // wereldinhoud zelf gebakken (gravity geschat uit dezelfde foto), dus het
+    // standpuntbeeld blijft kloppen.
+    const shotForward = new THREE.Vector3(0, 0, -1).applyQuaternion(shotQuaternion)
+    const headingSource = Math.hypot(shotForward.x, shotForward.z) > 1e-4
+      ? shotForward
+      : new THREE.Vector3(0, 1, 0).applyQuaternion(shotQuaternion)
+    const heading = new THREE.Vector3(headingSource.x, 0, headingSource.z)
+    const transformQuaternion = heading.lengthSq() > 1e-8
+      ? new THREE.Quaternion()
+          .setFromUnitVectors(new THREE.Vector3(0, 0, -1), heading.normalize())
+          .multiply(referenceQuaternion.clone().invert())
+          .normalize()
+      : referenceQuaternion.clone().invert().normalize()
     // Universele camera-basis-transform van Marble naar Product Studio:
     // R = Qshot * inverse(Qframe1), t = Cshot - R * (s * Cframe1).
     // De Marble-origin ligt exact op de shot-camera. Schalen rond dit punt
@@ -1581,10 +1647,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
     const measurement = await measureMarbleSupportScale(shotAlignment, manifest)
     if (measurement) console.info('[ProductStudio] Marble tafeldiepte gemeten', measurement)
+    // Oudere scene.json-alignments missen groundPlaneOffset; de marbleGen-
+    // state (uit meta.json / de API) is dan de fallback.
+    const groundPlaneOffset = finiteNumber(shotAlignment.groundPlaneOffset, 0) > 0
+      ? shotAlignment.groundPlaneOffset
+      : marbleGen.groundPlaneOffset
     const anchor = anchorMarbleWorldToProduct(
       manifest,
       measurement?.splatDepth ?? null,
       finiteNumber(shotAlignment.transformScale, 1),
+      groundPlaneOffset,
     )
     if (!anchor) return { alignment: shotAlignment, anchor: null }
 
@@ -1594,11 +1666,65 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         ...shotAlignment,
         transformPosition: [...anchor.cameraPosition],
         transformScale: anchor.splatScale,
+        // Verticale vloer-pin: legt het marble-vloervlak exact op y=0
+        // wanneer het product op de vloer staat (0 bij verhoogd support).
+        groupPositionY: anchor.floorOffsetY,
         position: [...anchor.cameraPosition],
         sceneCenter: [...anchor.cameraTarget],
       },
       anchor,
     }
+  }
+
+  // Zodra een Marble-wereld beschikbaar is (net gegenereerd, of al op schijf
+  // aanwezig bij het openen van een project) hoort hij direct - zonder extra
+  // klik of bestandskeuze - op de juiste plek in de canvas te staan.
+  const loadMarbleWorldIntoScene = async (marble: MarbleRunState, opts: { onlyIfEmpty?: boolean } = {}) => {
+    if (!marble.splatPath) return
+    if (opts.onlyIfEmpty) {
+      // Niet overschrijven als er al een (mogelijk handmatig bijgestelde)
+      // uitlijning actief is - lezen zonder de state te wijzigen.
+      let hasAlignment = false
+      setSplatAlignment((prev) => { hasAlignment = !!prev; return prev })
+      if (hasAlignment) return
+    }
+    const baseAlignment: SplatAlignment = {
+      splatUrl: `huphe://file/${encodeURIComponent(marble.splatPath)}`,
+      spzPath: marble.spzPath,
+      source: 'marble',
+      renderVersionId: marble.renderVersionId ?? project.finalRenderRecord?.id ?? undefined,
+      orbitRunId: marble.orbitRunId ?? orbitTest.orbitRunId ?? undefined,
+      worldId: marble.worldId,
+      route: marble.route,
+      metricScaleFactor: marble.metricScaleFactor,
+      groundPlaneOffset: marble.groundPlaneOffset,
+      neutralSource: marble.neutralSource,
+      marbleMeta: {
+        panoUrl: marble.panoUrl,
+        colliderMeshUrl: marble.colliderMeshUrl,
+        totalCredits: marble.totalCredits,
+      },
+      position: [0, 1.5, 4] as [number, number, number],
+      quaternion: [0, 0, 0, 1] as [number, number, number, number],
+      fovY: 60,
+      width: 1920,
+      height: 1080,
+      sceneCenter: [0, 0, 0] as [number, number, number],
+      groupPositionY: 0,
+      groupScale: 1,
+      bubbleRadius: DEFAULT_BUBBLE_RADIUS,
+      bubbleFeather: DEFAULT_BUBBLE_FEATHER,
+    }
+    const manifest = renderManifestRef.current ?? studioRef.current?.captureRenderManifest?.()
+    const { alignment: nextAlignment, anchor } = await calibrateMarbleToProductSupport(baseAlignment, manifest)
+    setSplatViewerUrl(null)
+    applySplatAlignment(nextAlignment, nextAlignment)
+    studioRef.current?.setCameraOrbit(
+      anchor?.cameraPosition ?? nextAlignment.position,
+      anchor?.cameraTarget ?? nextAlignment.sceneCenter,
+      WORLDLABS_REFERENCE_FOV_Y,
+      anchor?.viewMatrix,
+    )
   }
 
   const [splatPuntMode, setSplatPuntMode] = useState<'off' | 'foto' | 'scene'>('off')
@@ -1804,7 +1930,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         setMarbleGen({ phase: 'error', step: result.error ?? 'Mislukt', progress: 0, error: result.error })
         return
       }
-      setMarbleGen({
+      const doneState: MarbleRunState = {
         phase: 'done',
         step: 'Klaar!',
         progress: 100,
@@ -1819,7 +1945,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         groundPlaneOffset: result.groundPlaneOffset,
         panoUrl: result.panoUrl,
         totalCredits: result.totalCredits,
-      })
+      }
+      setMarbleGen(doneState)
+      // Direct in de canvas zetten - geen aparte "uitlijnen"-klik meer nodig.
+      void loadMarbleWorldIntoScene(doneState)
     } catch (err: any) {
       setMarbleGen({ phase: 'error', step: err?.message ?? 'Mislukt', progress: 0, error: err?.message })
     } finally {
@@ -1877,11 +2006,17 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     if (orbitTest.phase === 'running') return
     const renderVersionId = project.finalRenderRecord?.id
     let cancelled = false
-    setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
+    setOrbitTest((prev) => ({ phase: 'idle', step: '', progress: 0, renderVersionId, neutralUrl: prev.neutralUrl }))
     setAssetsPrep({ phase: 'idle', step: '', progress: 0 })
     setSplatTraining({ phase: 'idle', step: '', progress: 0 })
     api.checkOrbitVideo({ projectId: project.backendProject.id, renderVersionId, model: orbitModel }).then((res) => {
       if (cancelled) return
+      if (res.neutralUrl) {
+        setNeutralGen({ phase: 'done', step: '', progress: 100, neutralUrl: res.neutralUrl })
+        setOrbitTest((prev) => ({ ...prev, neutralUrl: res.neutralUrl }))
+      } else {
+        setNeutralGen((prev) => prev.neutralUrl ? prev : { phase: 'idle', step: '', progress: 0 })
+      }
       if (res.exists && res.videoUrl) {
         setOrbitTest((prev) => prev.phase === 'idle' || prev.phase === 'done'
           ? { phase: 'done', step: '', progress: 100, renderVersionId, videoUrl: res.videoUrl!, orbitRunId: res.orbitRunId ?? prev.orbitRunId, neutralUrl: res.neutralUrl }
@@ -1912,11 +2047,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               neutralSource: res.marble!.neutralSource,
             }
           })
-          // splatAlignment wordt geladen via restoreRenderState (niet hier), zodat de marble
-          // niet automatisch verschijnt bij project-open.
+          // Sta al op schijf (bv. na herstart of bij het openen van dit project)?
+          // Dan direct in de canvas zetten - mits er nog geen (mogelijk
+          // handmatig bijgestelde) uitlijning actief is.
+          void loadMarbleWorldIntoScene(res.marble, { onlyIfEmpty: true })
         }
       } else {
-        setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId })
+        setOrbitTest((prev) => ({ phase: 'idle', step: '', progress: 0, renderVersionId, neutralUrl: res.neutralUrl ?? prev.neutralUrl }))
       }
     }).catch(() => {})
     return () => { cancelled = true }
@@ -2393,7 +2530,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         productNotes: backendProject.notes,
       }).then((result) => {
         if (result?.ok) void hydrateLatestState(backendProject.id, false)
-      }).catch(() => {})
+        else console.error('[generateReferenceViews] failed:', result?.error)
+      }).catch((err) => console.error('[generateReferenceViews] threw:', err))
     } catch (err: any) {
       if (!notifyIfCreditsRequired(err)) setError(err?.message || 'Upload mislukt.')
     } finally {
@@ -3200,6 +3338,20 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setOrbitTest({ phase: 'idle', step: '', progress: 0, renderVersionId: version.id })
     setSplatTraining({ phase: 'idle', step: '', progress: 0 })
     setOrbitVideoExpanded(false)
+    {
+      const projectIdForNeutral = project.backendProject?.id
+      if (projectIdForNeutral) {
+        getProductStudioApi()?.checkOrbitVideo({ projectId: projectIdForNeutral, renderVersionId: version.id, model: orbitModel }).then((res) => {
+          if (activeArchiveVersionId.current !== version.id) return
+          if (res.neutralUrl) {
+            setNeutralGen({ phase: 'done', step: '', progress: 100, neutralUrl: res.neutralUrl })
+            setOrbitTest((prev) => ({ ...prev, neutralUrl: res.neutralUrl }))
+          } else {
+            setNeutralGen({ phase: 'idle', step: '', progress: 0 })
+          }
+        }).catch(() => {})
+      }
+    }
 
     try {
       const result = await (api as any).restoreRenderState({ renderPacketId: version.render_packet_id })
@@ -3389,13 +3541,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             alignment: shotAlignment as unknown as Record<string, unknown>,
             baseAlignment: shotAlignment as unknown as Record<string, unknown>,
           }).catch((error: unknown) => console.warn('[scene.json] shot-uitlijning opslaan mislukt:', error))
-          // De camera verhuist mee met het verankerde ensemble; het product
-          // blijft onaangeroerd op zijn studio-transform uit het renderpacket.
-          if (anchor) {
-            applyAnchoredCamera(anchor)
-          } else {
-            restoreShotCamera(finiteNumber(shotAlignment.worldReferenceFovY, WORLDLABS_REFERENCE_FOV_Y))
-          }
+          // De camera blijft altijd op de exacte, opgeslagen fotopositie staan.
+          // De anchor-herberekening (via applySplatAlignment hierboven) verankert
+          // de marble-wereld aan die vaste camera + vaas, niet andersom — anders
+          // verschuift de camera (en daarmee de vaas in beeld) zodra de splat-
+          // meting een net iets andere tafeldiepte oplevert dan het origineel.
+          restoreShotCamera(manifestOutputFovY(shotManifest))
           if (restoredProductSourceTransform) {
             restoreProductTransform(restoredProductSourceTransform)
           }

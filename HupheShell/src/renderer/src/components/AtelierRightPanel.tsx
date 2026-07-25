@@ -49,6 +49,7 @@ export default function AtelierRightPanel({
   chatIsWaiting = false,
   forceShowChat = 0,
   convertContent,
+  editTabLabelOverride,
 }: {
   children: ReactNode
   widthClass?: string
@@ -59,6 +60,7 @@ export default function AtelierRightPanel({
   chatIsWaiting?: boolean
   forceShowChat?: number
   convertContent?: ReactNode
+  editTabLabelOverride?: string
 }) {
   const [activeTab, setActiveTab] = useState<'projects' | 'edit' | 'copy' | 'chat' | 'convert'>(defaultTab)
   const chatScrollRef = useRef<HTMLDivElement>(null)
@@ -85,7 +87,7 @@ export default function AtelierRightPanel({
   if (projectsPanel.type === 'images' || projectsPanel.type === 'video' || projectsPanel.type === 'presentation') {
     return (
       <RightPanelShell widthClass={widthClass}>
-        <AtelierCleanProjectsPanel config={projectsPanel} bodyClassName={bodyClassName}>
+        <AtelierCleanProjectsPanel config={projectsPanel} bodyClassName={bodyClassName} editTabLabelOverride={editTabLabelOverride}>
           {children}
         </AtelierCleanProjectsPanel>
       </RightPanelShell>
@@ -284,11 +286,12 @@ function AtelierProjectsPanelContent({ config }: { config: AtelierProjectsPanelC
 }
 
 function AtelierCleanProjectsPanel({
-  config, children, bodyClassName,
+  config, children, bodyClassName, editTabLabelOverride,
 }: {
   config: AtelierProjectsPanelConfig
   children: ReactNode
   bodyClassName: string
+  editTabLabelOverride?: string
 }) {
   const [view, setView] = useState<'projects' | 'edit'>('edit')
   const [searching, setSearching] = useState(false)
@@ -299,7 +302,7 @@ function AtelierCleanProjectsPanel({
     : config.projects
 
   const projectsTabLabel = config.type === 'presentation' ? 'Projecten' : copy.title
-  const editTabLabel = getAtelierEditTabLabel(config.type, config.activeProjectId)
+  const editTabLabel = editTabLabelOverride ?? getAtelierEditTabLabel(config.type, config.activeProjectId)
 
   const tabs: RightPanelTab[] = [
     { id: 'edit', label: editTabLabel },

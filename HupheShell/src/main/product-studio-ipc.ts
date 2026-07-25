@@ -32,6 +32,19 @@ function dataUrlToBuffer(dataUrl: string): Buffer {
   return Buffer.from(base64, 'base64')
 }
 
+async function resolveAssetToBuffer(url: string): Promise<Buffer> {
+  if (url.startsWith('huphe://file/')) {
+    const rawPath = decodeURIComponent(url.replace('huphe://file/', '').split('?')[0])
+    return readFile(rawPath)
+  }
+  if (url.startsWith('data:')) {
+    return dataUrlToBuffer(url)
+  }
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Kan bestand niet downloaden (${res.status}).`)
+  return Buffer.from(await res.arrayBuffer())
+}
+
 async function saveBakeDebug(projectId: string, folder: string, filename: string, content: Buffer | string): Promise<void> {
   const safeProjectId = projectId.replace(/[^a-zA-Z0-9_-]/g, '_')
   const safeFolder = folder.replace(/[^a-zA-Z0-9_.-]/g, '_')
@@ -604,9 +617,13 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const results: Record<string, unknown> = {}
 
     // 1. Download origineel en bereken checksum
-    const imgRes = await fetch(source.url)
-    if (!imgRes.ok) return { ok: false, error: 'Kan bronbestand niet downloaden.' }
-    const imgBuffer = Buffer.from(await imgRes.arrayBuffer())
+    let imgBuffer: Buffer
+    try {
+      imgBuffer = await resolveAssetToBuffer(source.url)
+    } catch (err: any) {
+      console.error('[normalize-input] kan bronbestand niet lezen:', source.url, err?.message ?? err)
+      return { ok: false, error: 'Kan bronbestand niet downloaden.' }
+    }
     const checksum = createHash('sha256').update(imgBuffer).digest('hex')
 
     await sb
@@ -2172,6 +2189,14 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const sourceUrl = source.url
       if (!sourceUrl) throw new Error('Bronbestand heeft geen URL.')
 
+      let sourceImageForFal = sourceUrl
+      if (sourceUrl.startsWith('huphe://file/')) {
+        const rawPath = decodeURIComponent(sourceUrl.replace('huphe://file/', '').split('?')[0])
+        const buf = await readFile(rawPath)
+        const ext = rawPath.split('.').pop() ?? 'png'
+        sourceImageForFal = `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,${buf.toString('base64')}`
+      }
+
       const angleDescriptions: Record<string, string> = {
         left: [
           'LEFT side profile view of the exact same product',
@@ -2213,22 +2238,37 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           productContext.trim(),
         ].filter(Boolean).join(' ')
 
-        const result = await callFalProxy('fal-ai/nano-banana-2/edit', {
-          image_urls: [sourceUrl],
-          prompt,
-          num_images: 1,
-          aspect_ratio: '1:1',
-          resolution: '1K',
-        }, jwt) as any
+        let result: any
+        try {
+          result = await callFalProxy('fal-ai/nano-banana-2/edit', {
+            image_urls: [sourceImageForFal],
+            prompt,
+            num_images: 1,
+            aspect_ratio: '1:1',
+            resolution: '1K',
+          }, jwt) as any
+        } catch (falErr: any) {
+          console.error(`[generate-reference-views] fal call failed for angle=${angle}:`, falErr?.message ?? falErr)
+          continue
+        }
 
         const falImageUrl = result?.images?.[0]?.url
-        if (!falImageUrl) continue
+        if (!falImageUrl) {
+          console.error(`[generate-reference-views] no image url for angle=${angle}, result=`, JSON.stringify(result))
+          continue
+        }
 
         // Download van fal en sla lokaal op
         const { data: { user: authUser } } = await sb.auth.getUser()
-        if (!authUser) continue
+        if (!authUser) {
+          console.error(`[generate-reference-views] no authUser for angle=${angle}`)
+          continue
+        }
         const imgRes = await fetch(falImageUrl)
-        if (!imgRes.ok) continue
+        if (!imgRes.ok) {
+          console.error(`[generate-reference-views] download failed for angle=${angle}: ${imgRes.status} ${imgRes.statusText}`)
+          continue
+        }
         const imgBuf = Buffer.from(await imgRes.arrayBuffer())
         const imageUrl = await saveAssetLocally(authUser.id, args.projectId, `views/${angle}_${Date.now()}.png`, imgBuf)
 
@@ -2374,9 +2414,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const { callFalProxy } = await import('./lib/proxy')
 
       // Download Basic Product voor base64. Gebruik hier nooit source/canonical print-views.
-      const imgRes = await fetch(reconstructionImageUrl)
-      if (!imgRes.ok) throw new Error('Kan referentiebeeld niet downloaden.')
-      const imgBuffer = Buffer.from(await imgRes.arrayBuffer())
+      const imgBuffer = await resolveAssetToBuffer(reconstructionImageUrl)
       const base64 = imgBuffer.toString('base64')
       const mimeType = 'image/png'
 
@@ -2486,9 +2524,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const { projectTexture } = await import('./lib/texture-projector')
 
       console.log('[create-textured-mesh] Downloading mesh:', recon.mesh_url?.slice(0, 80))
-      const glbRes = await fetch(recon.mesh_url)
-      if (!glbRes.ok) throw new Error(`Kan mesh niet downloaden: ${glbRes.status}`)
-      const glbBuffer = Buffer.from(await glbRes.arrayBuffer())
+      const glbBuffer = await resolveAssetToBuffer(recon.mesh_url)
       console.log('[create-textured-mesh] Mesh downloaded:', glbBuffer.length, 'bytes')
 
       let viewImages: Array<{ angle: string; imageBuffer: Buffer }> = []
@@ -2501,12 +2537,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           .neq('status', 'rejected')
         for (const v of views ?? []) {
           if (!v.asset_url) continue
-          const imgRes = await fetch(v.asset_url)
-          if (!imgRes.ok) continue
-          viewImages.push({
-            angle: v.angle ?? 'front',
-            imageBuffer: Buffer.from(await imgRes.arrayBuffer()),
-          })
+          try {
+            viewImages.push({ angle: v.angle ?? 'front', imageBuffer: await resolveAssetToBuffer(v.asset_url) })
+          } catch { /* skip onbereikbare view */ }
         }
       }
 
@@ -2519,12 +2552,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           .order('created_at')
         for (const v of allViews ?? []) {
           if (!v.asset_url) continue
-          const imgRes = await fetch(v.asset_url)
-          if (!imgRes.ok) continue
-          viewImages.push({
-            angle: v.angle ?? 'front',
-            imageBuffer: Buffer.from(await imgRes.arrayBuffer()),
-          })
+          try {
+            viewImages.push({ angle: v.angle ?? 'front', imageBuffer: await resolveAssetToBuffer(v.asset_url) })
+          } catch { /* skip onbereikbare view */ }
         }
       }
 
@@ -2537,13 +2567,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           .limit(1)
           .maybeSingle()
         if (sourceAssets?.url) {
-          const imgRes = await fetch(sourceAssets.url)
-          if (imgRes.ok) {
-            viewImages.push({
-              angle: 'front',
-              imageBuffer: Buffer.from(await imgRes.arrayBuffer()),
-            })
-          }
+          try {
+            viewImages.push({ angle: 'front', imageBuffer: await resolveAssetToBuffer(sourceAssets.url) })
+          } catch { /* geen bronfoto beschikbaar */ }
         }
       }
 
@@ -2608,6 +2634,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         latencyMs: Date.now() - startTime,
       }
     } catch (err: any) {
+      console.error('[create-textured-mesh] failed:', err?.message ?? err)
       await sb
         .from('reconstruction_versions')
         .update({
@@ -3683,6 +3710,23 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     return data
   }
 
+  const getOrbitRuns = async (jwt: string, projectId: string, renderVersionId?: string | null): Promise<Array<{ id: string; local_path: string; render_version_id: string | null }>> => {
+    const sb = getUserClient(jwt)
+    let query = sb
+      .from('orbit_runs')
+      .select('id, local_path, render_version_id')
+      .eq('project_id', projectId)
+      .eq('status', 'done')
+      .order('created_at', { ascending: false })
+
+    if (renderVersionId) query = query.eq('render_version_id', renderVersionId)
+
+    const { data } = await query
+    return (data ?? []).filter((run): run is { id: string; local_path: string; render_version_id: string | null } =>
+      typeof run.id === 'string' && typeof run.local_path === 'string'
+    )
+  }
+
   const resolveWsDir = async (projectId: string, orbitRunId?: string, _model?: string, renderVersionId?: string): Promise<string> => {
     const jwt = getJwt()
     // Als orbitRunId meegegeven: opzoeken in Supabase voor local_path (kan afwijken van standaard pad bij gemigreerde data)
@@ -3735,6 +3779,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const activeRun = jwt ? await getActiveOrbitRun(jwt, args.projectId, args.renderVersionId).catch(() => null) : null
     const orbitRunId = activeRun?.id ?? null
     const activeLocalPath = activeRun?.local_path ?? null
+    const renderOrbitRuns = jwt
+      ? await getOrbitRuns(jwt, args.projectId, args.renderVersionId).catch(() => [])
+      : []
 
     // Bouw colmap-object uit Supabase-data (persistent, werkt ook na herstart/herinstall)
     const colmapFromDb = (activeRun?.registered_frames != null && activeRun?.frame_count != null)
@@ -3769,17 +3816,6 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
     const resolvedColmap = (wsDir?: string) => colmapFromDb ?? checkColmap(wsDir)
 
-    // Neutrale heropname (Stap 1b) staat al vóór een Marble-wereld bestaat, dus los
-    // van resolveMarble() zoeken zodat de UI 'm meteen na video-generatie kan tonen.
-    const resolveNeutralUrl = (wsDir?: string): string | undefined => {
-      const dirs = wsDir ? [wsDir, ...marbleSearchDirs] : marbleSearchDirs
-      for (const d of dirs) {
-        const p = join(d, 'neutral.png')
-        if (existsSync(p)) return `huphe://file/${encodeURIComponent(p)}`
-      }
-      return undefined
-    }
-
     // Marble zoeklocaties in volgorde van meest naar minst betrouwbaar:
     // 1. orbit run directory (werkelijk opslagpad van marble)
     // 2. renderVersionId directory (legacy/backup)
@@ -3789,6 +3825,62 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (activeLocalPath && !marbleSearchDirs.includes(activeLocalPath)) marbleSearchDirs.push(activeLocalPath)
     if (args.renderVersionId) marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId))
     marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId))
+
+    // Een render kan meerdere orbit-runs hebben. De nieuwste run bevat niet
+    // noodzakelijk neutral.png, dus doorzoek alle runs van dezelfde render.
+    const resolveNeutralUrl = (wsDir?: string): string | undefined => {
+      const projectDir = join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+      const preferredDirs = [
+        ...(wsDir ? [wsDir] : []),
+        ...renderOrbitRuns.map((run) => run.local_path),
+        ...marbleSearchDirs,
+      ]
+      const seen = new Set<string>()
+      for (const d of preferredDirs) {
+        if (!d || seen.has(d)) continue
+        seen.add(d)
+        const p = join(d, 'neutral.png')
+        if (existsSync(p)) return `huphe://file/${encodeURIComponent(p)}`
+      }
+
+      // Migratie voor de oude neutrale-foto implementatie, die nog geen
+      // render-ID naast neutral.png opsloeg. Alleen een unieke kandidaat wordt
+      // gekoppeld; zo kan een foto nooit willekeurig tussen archiefbeelden lekken.
+      try {
+        const { readdirSync, readFileSync, writeFileSync } = require('fs') as typeof import('fs')
+        const candidates = readdirSync(projectDir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => join(projectDir, entry.name))
+          .filter((dir) => existsSync(join(dir, 'neutral.png')))
+
+        const exact = candidates.find((dir) => {
+          const metaPath = join(dir, 'neutral.json')
+          if (!existsSync(metaPath)) return false
+          try {
+            const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
+            return Boolean(args.renderVersionId && meta.renderVersionId === args.renderVersionId)
+          } catch {
+            return false
+          }
+        })
+        if (exact) return `huphe://file/${encodeURIComponent(join(exact, 'neutral.png'))}`
+
+        const unclaimed = candidates.filter((dir) => !existsSync(join(dir, 'neutral.json')))
+        if (args.renderVersionId && candidates.length === 1 && unclaimed.length === 1) {
+          const dir = unclaimed[0]
+          writeFileSync(join(dir, 'neutral.json'), JSON.stringify({
+            projectId: args.projectId,
+            renderVersionId: args.renderVersionId,
+            migratedAt: new Date().toISOString(),
+          }, null, 2))
+          console.log(`[neutral-photo] bestaande foto hersteld voor render ${args.renderVersionId}: ${dir}`)
+          return `huphe://file/${encodeURIComponent(join(dir, 'neutral.png'))}`
+        }
+      } catch (err: any) {
+        console.warn('[neutral-photo] lokale herstelzoektocht mislukt:', err?.message ?? err)
+      }
+      return undefined
+    }
 
     const resolveMarble = async (): Promise<{
       spzPath: string
@@ -3907,7 +3999,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const found = existsSync(orbitRunVideoPath)
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} orbitRunId=${orbitRunId} localPath=${activeLocalPath} videoExists=${found}`)
       if (found) {
-        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: await resolveMarble(), neutralUrl: resolveNeutralUrl(activeLocalPath) }
+        const neutralUrlResolved = resolveNeutralUrl(activeLocalPath)
+        console.log(`[check-orbit-video] neutralUrl=${neutralUrlResolved ?? 'none'}`)
+        return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(orbitRunVideoPath)}`, colmap: resolvedColmap(activeLocalPath), orbitRunId, sampleClayUrls: sampleFrameUrls(activeLocalPath), marble: await resolveMarble(), neutralUrl: neutralUrlResolved }
       }
     } else {
       console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} jwt=${!!jwt} activeRun=${!!activeRun} — geen local_path in DB`)
@@ -3916,8 +4010,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (existsSync(primaryPath)) {
       return { exists: true, videoUrl: `huphe://file/${encodeURIComponent(primaryPath)}`, colmap: resolvedColmap(primaryDir), orbitRunId, sampleClayUrls: sampleFrameUrls(primaryDir), marble: await resolveMarble(), neutralUrl: resolveNeutralUrl(primaryDir) }
     }
-    console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} — niet gevonden (primaryPath=${primaryPath})`)
-    return { exists: false, videoUrl: null, colmap: null, orbitRunId: null }
+    const neutralUrl = resolveNeutralUrl()
+    console.log(`[check-orbit-video] renderVersionId=${args.renderVersionId} — video niet gevonden (primaryPath=${primaryPath}), neutral=${Boolean(neutralUrl)}`)
+    return { exists: false, videoUrl: null, colmap: null, orbitRunId: null, neutralUrl }
   })
 
   ipcMain.handle('product-studio:generate-neutral-photo', async (_e, args: {
@@ -3979,6 +4074,10 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         'Keep the same viewing direction toward the main table as the original photo.',
         'Keep every piece of furniture, wall, floor, window, decoration, material and lighting exactly identical to the original photo.',
         'Show the room slightly wider so more of the floor and ceiling context is visible.',
+        'Keep all vertical architectural lines, including walls, shelving and window frames, perfectly parallel to the left and right image edges.',
+        'Use a level rectilinear architectural camera with no roll, keystone distortion, fisheye distortion or barrel distortion.',
+        'Change only the camera angle and lens framing.',
+        'The room itself is immutable: preserve its exact geometry, dimensions, layout, furniture, materials, lighting and every object position.',
         'Do not add, remove, move or restyle any object. Photorealistic, sharp, no people.',
       ].join(' ')
       const result = await callFalProxy('fal-ai/nano-banana-2/edit', {
@@ -3997,6 +4096,12 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       if (!nRes.ok) return { ok: false, error: `Download van resultaat mislukt (${nRes.status}).` }
       const nBuf = Buffer.from(await nRes.arrayBuffer())
       await writeFile(neutralPath, nBuf)
+      await writeFile(join(wsDir, 'neutral.json'), JSON.stringify({
+        projectId: args.projectId,
+        renderVersionId: args.renderVersionId ?? null,
+        orbitRunId,
+        createdAt: new Date().toISOString(),
+      }, null, 2))
       await updateOrbitRun(jwt, orbitRunId, { status: 'done' }).catch(() => {})
       pushStep('Neutrale camerahoek klaar.', 100)
       return { ok: true, orbitRunId, neutralUrl: `huphe://file/${encodeURIComponent(neutralPath)}` }
