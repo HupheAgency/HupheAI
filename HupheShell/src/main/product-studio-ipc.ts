@@ -2211,7 +2211,9 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         rear: [
           'BACK/rear view of the exact same product',
           'rotate the product 180 degrees from the original front view',
-          'show the true back-facing print/material layout, not the front printed again',
+          'preserve the same material and surface finish',
+          'if the source product has a plain unbranded surface, keep the back plain and unbranded too',
+          'never invent text, labels, logos, barcodes, specifications, seams, openings, or packaging details that are not visible in the source',
         ].join('; '),
         top: 'TOP-DOWN view from directly above the exact same product; preserve the rim/opening/cap geometry and material',
       }
@@ -2231,6 +2233,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         const prompt = [
           `Generate a ${angleDescriptions[angle]}.`,
           'Keep the same product identity: same colors, materials, textures, print, logos, labels, scale, and proportions.',
+          'Do not invent or add any text, labels, logos, barcodes, specifications, seams, openings, or decorative details.',
+          'Where a surface is not visible in the source, continue the nearest visible material and finish conservatively without adding new content.',
           'This is a canonical product reference view, not a beauty shot.',
           'Use orthographic/product-photography framing on a clean white background with the full product visible.',
           'Keep lighting neutral and consistent.',
@@ -2521,11 +2525,6 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
     try {
       console.log('[create-textured-mesh] Start voor recon:', args.reconstructionVersionId)
-      const { projectTexture } = await import('./lib/texture-projector')
-
-      console.log('[create-textured-mesh] Downloading mesh:', recon.mesh_url?.slice(0, 80))
-      const glbBuffer = await resolveAssetToBuffer(recon.mesh_url)
-      console.log('[create-textured-mesh] Mesh downloaded:', glbBuffer.length, 'bytes')
 
       let viewImages: Array<{ angle: string; imageBuffer: Buffer }> = []
 
@@ -2575,11 +2574,32 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
       if (viewImages.length === 0) throw new Error('Geen referentiebeelden beschikbaar voor texture wrapping.')
 
-      const result = await projectTexture({
-        glbBuffer,
-        views: viewImages,
-        atlasSize: 1024,
-      })
+      // Simpelste betrouwbare route: TRELLIS-2 levert zelf een volledig
+      // getextureerde GLB die eruitziet als de inputfoto. Eigen projectie
+      // (texture-projector) kan niet kloppen zonder echte camera-extrinsics
+      // van de AI-gegenereerde views. We draaien dus een tweede Trellis-run
+      // op de beste INGEKLEURDE referentie (nooit de grijze Basic Product).
+      const preferred = viewImages.find((v) => v.angle === 'front' || v.angle === 'hero') ?? viewImages[0]
+      const sniffImageMime = (buf: Buffer): string => {
+        if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
+        if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg'
+        if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
+        return 'image/png'
+      }
+      console.log('[create-textured-mesh] Trellis skin-run op view:', preferred.angle, `(${viewImages.length} views beschikbaar)`)
+      const { callFalProxy } = await import('./lib/proxy')
+      const trellisResult = await callFalProxy('fal-ai/trellis-2', {
+        image_base64: preferred.imageBuffer.toString('base64'),
+        image_mime_type: sniffImageMime(preferred.imageBuffer),
+        ...(recon.seed != null ? { seed: recon.seed } : {}),
+      }, jwt) as any
+      const skinGlbUrl = trellisResult?.model_glb?.url
+      if (!skinGlbUrl) throw new Error('Geen GLB ontvangen van TRELLIS 2 (skin-run).')
+      console.log('[create-textured-mesh] Skin GLB downloaden...')
+      const skinRes = await fetch(skinGlbUrl)
+      if (!skinRes.ok) throw new Error('Kan getextureerde GLB niet downloaden.')
+      const texturedGlbBuffer = Buffer.from(await skinRes.arrayBuffer())
+      console.log('[create-textured-mesh] Skin GLB:', texturedGlbBuffer.length, 'bytes')
 
       const textureDir = join(
         app.getPath('userData'),
@@ -2591,24 +2611,21 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       await mkdir(textureDir, { recursive: true })
 
       const meshPath = join(textureDir, `textured_mesh_${args.reconstructionVersionId}.glb`)
-      const atlasPath = join(textureDir, `texture_atlas_${args.reconstructionVersionId}.png`)
       const manifestPath = join(textureDir, `material_manifest_${args.reconstructionVersionId}.json`)
       const runVersion = Date.now()
       const toHupheFileUrl = (filePath: string) => `huphe://file/${encodeURIComponent(filePath)}?v=${runVersion}`
       const texturedMeshUrl = toHupheFileUrl(meshPath)
-      const textureAtlasUrl = toHupheFileUrl(atlasPath)
       const materialManifest = {
-        ...result.manifest,
+        route: 'trellis-skin',
+        views_used: [preferred.angle],
         storage: 'local',
         textured_mesh_path: meshPath,
-        texture_atlas_path: atlasPath,
         material_manifest_path: manifestPath,
       }
 
       console.log('[create-textured-mesh] Writing local texture output:', textureDir)
       await Promise.all([
-        writeFile(meshPath, result.texturedGlbBuffer),
-        writeFile(atlasPath, result.atlasBuffer),
+        writeFile(meshPath, texturedGlbBuffer),
         writeFile(manifestPath, JSON.stringify(materialManifest, null, 2)),
       ])
       console.log('[create-textured-mesh] Local texture output written')
@@ -2619,7 +2636,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           texture_status: 'completed',
           texture_error: null,
           textured_mesh_url: texturedMeshUrl,
-          texture_atlas_url: textureAtlasUrl,
+          texture_atlas_url: null,
           material_manifest: materialManifest,
         })
         .eq('id', args.reconstructionVersionId)
@@ -2629,7 +2646,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         ok: true,
         reconstructionVersionId: args.reconstructionVersionId,
         texturedMeshUrl,
-        textureAtlasUrl,
+        textureAtlasUrl: null,
         manifest: materialManifest,
         latencyMs: Date.now() - startTime,
       }

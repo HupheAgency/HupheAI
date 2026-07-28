@@ -2130,6 +2130,15 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const textureAtlasUrl = project.reconstruction?.texture_atlas_url ?? undefined
   const textureOutputMissing = textureStatus === 'completed' && !texturedMeshUrl
   const texturedMeshReady = Boolean(texturedMeshUrl && textureStatus === 'completed')
+  const textureManifest = project.reconstruction?.material_manifest as Record<string, unknown> | undefined
+  const texturedTriangles = Number(textureManifest?.triangles_textured)
+  const totalTextureTriangles = Number(textureManifest?.triangles_total)
+  const textureTriangleCoverage = Number.isFinite(texturedTriangles)
+    && Number.isFinite(totalTextureTriangles)
+    && totalTextureTriangles > 0
+      ? texturedTriangles / totalTextureTriangles
+      : null
+  const textureCoverageIsLow = textureTriangleCoverage !== null && textureTriangleCoverage < 0.8
   const activeStudioMeshUrl = texturedMeshUrl ?? project.reconstruction?.mesh_url
   const textureInProgress = textureStatus === 'pending' || textureStatus === 'processing'
   const renderPacketReady = Boolean(project.renderPacketRecord || project.renderPacket)
@@ -4090,7 +4099,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <p className="text-xs font-semibold text-white/70">Texture product</p>
                 <p className="mt-1 text-xs text-white/36">
                   {texturedMeshReady
-                    ? 'Textured mesh klaar. Studio gebruikt nu het product met print/look als 3D bron.'
+                    ? textureCoverageIsLow
+                      ? `Textuurprojectie is onvolledig (${Math.round(textureTriangleCoverage! * 100)}% driehoekdekking). De geometrie blijft intact, maar het materiaalresultaat moet opnieuw worden opgebouwd.`
+                      : 'Textured mesh klaar. Controleer het resultaat in de 3D-preview.'
                     : textureInProgress
                       ? 'Texture wrap staat klaar voor de provider. Zodra de backend output levert, laadt de Studio automatisch de textured mesh.'
                       : textureStatus === 'failed' || textureOutputMissing
@@ -4150,12 +4161,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               </div>
             </div>
             {textureAtlasUrl && (
-              <div className="mt-3 overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
-                <div className="aspect-[2/1]">
-                  <img src={textureAtlasUrl} alt="Texture atlas" className="h-full w-full object-contain" />
+              <details className="mt-3 overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
+                <summary className="cursor-pointer px-2 py-2 text-[10px] text-white/42">
+                  Technische UV-atlas
+                </summary>
+                <div className="aspect-[2/1] border-t border-white/[0.06]">
+                  <img src={textureAtlasUrl} alt="Technische UV-atlas" className="h-full w-full object-contain" />
                 </div>
-                <p className="px-2 py-1 text-[10px] text-white/38">Texture atlas</p>
-              </div>
+              </details>
             )}
             {project.reconstruction?.texture_error && (
               <p className="mt-3 rounded-md border border-red-400/20 bg-red-500/8 px-2 py-1.5 text-[10px] text-red-200">
@@ -4177,9 +4190,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   if (!texturedMeshUrl) return
                   studioRef.current?.addModelFromUrl(texturedMeshUrl, 'Textured product')
                   setRenderPacketStale(true)
+                  setRightTab('properties')
                 }}
-                disabled={!texturedMeshUrl}
-                className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+                disabled={!texturedMeshReady}
+                title={texturedMeshReady ? 'Open de textured mesh in de 3D-preview' : 'Er is nog geen textured mesh beschikbaar'}
+                className="rounded-full border border-cyan-300/25 px-3 py-1.5 text-xs font-medium text-cyan-200/80 hover:bg-cyan-300/10 disabled:border-white/[0.05] disabled:text-white/24"
               >
                 Laad preview
               </button>

@@ -139,8 +139,6 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
     setSelectedObjectId,
     setTransformMode,
     addObject,
-    clearNonGltfObjects,
-    clearAllGltfObjects,
     updateObject,
     deleteObject,
     deleteSelected,
@@ -272,14 +270,20 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
         return
       }
       const oldGltf = scene.objects.find((o) => o.type === 'gltf')
-      const keepPos = oldGltf?.position
-      clearAllGltfObjects()
-      clearNonGltfObjects()
       markSceneDirty()
+      if (oldGltf) {
+        updateObject(oldGltf.id, {
+          name,
+          gltfUrl: url,
+        })
+        setSelectedObjectId(oldGltf.id)
+        return
+      }
       addObject('gltf', {
         name,
         gltfUrl: url,
-        position: keepPos ?? [0, 0.5, 0],
+        position: [0, 0.5, 0],
+        rotation: [0, 0, 0],
         scale: [1, 1, 1],
       })
     },
@@ -313,7 +317,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
     setCameraOrbit(position: [number, number, number], target: [number, number, number], fov?: number, viewMatrix?: number[]) {
       viewportRef.current?.setCameraOrbit(position, target, fov, viewMatrix)
     },
-  }), [addDirtyObject, addDirtyLight, addCamera, clearAllGltfObjects, clearNonGltfObjects, deleteObject, deleteLight, deleteDirtySelected, markSceneDirty, resetScene, scene, selectedObjectId, selectedLightId, setSelectedObjectId, setSelectedLightId, setActiveCameraId, transformMode, setTransformMode, updateBackground, updateCamera, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, transformDirtyObject, showFrame])
+  }), [addDirtyObject, addDirtyLight, addCamera, deleteObject, deleteLight, deleteDirtySelected, markSceneDirty, resetScene, scene, selectedObjectId, selectedLightId, setSelectedObjectId, setSelectedLightId, setActiveCameraId, transformMode, setTransformMode, updateBackground, updateCamera, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, transformDirtyObject, showFrame])
 
   return (
     <div className={['flex h-full w-full overflow-hidden rounded-xl border border-white/[0.06] bg-[#141414]', className].join(' ')}>

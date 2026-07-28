@@ -12,6 +12,7 @@
     "build:mac": "node scripts/download-brush.mjs && npm run build:safe && electron-builder --mac --dir",
     "dist:mac": "node scripts/download-brush.mjs && npm run build:safe && electron-builder --mac",
     "test": "echo \"No tests configured\"",
+    "test:texture-geometry": "node scripts/texture-geometry-integrity-test.mjs",
     "test:security": "node scripts/security-smoke-test.mjs"
   },
   "dependencies": {
