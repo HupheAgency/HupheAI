@@ -1239,7 +1239,7 @@ function SceneContent({
 
   return (
     <>
-      <OrbitControls ref={orbitRef} makeDefault />
+      <OrbitControls ref={orbitRef} makeDefault enableDamping={false} />
       <CameraTracker orbitStateRef={orbitStateRef} />
 
       <SceneLights lights={scene.lights} viewMode={viewMode} />

@@ -269,7 +269,7 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:download-png', args),
     uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective'; dataUrl: string }) =>
       ipcRenderer.invoke('product-studio:upload-render-pass', args),
-    generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) =>
+    generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'front' | 'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) =>
       ipcRenderer.invoke('product-studio:generate-reference-views', args),
     startReconstruction: (args: { projectId: string; canonicalReferenceSetId: string; primaryImageUrl: string; route?: 'single-view' | 'multi-view' | 'primitive-proxy'; seed?: number }) =>
       ipcRenderer.invoke('product-studio:start-reconstruction', args),

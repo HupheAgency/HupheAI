@@ -2149,7 +2149,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
   ipcMain.handle('product-studio:generate-reference-views', async (_e, args: {
     projectId: string
     sourceAssetId: string
-    targetViews: Array<'left' | 'right' | 'rear' | 'top'>
+    targetViews: Array<'front' | 'left' | 'right' | 'rear' | 'top'>
     productNotes?: string
   }) => {
     const jwt = getJwt()
@@ -2198,6 +2198,12 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
 
       const angleDescriptions: Record<string, string> = {
+        front: [
+          'straight-on FRONT view of the exact same product at eye level',
+          'position the camera exactly perpendicular to the front face of the product: no three-quarter angle, no view from above or below',
+          'if the source photo was taken from an angle, re-project the product so the true front face is shown perfectly straight-on',
+          'reproduce all print, labels, logos, and surface details on the front face exactly as visible in the source',
+        ].join('; '),
         left: [
           'LEFT side profile view of the exact same product',
           'rotate the product 90 degrees clockwise from the original front view so the product left side is visible',
@@ -2219,15 +2225,16 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
 
       for (const angle of args.targetViews) {
-        const { data: existingView } = await sb
+        // De originele bronfoto staat als 'observed' front geregistreerd; die
+        // telt niet als canonical view — een schuin genomen origineel moet
+        // alsnog een rechte front-view krijgen.
+        const { data: existingViews } = await sb
           .from('reference_views')
-          .select('id')
+          .select('id, provenance')
           .eq('project_id', args.projectId)
           .eq('angle', angle)
           .in('status', ['draft', 'active'])
-          .limit(1)
-          .maybeSingle()
-        if (existingView) continue
+        if ((existingViews ?? []).some((v) => v.provenance !== 'observed')) continue
 
         const productContext = args.productNotes ? ` The product is: ${args.productNotes}.` : ''
         const prompt = [
@@ -2575,24 +2582,38 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       if (viewImages.length === 0) throw new Error('Geen referentiebeelden beschikbaar voor texture wrapping.')
 
       // Simpelste betrouwbare route: TRELLIS-2 levert zelf een volledig
-      // getextureerde GLB die eruitziet als de inputfoto. Eigen projectie
+      // getextureerde GLB die eruitziet als de inputfoto's. Eigen projectie
       // (texture-projector) kan niet kloppen zonder echte camera-extrinsics
-      // van de AI-gegenereerde views. We draaien dus een tweede Trellis-run
-      // op de beste INGEKLEURDE referentie (nooit de grijze Basic Product).
-      const preferred = viewImages.find((v) => v.angle === 'front' || v.angle === 'hero') ?? viewImages[0]
+      // van de AI-gegenereerde views. Alle goedgekeurde views gaan mee
+      // (front + zijkanten + achterkant) zodat print/labels op elke kant
+      // kloppen in plaats van door de AI verzonnen te worden.
       const sniffImageMime = (buf: Buffer): string => {
         if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
         if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg'
         if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
         return 'image/png'
       }
-      console.log('[create-textured-mesh] Trellis skin-run op view:', preferred.angle, `(${viewImages.length} views beschikbaar)`)
+      // Eén beeld per hoek (de meest recente wint), front eerst
+      const anglePriority = ['front', 'hero', 'left', 'right', 'rear', 'back', 'top']
+      const byAngle = new Map<string, Buffer>()
+      for (const v of viewImages) byAngle.set(v.angle, v.imageBuffer)
+      const orderedViews = [...byAngle.entries()].sort(([a], [b]) => {
+        const ia = anglePriority.indexOf(a); const ib = anglePriority.indexOf(b)
+        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
+      })
+      const usedAngles = orderedViews.map(([angle]) => angle)
+      console.log('[create-textured-mesh] Trellis skin-run op views:', usedAngles.join(', '))
       const { callFalProxy } = await import('./lib/proxy')
-      const trellisResult = await callFalProxy('fal-ai/trellis-2', {
-        image_base64: preferred.imageBuffer.toString('base64'),
-        image_mime_type: sniffImageMime(preferred.imageBuffer),
-        ...(recon.seed != null ? { seed: recon.seed } : {}),
-      }, jwt) as any
+      const trellisResult = orderedViews.length > 1
+        ? await callFalProxy('fal-ai/trellis-2/multi', {
+            image_urls: orderedViews.map(([, buf]) => `data:${sniffImageMime(buf)};base64,${buf.toString('base64')}`),
+            ...(recon.seed != null ? { seed: recon.seed } : {}),
+          }, jwt) as any
+        : await callFalProxy('fal-ai/trellis-2', {
+            image_base64: orderedViews[0][1].toString('base64'),
+            image_mime_type: sniffImageMime(orderedViews[0][1]),
+            ...(recon.seed != null ? { seed: recon.seed } : {}),
+          }, jwt) as any
       const skinGlbUrl = trellisResult?.model_glb?.url
       if (!skinGlbUrl) throw new Error('Geen GLB ontvangen van TRELLIS 2 (skin-run).')
       console.log('[create-textured-mesh] Skin GLB downloaden...')
@@ -2617,7 +2638,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const texturedMeshUrl = toHupheFileUrl(meshPath)
       const materialManifest = {
         route: 'trellis-skin',
-        views_used: [preferred.angle],
+        views_used: usedAngles,
         storage: 'local',
         textured_mesh_path: meshPath,
         material_manifest_path: manifestPath,

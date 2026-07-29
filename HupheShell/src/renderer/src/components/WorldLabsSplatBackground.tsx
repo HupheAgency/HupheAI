@@ -29,15 +29,11 @@ export function WorldLabsSplatBackground({
   const [viewerObject, setViewerObject] = useState<THREE.Object3D | null>(null)
   const { invalidate } = useThree()
 
-  // gaussian-splats-3d sorteert asynchroon en heeft na camera- of
-  // sceneveranderingen meerdere renders nodig. Deze Canvas gebruikt
-  // frameloop="demand"; zonder extra invalidates blijft de splat op een
-  // vroege sorteer-tussenstand staan. Maar permanent elke frame invalidaten
-  // houdt de GPU continu bezig, ook als er niets beweegt. Daarom: alleen
-  // doorrenderen tot 2s na de laatste camerabeweging (orbit-interactie
-  // triggert zelf al frames, dus beweging wordt hier altijd gezien).
+  // De sorter heeft na de laatste camerabeweging nog enkele renders nodig.
+  // Een lange uitloop voelt echter alsof de camera blijft doordraaien.
   const lastMoveAtRef = useRef(0)
   const prevCameraMatrixRef = useRef<number[] | null>(null)
+  const initialSortPendingRef = useRef(true)
   useFrame(({ camera }) => {
     if (!viewerObject) return
     const els = camera.matrixWorld.elements
@@ -45,14 +41,20 @@ export function WorldLabsSplatBackground({
     let moved = !prev
     if (prev) {
       for (let i = 0; i < 16; i += 1) {
-        if (prev[i] !== els[i]) { moved = true; break }
+        if (Math.abs(prev[i] - els[i]) > 1e-7) { moved = true; break }
       }
     }
     if (moved) {
       prevCameraMatrixRef.current = Array.from(els)
       lastMoveAtRef.current = performance.now()
     }
-    if (performance.now() - lastMoveAtRef.current < 2000) invalidate()
+    const elapsed = performance.now() - lastMoveAtRef.current
+    const settleDuration = initialSortPendingRef.current ? 2000 : 250
+    if (elapsed < settleDuration) {
+      invalidate()
+    } else if (initialSortPendingRef.current) {
+      initialSortPendingRef.current = false
+    }
   })
 
   useEffect(() => {
@@ -142,6 +144,8 @@ export function WorldLabsSplatBackground({
         }
         if (!viewer) throw lastError ?? new Error('Geen WorldLabs splatbron beschikbaar.')
         if (disposed) return
+        initialSortPendingRef.current = true
+        prevCameraMatrixRef.current = null
         setViewerObject(viewer)
         invalidate()
       } catch (error) {

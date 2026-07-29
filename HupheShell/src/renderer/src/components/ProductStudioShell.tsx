@@ -132,7 +132,7 @@ type ProductStudioApi = {
   normalizeInput: (args: { projectId: string; sourceAssetId: string }) => Promise<any>
   registerSourceAsReference: (args: { projectId: string; sourceAssetId: string; angle?: 'hero' | 'front' }) => Promise<any>
   getLatestState: (projectId: string) => Promise<any>
-  generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) => Promise<any>
+  generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'front' | 'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) => Promise<any>
   listReferenceViews: (projectId: string) => Promise<any>
   updateViewStatus: (viewId: string, status: string, provenance?: string) => Promise<any>
   createCanonicalSet: (args: { projectId: string; viewIds: string[]; coverage: string }) => Promise<any>
@@ -1641,9 +1641,31 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const calibrateMarbleToProductSupport = async (
     alignment: SplatAlignment,
     manifest: any,
+    opts: { preserveManualPosition?: boolean } = {},
   ): Promise<{ alignment: SplatAlignment; anchor: MarbleWorldAnchor | null }> => {
     const shotAlignment = applyMarbleShotTransform(alignment, manifest)
-    if (!isMarbleAlignment(alignment)) return { alignment: shotAlignment, anchor: null }
+    // Bij herstel van een opgeslagen (mogelijk handmatig bijgestelde)
+    // uitlijning blijven de gebruikersoffsets staan; alleen de deterministische
+    // shot-geometrie (transform/scale) wordt herberekend. LET OP: uit het
+    // originele `alignment` lezen, niet uit shotAlignment —
+    // applyMarbleShotTransform zet alle group-offsets hard op nul.
+    const keepManual = opts.preserveManualPosition === true
+    const manualOverrides: Partial<SplatAlignment> = keepManual
+      ? {
+          groupPositionX: finiteNumber(alignment.groupPositionX, 0),
+          groupPositionY: finiteNumber(alignment.groupPositionY, 0),
+          groupPositionZ: finiteNumber(alignment.groupPositionZ, 0),
+          groupTiltX: finiteNumber(alignment.groupTiltX, 0),
+          groupTiltZ: finiteNumber(alignment.groupTiltZ, 0),
+          groupScale: finiteNumber(alignment.groupScale, 1),
+          groupMaskSize: alignment.groupMaskSize,
+          groupMaskOffsetX: alignment.groupMaskOffsetX,
+          groupMaskOffsetY: alignment.groupMaskOffsetY,
+          groupMaskOffsetZ: alignment.groupMaskOffsetZ,
+          bubbleRadius: alignment.bubbleRadius,
+        }
+      : {}
+    if (!isMarbleAlignment(alignment)) return { alignment: { ...shotAlignment, ...manualOverrides }, anchor: null }
 
     const measurement = await measureMarbleSupportScale(shotAlignment, manifest)
     if (measurement) console.info('[ProductStudio] Marble tafeldiepte gemeten', measurement)
@@ -1658,19 +1680,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       finiteNumber(shotAlignment.transformScale, 1),
       groundPlaneOffset,
     )
-    if (!anchor) return { alignment: shotAlignment, anchor: null }
+    if (!anchor) return { alignment: { ...shotAlignment, ...manualOverrides }, anchor: null }
 
     console.info('[ProductStudio] Marble-wereld verankerd aan product', anchor)
     return {
       alignment: {
         ...shotAlignment,
+        ...manualOverrides,
         transformPosition: [...anchor.cameraPosition],
         transformScale: anchor.splatScale,
         // Verticale vloer-pin: legt het marble-vloervlak exact op y=0
         // wanneer het product op de vloer staat (0 bij verhoogd support).
-        groupPositionY: anchor.floorOffsetY,
+        groupPositionY: keepManual && Number.isFinite(alignment.groupPositionY)
+          ? (alignment.groupPositionY as number)
+          : anchor.floorOffsetY,
         position: [...anchor.cameraPosition],
-        sceneCenter: [...anchor.cameraTarget],
+        sceneCenter: keepManual && alignment.sceneCenter
+          ? alignment.sceneCenter
+          : [...anchor.cameraTarget],
       },
       anchor,
     }
@@ -1687,6 +1714,22 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       let hasAlignment = false
       setSplatAlignment((prev) => { hasAlignment = !!prev; return prev })
       if (hasAlignment) return
+    }
+    // Eerst kijken of er een opgeslagen (auto-saved) uitlijning voor deze
+    // marble bestaat — handmatige verplaatsingen moeten een herstart overleven.
+    const api = getProductStudioApi()
+    const savedRenderVersionId = marble.renderVersionId ?? project.finalRenderRecord?.id ?? undefined
+    let savedAlignment: SplatAlignment | null = null
+    if (api?.loadSceneAlignment && project.backendProject?.id && savedRenderVersionId) {
+      try {
+        const res = await api.loadSceneAlignment({ projectId: project.backendProject.id, renderVersionId: savedRenderVersionId })
+        const candidate = res?.ok ? res.alignment : null
+        if (candidate?.source === 'marble' && candidate.splatUrl) {
+          const savedPath = decodeURIComponent(candidate.splatUrl.replace('huphe://file/', '').split('?')[0])
+          // Alleen hergebruiken als de save bij deze splat hoort (niet bij een oudere wereld)
+          if (savedPath === marble.splatPath) savedAlignment = candidate
+        }
+      } catch { /* geen opgeslagen uitlijning — verse kalibratie */ }
     }
     const baseAlignment: SplatAlignment = {
       splatUrl: `huphe://file/${encodeURIComponent(marble.splatPath)}`,
@@ -1716,7 +1759,23 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       bubbleFeather: DEFAULT_BUBBLE_FEATHER,
     }
     const manifest = renderManifestRef.current ?? studioRef.current?.captureRenderManifest?.()
-    const { alignment: nextAlignment, anchor } = await calibrateMarbleToProductSupport(baseAlignment, manifest)
+    // Opgeslagen uitlijning als vertrekpunt: handmatige offsets (positie/tilt/
+    // schaal) blijven behouden; de marble-metadata komt altijd vers van disk.
+    const calibrationInput: SplatAlignment = savedAlignment
+      ? {
+          ...savedAlignment,
+          splatUrl: baseAlignment.splatUrl,
+          spzPath: baseAlignment.spzPath,
+          metricScaleFactor: savedAlignment.metricScaleFactor ?? baseAlignment.metricScaleFactor,
+          groundPlaneOffset: savedAlignment.groundPlaneOffset ?? baseAlignment.groundPlaneOffset,
+          marbleMeta: baseAlignment.marbleMeta,
+        }
+      : baseAlignment
+    const { alignment: nextAlignment, anchor } = await calibrateMarbleToProductSupport(
+      calibrationInput,
+      manifest,
+      { preserveManualPosition: !!savedAlignment },
+    )
     setSplatViewerUrl(null)
     applySplatAlignment(nextAlignment, nextAlignment)
     studioRef.current?.setCameraOrbit(
@@ -2535,7 +2594,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       await api.generateReferenceViews({
         projectId: backendProject.id,
         sourceAssetId: asset.id,
-        targetViews: ['left', 'right', 'rear'],
+        targetViews: ['front', 'left', 'right', 'rear'],
         productNotes: backendProject.notes,
       }).then((result) => {
         if (result?.ok) void hydrateLatestState(backendProject.id, false)
@@ -2671,8 +2730,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
     setBusy('Views genereren...')
     try {
-      const existingAngles = new Set(project.references.map((view) => view.angle ?? view.id))
-      const targetViews = (['left', 'right', 'rear'] as Array<'left' | 'right' | 'rear'>)
+      // De observed bronfoto telt niet als canonical front — die mag
+      // vervangen worden door een recht-van-voren gegenereerde view.
+      const existingAngles = new Set(
+        project.references
+          .filter((view) => !(view.angle === 'front' && view.status === 'observed'))
+          .map((view) => view.angle ?? view.id),
+      )
+      const targetViews = (['front', 'left', 'right', 'rear'] as Array<'front' | 'left' | 'right' | 'rear'>)
         .filter((angle) => !existingAngles.has(angle))
       if (targetViews.length === 0) {
         setError('Alle standaardhoeken bestaan al. Gebruik het rondje op een kaart om die specifieke view te vervangen.')
@@ -2699,8 +2764,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       setError('Deze view kan nog niet opnieuw worden gegenereerd.')
       return
     }
-    if (!['left', 'right', 'rear', 'top'].includes(view.angle)) {
-      setError('De bronfoto zelf kan niet als AI-view worden vervangen.')
+    if (!['front', 'left', 'right', 'rear', 'top'].includes(view.angle)) {
+      setError('Deze view kan niet als AI-view worden vervangen.')
       return
     }
     const api = getProductStudioApi()
@@ -2716,7 +2781,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const result = await api.generateReferenceViews({
         projectId: project.backendProject.id,
         sourceAssetId: referenceInputAsset.id,
-        targetViews: [view.angle as 'left' | 'right' | 'rear' | 'top'],
+        targetViews: [view.angle as 'front' | 'left' | 'right' | 'rear' | 'top'],
         productNotes: project.backendProject.notes,
       })
       if (!result?.ok) throw new Error(result?.error || 'View opnieuw genereren mislukt.')
@@ -3539,9 +3604,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           window.setTimeout(apply, 400)
           window.setTimeout(apply, 900)
         }
-        const persistShotAlignment = async (alignment: SplatAlignment) => {
+        const persistShotAlignment = async (alignment: SplatAlignment, calibrateOpts: { preserveManualPosition?: boolean } = {}) => {
           if (activeArchiveVersionId.current !== version.id) return
-          const { alignment: shotAlignment, anchor } = await calibrateMarbleToProductSupport(alignment, alignmentManifest)
+          const { alignment: shotAlignment, anchor } = await calibrateMarbleToProductSupport(alignment, alignmentManifest, calibrateOpts)
           if (activeArchiveVersionId.current !== version.id) return
           applySplatAlignment(shotAlignment, shotAlignment)
           splatApi?.saveSceneAlignment?.({
@@ -3583,7 +3648,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               ? { ...res.alignment, metricScaleFactor: marbleGen.metricScaleFactor ?? undefined, groundPlaneOffset: res.alignment.groundPlaneOffset ?? marbleGen.groundPlaneOffset ?? undefined }
               : res.alignment
             if (enriched.source === 'marble') {
-              await persistShotAlignment(enriched)
+              // Opgeslagen uitlijning: handmatige offsets van de gebruiker behouden
+              await persistShotAlignment(enriched, { preserveManualPosition: true })
             } else {
               applySplatAlignment(enriched, base)
               void applyRestoredWorldLabsProjection(enriched)
