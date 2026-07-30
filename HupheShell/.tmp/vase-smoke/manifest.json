@@ -1,0 +1,123 @@
+{
+  "atlas_size": 1024,
+  "views_used": [
+    "front",
+    "left",
+    "right",
+    "rear"
+  ],
+  "triangles_textured": 95256,
+  "triangles_total": 487920,
+  "atlas_texels_filled": 141702,
+  "atlas_coverage": 0.13513755798339844,
+  "triangle_coverage": 0.19522872602065913,
+  "fallback_color": [
+    199,
+    206,
+    219
+  ],
+  "view_bounds": [
+    {
+      "angle": "front",
+      "minX": 282,
+      "minY": 159,
+      "maxX": 751,
+      "maxY": 943
+    },
+    {
+      "angle": "left",
+      "minX": 280,
+      "minY": 171,
+      "maxX": 750,
+      "maxY": 943
+    },
+    {
+      "angle": "right",
+      "minX": 289,
+      "minY": 180,
+      "maxX": 749,
+      "maxY": 943
+    },
+    {
+      "angle": "rear",
+      "minX": 286,
+      "minY": 183,
+      "maxX": 753,
+      "maxY": 943
+    }
+  ],
+  "integrity": {
+    "geometry_preserved": true,
+    "fingerprint_version": 1,
+    "tolerance": 0.00001,
+    "input": {
+      "fingerprintVersion": 1,
+      "surfaceHash": "fcc141314c096797b73572b475bb11079566d898b6ced2dd0e6cded45a4cbff2",
+      "positionHash": "db7162588c5bd345374d8c9aefe5661a9b4a28d6bff3dd7f41e7d9451c8bc3a8",
+      "sceneTransformHash": "dffd72da92275dd2186a86dcfca814faa8a03e8395d123b7a8c1ab2b1fdeddd6",
+      "meshCount": 1,
+      "primitiveCount": 1,
+      "unsupportedPrimitiveCount": 0,
+      "vertexCount": 328965,
+      "indexCount": 1463760,
+      "triangleCount": 487920,
+      "bounds": {
+        "min": [
+          -0.28973138332366943,
+          -0.5009636878967285,
+          -0.2897108495235443
+        ],
+        "max": [
+          0.28968486189842224,
+          0.5009500980377197,
+          0.28970441222190857
+        ],
+        "size": [
+          0.5794162452220917,
+          1.0019137859344482,
+          0.5794152617454529
+        ]
+      }
+    },
+    "output": {
+      "fingerprintVersion": 1,
+      "surfaceHash": "fcc141314c096797b73572b475bb11079566d898b6ced2dd0e6cded45a4cbff2",
+      "positionHash": "db7162588c5bd345374d8c9aefe5661a9b4a28d6bff3dd7f41e7d9451c8bc3a8",
+      "sceneTransformHash": "dffd72da92275dd2186a86dcfca814faa8a03e8395d123b7a8c1ab2b1fdeddd6",
+      "meshCount": 1,
+      "primitiveCount": 1,
+      "unsupportedPrimitiveCount": 0,
+      "vertexCount": 328965,
+      "indexCount": 1463760,
+      "triangleCount": 487920,
+      "bounds": {
+        "min": [
+          -0.28973138332366943,
+          -0.5009636878967285,
+          -0.2897108495235443
+        ],
+        "max": [
+          0.28968486189842224,
+          0.5009500980377197,
+          0.28970441222190857
+        ],
+        "size": [
+          0.5794162452220917,
+          1.0019137859344482,
+          0.5794152617454529
+        ]
+      }
+    },
+    "comparison": {
+      "surface_hash_equal": true,
+      "scene_transform_hash_equal": true,
+      "bounding_box_max_delta": 0,
+      "max_surface_deviation": 0,
+      "max_normal_angle_degrees": 0.000002091309789151873,
+      "vertex_count_delta": 0,
+      "index_count_delta": 0,
+      "triangle_count_delta": 0
+    },
+    "failure_reasons": []
+  }
+}

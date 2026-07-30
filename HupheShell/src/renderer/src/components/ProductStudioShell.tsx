@@ -157,6 +157,7 @@ type ProductStudioApi = {
   cleanupStorage: (projectId: string) => Promise<any>
   getProviderStats: (projectId: string) => Promise<any>
   downloadPng: (args: { imageUrl: string; suggestedName?: string }) => Promise<any>
+  downloadAsset: (args: { assetUrl: string; suggestedName?: string }) => Promise<any>
   buildSeedMesh: (args: {
     projectId: string
     frontPhotoUrl: string
@@ -187,6 +188,7 @@ type ProductStudioApi = {
   loadSplat: (args?: { defaultDir?: string }) => Promise<{ ok: boolean; splatUrl?: string; localFloorY?: number; plyPath?: string }>
   getSplatPose: (args: { projectId: string; orbitRunId?: string; renderVersionId?: string }) => Promise<{ ok: boolean; pose?: SplatAlignment; error?: string }>
   saveSceneAlignment?: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown>; baseAlignment?: Record<string, unknown> | null }) => Promise<{ ok: boolean; error?: string }>
+  saveSceneAlignmentSync?: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown>; baseAlignment?: Record<string, unknown> | null }) => { ok: boolean; error?: string }
   loadSceneAlignment: (args: { projectId: string; renderVersionId?: string }) => Promise<{ ok: boolean; renderVersionId?: string | null; alignment?: SplatAlignment; baseAlignment?: SplatAlignment | null; error?: string }>
   marbleGenerate?: (args: { imageSrc: string; projectId: string; renderVersionId?: string; displayName?: string; textPrompt?: string; seed?: number; orbitRunId?: string }) => Promise<{ ok: boolean; error?: string } & MarbleRunState>
   onMarbleStep?: (cb: (data: { step: string; progress: number }) => void) => () => void
@@ -1277,6 +1279,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [envReconstructing, setEnvReconstructing] = useState(false)
   const hydratedProjectIdRef = useRef<string | null>(null)
   const [project, setProject] = useState<ProductStudioProject>(loadProject)
+  const currentProjectIdRef = useRef<string | null>(project.backendProject?.id ?? null)
+  const previousProjectIdRef = useRef<string | null>(project.backendProject?.id ?? null)
+  currentProjectIdRef.current = project.backendProject?.id ?? null
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [finalLoading, setFinalLoading] = useState(false)
@@ -1327,6 +1332,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [splatBaseAlignment, setSplatBaseAlignment] = useState<SplatAlignment | null>(null)
   const [splatVisible, setSplatVisible] = useState(true)
   const viewportShellRef = useRef<HTMLDivElement>(null)
+  const activeArchiveVersionId = useRef<string | null>(null)
+  const activeArchiveProjectId = useRef<string | null>(null)
+  const latestSplatSaveRef = useRef<{
+    projectId: string
+    renderVersionId: string
+    alignment: Record<string, unknown>
+    baseAlignment: Record<string, unknown>
+  } | null>(null)
 
   const applySplatAlignment = (alignment: SplatAlignment, baseAlignment?: SplatAlignment | null) => {
     const current = cloneSplatAlignment(alignment)
@@ -2106,10 +2119,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
               neutralSource: res.marble!.neutralSource,
             }
           })
-          // Sta al op schijf (bv. na herstart of bij het openen van dit project)?
-          // Dan direct in de canvas zetten - mits er nog geen (mogelijk
-          // handmatig bijgestelde) uitlijning actief is.
-          void loadMarbleWorldIntoScene(res.marble, { onlyIfEmpty: true })
+          // Alleen de archive-selectie mag een Marble-wereld op het canvas
+          // zetten. Dit effect herstelt uitsluitend de status voor de Studio-UI.
         }
       } else {
         setOrbitTest((prev) => ({ phase: 'idle', step: '', progress: 0, renderVersionId, neutralUrl: res.neutralUrl ?? prev.neutralUrl }))
@@ -2117,30 +2128,111 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }).catch(() => {})
     return () => { cancelled = true }
   }, [orbitModel, project.backendProject?.id, project.finalRenderRecord?.id])
-  // Auto-save splat alignment naar scene.json na elke wijziging (debounced 1.5s)
+  const flushCurrentSplatAlignment = async () => {
+    const activeRenderVersionId = activeArchiveVersionId.current
+    const activeProjectId = activeArchiveProjectId.current
+    const projectId = project.backendProject?.id
+    const payload = (
+      splatAlignment &&
+      projectId &&
+      activeProjectId === projectId &&
+      activeRenderVersionId &&
+      splatAlignment.renderVersionId === activeRenderVersionId
+    )
+      ? {
+          projectId,
+          renderVersionId: activeRenderVersionId,
+          alignment: splatAlignment as unknown as Record<string, unknown>,
+          baseAlignment: (splatBaseAlignment ?? fallbackImportBaseAlignment(splatAlignment)) as unknown as Record<string, unknown>,
+        }
+      : latestSplatSaveRef.current
+    const api = getProductStudioApi()
+    if (!payload || !api?.saveSceneAlignment) return
+    latestSplatSaveRef.current = payload
+    try {
+      const result = await api.saveSceneAlignment(payload)
+      if (!result?.ok) console.warn('[scene.json] direct opslaan mislukt:', result?.error)
+    } catch (error) {
+      console.warn('[scene.json] direct opslaan mislukt:', error)
+    }
+  }
+
+  // Auto-save splat alignment naar scene.json na elke wijziging. De payload
+  // wordt meteen vastgelegd, zodat navigatie en app-close exact deze versie
+  // kunnen flushen zonder afhankelijk te zijn van React-effecttiming.
   // Gebruik altijd de versie die actief bekeken wordt (activeArchiveVersionId), niet finalRenderRecord.
   // finalRenderRecord wijst naar de nieuwste render — bij archief-klikken is dat de VERKEERDE versie.
   useEffect(() => {
-    const renderVersionId = activeArchiveVersionId.current ?? project.finalRenderRecord?.id
-    if (!splatAlignment || !project.backendProject?.id || !renderVersionId) return
+    const renderVersionId = activeArchiveVersionId.current
+    const activeProjectId = activeArchiveProjectId.current
+    if (
+      !splatAlignment ||
+      !project.backendProject?.id ||
+      activeProjectId !== project.backendProject.id ||
+      !renderVersionId ||
+      splatAlignment.renderVersionId !== renderVersionId
+    ) {
+      if (!splatAlignment) latestSplatSaveRef.current = null
+      return
+    }
     const api = getProductStudioApi()
     if (!api) return
+    const payload = {
+      projectId: project.backendProject.id,
+      renderVersionId,
+      alignment: splatAlignment as unknown as Record<string, unknown>,
+      baseAlignment: (splatBaseAlignment ?? fallbackImportBaseAlignment(splatAlignment)) as unknown as Record<string, unknown>,
+    }
+    latestSplatSaveRef.current = payload
     const tid = setTimeout(() => {
-      api.saveSceneAlignment?.({
-        projectId: project.backendProject!.id,
-        renderVersionId,
-        alignment: splatAlignment as unknown as Record<string, unknown>,
-        baseAlignment: (splatBaseAlignment ?? fallbackImportBaseAlignment(splatAlignment)) as unknown as Record<string, unknown>,
-      })
-        .catch((e: unknown) => console.warn('[scene.json] auto-save mislukt:', e))
-    }, 1500)
+      api.saveSceneAlignment?.(payload)
+        .then((result) => {
+          if (!result?.ok) console.warn('[scene.json] auto-save mislukt:', result?.error)
+        })
+        .catch((error: unknown) => console.warn('[scene.json] auto-save mislukt:', error))
+    }, 300)
     return () => clearTimeout(tid)
-  }, [splatAlignment, splatBaseAlignment, project.backendProject?.id, project.finalRenderRecord?.id])
+  }, [splatAlignment, splatBaseAlignment, project.backendProject?.id])
+
+  useEffect(() => {
+    const saveLatestSynchronously = () => {
+      const payload = latestSplatSaveRef.current
+      if (!payload) return
+      const result = getProductStudioApi()?.saveSceneAlignmentSync?.(payload)
+      if (result && !result.ok) console.warn('[scene.json] afsluit-save mislukt:', result.error)
+    }
+    window.addEventListener('beforeunload', saveLatestSynchronously)
+    return () => {
+      window.removeEventListener('beforeunload', saveLatestSynchronously)
+      saveLatestSynchronously()
+    }
+  }, [])
+
+  const clearActiveArchiveSelection = () => {
+    activeArchiveVersionId.current = null
+    activeArchiveProjectId.current = null
+    latestSplatSaveRef.current = null
+    setArchivePreviewId(null)
+    setSplatAlignment(null)
+    setSplatBaseAlignment(null)
+    setSplatViewerUrl(null)
+    setSplatFrameViewerOpen(false)
+    setOrbitTest({ phase: 'idle', step: '', progress: 0 })
+    setSplatTraining({ phase: 'idle', step: '', progress: 0 })
+  }
+
+  async function openProject(projectId: string) {
+    if (projectId === project.backendProject?.id) return
+    await flushCurrentSplatAlignment()
+    clearActiveArchiveSelection()
+    hydratedProjectIdRef.current = null
+    try { sessionStorage.setItem('huphe:resume-project-id', projectId) } catch { /* ignore */ }
+    setProject((prev) => ({ ...prev, backendProject: { id: projectId } as any }))
+  }
 
   const lastCameraParamsRef = useRef<{ projectionMatrix: number[]; viewMatrix: number[]; near: number; far: number; width: number; height: number; fovScale?: number } | null>(null)
   // Per-version local cache: model transform per archive photo (session only)
   const archiveTransformCache = useRef<Record<string, { position: [number,number,number]; rotation: [number,number,number]; scale: [number,number,number] }>>({})
-  const activeArchiveVersionId = useRef<string | null>(null)
   const prevOverlayRef = useRef<'light' | 'productLayer' | 'composite' | 'bgComposite' | '__depth' | null>(null)
   const renderManifestRef = useRef<typeof renderManifest>(undefined)
   const [sceneControls, setSceneControls] = useState<Scene3DSceneControls | null>(null)
@@ -2190,23 +2282,38 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const textureOutputMissing = textureStatus === 'completed' && !texturedMeshUrl
   const texturedMeshReady = Boolean(texturedMeshUrl && textureStatus === 'completed')
   const textureManifest = project.reconstruction?.material_manifest as Record<string, unknown> | undefined
-  const texturedTriangles = Number(textureManifest?.triangles_textured)
-  const totalTextureTriangles = Number(textureManifest?.triangles_total)
+  const textureProjection = textureManifest?.projection as Record<string, unknown> | undefined
+  const textureRoute = typeof textureManifest?.route === 'string' ? textureManifest.route : undefined
+  const canonicalSkinReady = textureRoute === 'canonical-lathe-skin-v1'
+  const textureSourceProjectionUrl = typeof textureManifest?.texture_source_projection_url === 'string'
+    ? textureManifest.texture_source_projection_url
+    : undefined
+  const textureReconstructionUrl = typeof textureManifest?.texture_reconstruction_url === 'string'
+    ? textureManifest.texture_reconstruction_url
+    : undefined
+  const textureConfidenceUrl = typeof textureManifest?.texture_confidence_url === 'string'
+    ? textureManifest.texture_confidence_url
+    : undefined
+  const skinDocumentUrl = typeof textureManifest?.skin_document_url === 'string'
+    ? textureManifest.skin_document_url
+    : undefined
+  const texturedTriangles = Number(textureProjection?.triangles_textured ?? textureManifest?.triangles_textured)
+  const totalTextureTriangles = Number(textureProjection?.triangles_total ?? textureManifest?.triangles_total)
   const textureTriangleCoverage = Number.isFinite(texturedTriangles)
     && Number.isFinite(totalTextureTriangles)
     && totalTextureTriangles > 0
       ? texturedTriangles / totalTextureTriangles
       : null
   const textureCoverageIsLow = textureTriangleCoverage !== null && textureTriangleCoverage < 0.8
-  const activeStudioMeshUrl = texturedMeshUrl ?? project.reconstruction?.mesh_url
+  const activeStudioMeshUrl = texturedMeshReady ? texturedMeshUrl : project.reconstruction?.mesh_url
   const textureInProgress = textureStatus === 'pending' || textureStatus === 'processing'
   const renderPacketReady = Boolean(project.renderPacketRecord || project.renderPacket)
   const finalRenderRequiresTexture = meshReady && !texturedMeshReady
   const finalRenderBlocked = !renderPacketReady || renderPacketStale || finalRenderRequiresTexture
-  const hasPhoto = Boolean(project.finalRender?.src)
+  const hasPhoto = Boolean(project.finalRender?.src || project.finalRenderRecord?.output_url)
   const promptBarMode: import('./AtelierPromptBar').PromptBarMode =
     backgroundLocked ? 'locked'
-    : hasPhoto && !renderPacketStale ? 'retry'
+    : hasPhoto ? 'retry'
     : 'capture'
   const objectMaskUrl = project.objectMaskUrl ?? project.objectMaskAsset?.url ?? project.renderPacketRecord?.object_mask_url
   const canonicalReference = project.references.find((view) => view.status === 'user-approved' || view.status === 'observed' || view.status === 'user-edited')
@@ -2218,7 +2325,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const scenePreviewUrl = project.finalRenderRecord?.scene_url
     ?? (project.finalRenderRecord?.metadata?.scene_url as string | undefined)
   const finalMetadata = project.finalRenderRecord?.metadata ?? {}
-  const backgroundPlateUrl = project.finalRenderRecord?.background_plate_url ?? (finalMetadata.background_plate_url as string | undefined)
+  const backgroundPlateUrl = project.finalRenderRecord?.background_plate_url
+    ?? (finalMetadata.background_plate_url as string | undefined)
+    ?? (project.finalRenderRecord?.layer_metadata?.env_source_background as string | undefined)
   const renderPacketProductLayerUrl = (project.renderPacketRecord as any)?.product_layer_url as string | undefined
   const finalRenderMatchesPacket = Boolean(project.finalRenderRecord?.render_packet_id && project.renderPacketRecord?.id && project.finalRenderRecord.render_packet_id === project.renderPacketRecord.id)
   const productLayerUrl = renderPacketProductLayerUrl
@@ -2347,12 +2456,20 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       if (resumeId) sessionStorage.removeItem('huphe:resume-project-id')
     } catch { /* ignore */ }
     if (!resumeId) return
+    clearActiveArchiveSelection()
     setProject((prev) => ({ ...prev, backendProject: { id: resumeId } as any }))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(project)) } catch { /* ignore */ }
   }, [project])
+
+  useEffect(() => {
+    const projectId = project.backendProject?.id ?? null
+    if (previousProjectIdRef.current === projectId) return
+    previousProjectIdRef.current = projectId
+    clearActiveArchiveSelection()
+  }, [project.backendProject?.id])
 
   useEffect(() => {
     const projectId = getStoredProjectId(project)
@@ -2443,6 +2560,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     try {
       const result = await api.getLatestState(projectId)
       if (!result?.ok) throw new Error(result?.error || 'Project synchroniseren mislukt.')
+      if (currentProjectIdRef.current !== projectId) return
       const activeArchiveId = activeArchiveVersionId.current
       setProject((prev) => {
         const next = projectFromLatestState(prev, result)
@@ -2839,9 +2957,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       updatedAt: new Date().toISOString(),
     }))
     if (!hadReconstruction) {
-      const bestMeshUrl = reconstruction.textured_mesh_url ?? reconstruction.mesh_url
+      const reconstructedTextureReady = reconstruction.texture_status === 'completed' && Boolean(reconstruction.textured_mesh_url)
+      const bestMeshUrl = reconstructedTextureReady ? reconstruction.textured_mesh_url : reconstruction.mesh_url
       if (bestMeshUrl) {
-        studioRef.current?.addModelFromUrl(bestMeshUrl, reconstruction.textured_mesh_url ? 'Textured product' : 'Reconstructed product')
+        studioRef.current?.addModelFromUrl(bestMeshUrl, reconstructedTextureReady ? 'Textured product' : 'Reconstructed product')
       }
     }
     return { canonicalSet, reconstruction }
@@ -3205,7 +3324,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }
 
   async function captureRenderPacket(promptOverride?: string) {
+    await flushCurrentSplatAlignment()
     activeArchiveVersionId.current = null
+    activeArchiveProjectId.current = null
+    latestSplatSaveRef.current = null
+    setSplatAlignment(null)
+    setSplatBaseAlignment(null)
     splatShotManifestRef.current = null
     const packet = await studioRef.current?.captureRenderPacketPreview()
     if (!packet?.beauty && !packet?.passes) {
@@ -3312,10 +3436,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         return
       }
 
-      if (backgroundLocked && project.finalRenderRecord?.background_plate_url) {
+      if (backgroundLocked) {
+        if (!backgroundPlateUrl) {
+          setFinalError('De vastgezette achtergrond ontbreekt. Zet de achtergrond opnieuw vast via het schuifje.')
+          return
+        }
         // Locked modus: hergebruik bestaande achtergrond, composiet maken met nieuwe product layer
         setBusy('Composiet maken...')
-        const existingBgUrl = project.finalRenderRecord.background_plate_url as string
+        const existingBgUrl = backgroundPlateUrl
         const newPlUrl = (plResult as any).productLayerUrl as string | undefined
         if (newPlUrl && (api as any).composeLockedView) {
           const composeResult = await (api as any).composeLockedView({
@@ -3391,6 +3519,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       console.warn('[restore] gestopt: api ontbreekt of restoreRenderState niet beschikbaar', { api: !!api, hasMethod: !!(api as any)?.restoreRenderState })
       return
     }
+    const restoreProjectId = project.backendProject?.id
+    if (!restoreProjectId) return
+
+    await flushCurrentSplatAlignment()
+    if (currentProjectIdRef.current !== restoreProjectId) return
 
     // Sla huidige model-transform op vóór we wisselen
     const prevId = activeArchiveVersionId.current
@@ -3406,6 +3539,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       }
     }
     activeArchiveVersionId.current = version.id
+    activeArchiveProjectId.current = restoreProjectId
     // Wis huidige marble direct — wordt hersteld door loadSceneAlignment of expliciete checkOrbitVideo
     setSplatAlignment(null)
     setSplatBaseAlignment(null)
@@ -3431,6 +3565,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       const result = await (api as any).restoreRenderState({ renderPacketId: version.render_packet_id })
       console.log('[restore] IPC result:', result?.ok, result?.error)
       if (!result?.ok) return
+      if (
+        currentProjectIdRef.current !== restoreProjectId ||
+        activeArchiveProjectId.current !== restoreProjectId ||
+        activeArchiveVersionId.current !== version.id
+      ) return
 
       const packet = result.packet as RenderPacket
       const scene = result.scene as StudioSceneVersion | null
@@ -3700,6 +3839,169 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
   }
 
+  function updateFinalRenderVersionLocally(
+    versionId: string,
+    updates: Partial<FinalRenderVersion>,
+  ) {
+    setProject((prev) => ({
+      ...prev,
+      finalRenderRecord: prev.finalRenderRecord?.id === versionId
+        ? { ...prev.finalRenderRecord, ...updates }
+        : prev.finalRenderRecord,
+    }))
+    setFinalRenderVersions((prev) => prev.map((version) => (
+      version.id === versionId ? { ...version, ...updates } : version
+    )))
+  }
+
+  async function toggleBackgroundLock() {
+    const api = getProductStudioApi()
+    const version = project.finalRenderRecord
+    const projectId = project.backendProject?.id
+    if (!api || !version || !projectId) {
+      setFinalError('Kies eerst een foto uit Archive om de achtergrond vast te zetten.')
+      return
+    }
+
+    const versionId = version.id
+    const isStillActive = () => (
+      currentProjectIdRef.current === projectId
+      && activeArchiveVersionId.current === versionId
+    )
+
+    if (backgroundLocked) {
+      const confirmed = window.confirm(
+        'Weet je zeker dat je de achtergrond wilt ontgrendelen? De panorama en alle omgevingsaanzichten worden verwijderd.'
+      )
+      if (!confirmed) return
+
+      setBusy('Achtergrond ontgrendelen...')
+      setFinalError(null)
+      try {
+        const cleanMeta = { ...(version.layer_metadata ?? {}) } as Record<string, unknown>
+        const lockedBackgroundUrl = version.background_plate_url
+          ?? (version.metadata?.background_plate_url as string | undefined)
+          ?? (cleanMeta.env_source_background as string | undefined)
+        delete cleanMeta.locked_view
+        delete cleanMeta.env_mesh_url
+        delete cleanMeta.env_views_ready
+        delete cleanMeta.env_source_background
+
+        const result = await (api as any).updateFinalRenderMetadata?.({
+          versionId,
+          layerMetadata: cleanMeta,
+        })
+        if (!result?.ok) throw new Error(result?.error || 'Ontgrendeling kon niet worden opgeslagen.')
+
+        if (lockedBackgroundUrl) {
+          const deleteResult = await (api as any).deleteEnvViews?.({
+            projectId,
+            backgroundPlateUrl: lockedBackgroundUrl,
+          })
+          if (deleteResult && !deleteResult.ok) {
+            console.warn('[env-unlock] Omgevingsbestanden konden niet volledig worden verwijderd:', deleteResult.error)
+          }
+        }
+
+        if (!isStillActive()) return
+        updateFinalRenderVersionLocally(versionId, { layer_metadata: cleanMeta })
+        setEnvViewUrls([])
+        setEnvPanoramaUrl(null)
+        setEnvMeshUrls([])
+        setBackgroundLocked(false)
+      } catch (err: any) {
+        setFinalError(err?.message ?? 'Achtergrond ontgrendelen mislukt.')
+      } finally {
+        setBusy(null)
+      }
+      return
+    }
+
+    setBusy('Achtergrond vastzetten...')
+    setFinalError(null)
+    let lockWasSaved = false
+    try {
+      let lockedBackgroundUrl = version.background_plate_url
+        ?? (version.metadata?.background_plate_url as string | undefined)
+        ?? (version.layer_metadata?.env_source_background as string | undefined)
+
+      // Oudere render-versies hebben soms wel een composite, maar nog geen clean plate.
+      // Bouw die eenmalig op zodat ook deze foto's als vaste achtergrond kunnen dienen.
+      if (!lockedBackgroundUrl) {
+        const cleanPlateResult = await api.generateCleanPlate({
+          projectId,
+          finalRenderVersionId: versionId,
+        })
+        if (!cleanPlateResult?.ok || !cleanPlateResult.cleanPlateUrl) {
+          throw new Error(cleanPlateResult?.error || 'De achtergrond kon niet uit deze foto worden vrijgemaakt.')
+        }
+        lockedBackgroundUrl = cleanPlateResult.cleanPlateUrl as string
+        if (!isStillActive()) return
+        updateFinalRenderVersionLocally(versionId, { background_plate_url: lockedBackgroundUrl })
+      }
+
+      const lockedMeta = {
+        ...(version.layer_metadata ?? {}),
+        locked_view: true,
+        env_source_background: lockedBackgroundUrl,
+      } as Record<string, unknown>
+      const saveResult = await (api as any).updateFinalRenderMetadata?.({
+        versionId,
+        layerMetadata: lockedMeta,
+      })
+      if (!saveResult?.ok) throw new Error(saveResult?.error || 'De vergrendeling kon niet worden opgeslagen.')
+      lockWasSaved = true
+
+      if (!isStillActive()) return
+      updateFinalRenderVersionLocally(versionId, {
+        background_plate_url: lockedBackgroundUrl,
+        layer_metadata: lockedMeta,
+      })
+      setBackgroundLocked(true)
+
+      if (lockedMeta.env_views_ready && lockedMeta.env_mesh_url) return
+
+      setBusy('3D omgeving voorbereiden...')
+      setEnvReconstructing(true)
+      const reconstructResult = await (api as any).reconstructEnvironment?.({
+        backgroundPlateUrl: lockedBackgroundUrl,
+        projectId,
+      })
+      if (!reconstructResult?.ok || !reconstructResult.meshUrl) {
+        throw new Error(reconstructResult?.error || 'De 3D omgeving kon niet worden voorbereid.')
+      }
+
+      const environmentMeta = {
+        ...lockedMeta,
+        env_mesh_url: reconstructResult.meshUrl,
+        env_views_ready: true,
+        env_source_background: reconstructResult.backgroundPlateUrl ?? lockedBackgroundUrl,
+      }
+      const environmentSaveResult = await (api as any).updateFinalRenderMetadata?.({
+        versionId,
+        layerMetadata: environmentMeta,
+      })
+      if (!environmentSaveResult?.ok) {
+        throw new Error(environmentSaveResult?.error || 'De 3D omgeving kon niet worden opgeslagen.')
+      }
+
+      if (!isStillActive()) return
+      updateFinalRenderVersionLocally(versionId, { layer_metadata: environmentMeta })
+      setEnvMeshUrls([reconstructResult.meshUrl])
+      setEnvViewUrls(reconstructResult.viewUrls ?? [])
+      setEnvPanoramaUrl(reconstructResult.panoramaUrl ?? null)
+    } catch (err: any) {
+      setFinalError(
+        lockWasSaved
+          ? `De achtergrond is vastgezet, maar de 3D omgeving is nog niet klaar: ${err?.message ?? 'onbekende fout'}`
+          : err?.message ?? 'Achtergrond vastzetten mislukt.'
+      )
+    } finally {
+      setEnvReconstructing(false)
+      setBusy(null)
+    }
+  }
+
   function triggerAiDepthExtraction(imageUrl: string) {
     const api = getProductStudioApi()
     if (!api || !(api as any).extractDepth) return
@@ -3740,7 +4042,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   }
 
   async function handleFinalPrompt(prompt: string) {
+    await flushCurrentSplatAlignment()
     activeArchiveVersionId.current = null
+    activeArchiveProjectId.current = null
+    latestSplatSaveRef.current = null
+    setSplatAlignment(null)
+    setSplatBaseAlignment(null)
     if (renderPacketStale) {
       setFinalError('De studio preview is verouderd. Klik eerst op Update preview zodat de huidige camera en productpositie worden gebruikt.')
       return
@@ -3835,6 +4142,24 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     link.href = src
     link.download = `${project.name.replace(/[^a-z0-9_-]+/gi, '-').toLowerCase()}-final.png`
     link.click()
+  }
+
+  async function downloadTextureAsset(assetUrl: string | undefined, suggestedName: string) {
+    if (!assetUrl) return
+    const api = getProductStudioApi()
+    if (!api?.downloadAsset) {
+      setFinalError('De asset-download is nog niet beschikbaar. Herstart de app en probeer opnieuw.')
+      return
+    }
+    setDownloadStatus('Downloaden...')
+    const result = await api.downloadAsset({ assetUrl, suggestedName })
+    if (result?.ok) {
+      setDownloadStatus('Opgeslagen in Downloads')
+      setTimeout(() => setDownloadStatus(null), 3000)
+    } else {
+      setDownloadStatus(null)
+      setFinalError(result?.error || 'Download mislukt.')
+    }
   }
 
   async function retryRun(runId: string) {
@@ -4165,7 +4490,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <p className="text-xs font-semibold text-white/70">Texture product</p>
                 <p className="mt-1 text-xs text-white/36">
                   {texturedMeshReady
-                    ? textureCoverageIsLow
+                    ? canonicalSkinReady
+                      ? 'Doorlopende product-skin klaar. De bronprojectie en gereconstrueerde achterzijde blijven afzonderlijk bewaard.'
+                      : textureCoverageIsLow
                       ? `Textuurprojectie is onvolledig (${Math.round(textureTriangleCoverage! * 100)}% driehoekdekking). De geometrie blijft intact, maar het materiaalresultaat moet opnieuw worden opgebouwd.`
                       : 'Textured mesh klaar. Controleer het resultaat in de 3D-preview.'
                     : textureInProgress
@@ -4229,10 +4556,46 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
             {textureAtlasUrl && (
               <details className="mt-3 overflow-hidden rounded-md border border-white/[0.06] bg-black/30">
                 <summary className="cursor-pointer px-2 py-2 text-[10px] text-white/42">
-                  Technische UV-atlas
+                  {canonicalSkinReady ? 'Canonical flatmap en provenance' : 'Technische UV-atlas'}
                 </summary>
-                <div className="aspect-[2/1] border-t border-white/[0.06]">
-                  <img src={textureAtlasUrl} alt="Technische UV-atlas" className="h-full w-full object-contain" />
+                <div className="border-t border-white/[0.06] p-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <figure className="min-w-0">
+                      <div className="aspect-square overflow-hidden bg-black/30">
+                        <img src={textureAtlasUrl} alt="Samengestelde product-flatmap" className="h-full w-full object-contain" />
+                      </div>
+                      <figcaption className="mt-1 text-[9px] text-white/38">Samengestelde flatmap</figcaption>
+                    </figure>
+                    {textureSourceProjectionUrl && (
+                      <figure className="min-w-0">
+                        <div className="aspect-square overflow-hidden bg-black/30">
+                          <img src={textureSourceProjectionUrl} alt="Waargenomen bronprojectie" className="h-full w-full object-contain" />
+                        </div>
+                        <figcaption className="mt-1 text-[9px] text-white/38">Waargenomen bron</figcaption>
+                      </figure>
+                    )}
+                    {textureReconstructionUrl && (
+                      <figure className="min-w-0">
+                        <div className="aspect-square overflow-hidden bg-black/30">
+                          <img src={textureReconstructionUrl} alt="Gereconstrueerde verborgen zijde" className="h-full w-full object-contain" />
+                        </div>
+                        <figcaption className="mt-1 text-[9px] text-white/38">Aangevulde achterzijde</figcaption>
+                      </figure>
+                    )}
+                    {textureConfidenceUrl && (
+                      <figure className="min-w-0">
+                        <div className="aspect-square overflow-hidden bg-black/30">
+                          <img src={textureConfidenceUrl} alt="Confidence-map van de bronprojectie" className="h-full w-full object-contain" />
+                        </div>
+                        <figcaption className="mt-1 text-[9px] text-white/38">Bronzekerheid</figcaption>
+                      </figure>
+                    )}
+                  </div>
+                  {canonicalSkinReady && (
+                    <p className="mt-2 text-[9px] leading-relaxed text-white/34">
+                      Een doorlopende cilindrische skin met de naad aan de achterzijde. Canonical views zijn controlebeelden, geen losse texture-scherven.
+                    </p>
+                  )}
                 </div>
               </details>
             )}
@@ -4248,7 +4611,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 disabled={!meshReady || textureInProgress || Boolean(busy)}
                 className="rounded-full border border-[#facc15]/25 px-3 py-1.5 text-xs font-medium text-[#facc15] hover:bg-[#facc15]/10 disabled:border-white/[0.05] disabled:text-white/24"
               >
-                Texture product
+                {canonicalSkinReady ? 'Bouw flatmap opnieuw' : 'Texture product'}
               </button>
               <button
                 type="button"
@@ -4263,6 +4626,39 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 className="rounded-full border border-cyan-300/25 px-3 py-1.5 text-xs font-medium text-cyan-200/80 hover:bg-cyan-300/10 disabled:border-white/[0.05] disabled:text-white/24"
               >
                 Laad preview
+              </button>
+              <button
+                type="button"
+                onClick={() => void downloadTextureAsset(
+                  textureAtlasUrl,
+                  `${project.name.replace(/[^a-z0-9_-]+/gi, '_')}_flatmap.png`,
+                )}
+                disabled={!textureAtlasUrl || downloadStatus === 'Downloaden...'}
+                className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+              >
+                Flatmap
+              </button>
+              <button
+                type="button"
+                onClick={() => void downloadTextureAsset(
+                  texturedMeshUrl,
+                  `${project.name.replace(/[^a-z0-9_-]+/gi, '_')}_textured.glb`,
+                )}
+                disabled={!texturedMeshUrl || downloadStatus === 'Downloaden...'}
+                className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+              >
+                GLB
+              </button>
+              <button
+                type="button"
+                onClick={() => void downloadTextureAsset(
+                  skinDocumentUrl,
+                  `${project.name.replace(/[^a-z0-9_-]+/gi, '_')}_skin.json`,
+                )}
+                disabled={!skinDocumentUrl || downloadStatus === 'Downloaden...'}
+                className="rounded-full border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-white/50 hover:bg-white/[0.06] disabled:text-white/24"
+              >
+                Skin JSON
               </button>
               <button
                 type="button"
@@ -5317,7 +5713,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                         type="button"
                         disabled={!!busy || finalLoading}
                         onClick={async () => {
+                          await flushCurrentSplatAlignment()
                           activeArchiveVersionId.current = null
+                          activeArchiveProjectId.current = null
+                          latestSplatSaveRef.current = null
+                          setSplatAlignment(null)
+                          setSplatBaseAlignment(null)
                           setBusy('Nieuwe hoek genereren...')
                           setFinalError(null)
                           try {
@@ -5868,7 +6269,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           debugRings={debugRings}
           viewMode={viewMode}
           environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
-          splatAlignment={splatVisible ? splatAlignment : null}
+          splatAlignment={
+            splatVisible &&
+            activeArchiveProjectId.current === project.backendProject?.id &&
+            activeArchiveVersionId.current &&
+            splatAlignment?.renderVersionId === activeArchiveVersionId.current
+              ? splatAlignment
+              : null
+          }
           onOrbitChange={(position, target) => setCurrentCameraState({ position, target })}
         />
       )}
@@ -5880,7 +6288,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 ref={promptBarRef}
                 placeholder="Beschrijf de commercial productfoto..."
                 busyPlaceholder="Foto wordt gemaakt..."
-                loading={finalLoading || !!busy}
+                loading={finalLoading || !!busy || envReconstructing}
                 disabled={false}
                 onSubmit={(prompt) => {
                   if (promptBarMode === 'retry' && !prompt) {
@@ -5890,80 +6298,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                   }
                 }}
                 mode={promptBarMode}
-                onToggleLock={async () => {
-                  const willLock = !backgroundLocked
-
-                  // Confirm before unlocking — this deletes the panorama and env views
-                  if (!willLock && backgroundLocked) {
-                    const confirmed = window.confirm(
-                      'Weet je zeker dat je de achtergrond wilt ontgrendelen? De panorama en alle omgevingsaanzichten worden verwijderd.'
-                    )
-                    if (!confirmed) return
-                    // Delete env view files
-                    const api = getProductStudioApi()
-                    if (api && project.finalRenderRecord?.background_plate_url && project.backendProject) {
-                      ;(api as any).deleteEnvViews?.({
-                        projectId: project.backendProject.id,
-                        backgroundPlateUrl: project.finalRenderRecord.background_plate_url as string,
-                      })
-                      // Clear env metadata on the version
-                      if (project.finalRenderRecord) {
-                        const versionId = project.finalRenderRecord.id
-                        const cleanMeta = { ...(project.finalRenderRecord.layer_metadata ?? {}) } as Record<string, unknown>
-                        delete cleanMeta.env_mesh_url
-                        delete cleanMeta.env_views_ready
-                        delete cleanMeta.env_source_background
-                        setProject((prev) => ({
-                          ...prev,
-                          finalRenderRecord: prev.finalRenderRecord ? { ...prev.finalRenderRecord, layer_metadata: cleanMeta } : prev.finalRenderRecord,
-                        }))
-                        setFinalRenderVersions((prev) => prev.map((v) => v.id === versionId ? { ...v, layer_metadata: cleanMeta } : v))
-                        ;(api as any).updateFinalRenderMetadata?.({ versionId, layerMetadata: cleanMeta })
-                      }
-                    }
-                    setEnvViewUrls([])
-                    setEnvPanoramaUrl(null)
-                    setEnvMeshUrls([])
-                    setBackgroundLocked(false)
-                    return
-                  }
-
-                  setBackgroundLocked(willLock)
-                  if (willLock && project.finalRenderRecord?.background_plate_url && project.backendProject) {
-                    const bgUrl = project.finalRenderRecord.background_plate_url as string
-                    const projectId = project.backendProject.id
-                    setEnvReconstructing(true)
-                    const api = getProductStudioApi()
-                    if (api && (api as any).reconstructEnvironment) {
-                      ;(api as any).reconstructEnvironment({ backgroundPlateUrl: bgUrl, projectId })
-                        .then((result: any) => {
-                          if (result?.ok && result.meshUrl) {
-                            setEnvMeshUrls((prev) => [...prev, result.meshUrl])
-                            if (result.viewUrls) setEnvViewUrls(result.viewUrls)
-                            if (result.panoramaUrl) setEnvPanoramaUrl(result.panoramaUrl)
-                            console.log('[env-reconstruct] Multi-view mesh ready:', result.meshUrl)
-                            // Persist env mesh info on the source version
-                            if (project.finalRenderRecord) {
-                              const versionId = project.finalRenderRecord.id
-                              const updatedMeta = { ...(project.finalRenderRecord.layer_metadata ?? {}), env_mesh_url: result.meshUrl, env_views_ready: true, env_source_background: result.backgroundPlateUrl ?? bgUrl }
-                              setProject((prev) => ({
-                                ...prev,
-                                finalRenderRecord: prev.finalRenderRecord ? { ...prev.finalRenderRecord, layer_metadata: updatedMeta } : prev.finalRenderRecord,
-                              }))
-                              setFinalRenderVersions((prev) => prev.map((v) => v.id === versionId ? { ...v, layer_metadata: updatedMeta } : v))
-                              // Update in database
-                              ;(api as any).updateFinalRenderMetadata?.({ versionId, layerMetadata: updatedMeta })
-                            }
-                          }
-                          if (!result?.ok) console.error('[env-reconstruct] Failed:', result?.error)
-                        })
-                        .catch((err: any) => console.error('[env-reconstruct] Failed:', err))
-                        .finally(() => setEnvReconstructing(false))
-                    } else {
-                      setEnvReconstructing(false)
-                    }
-                  }
-                }}
+                onToggleLock={() => void toggleBackgroundLock()}
               />
             </div>
           </div>
@@ -6211,9 +6546,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                       )}
                     </button>
                     <div className="absolute right-1.5 top-1.5 flex items-center gap-1">
-                      {version.layer_metadata?.env_views_ready && (
+                      {(version.layer_metadata?.locked_view || version.layer_metadata?.env_views_ready) && (
                         <div
-                          title="3D omgeving beschikbaar"
+                          title="Achtergrond vastgezet"
                           className="flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white/50 backdrop-blur-sm"
                         >
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -6359,12 +6694,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                     </button>
                     {p.id !== project.backendProject?.id && (
                       <button
-                        type="button"
-                        title="Open project"
-                        onClick={() => {
-                          try { sessionStorage.setItem('huphe:resume-project-id', p.id) } catch { /* ignore */ }
-                          setProject((prev) => ({ ...prev, backendProject: { id: p.id } as any }))
-                        }}
+                      type="button"
+                      title="Open project"
+                      onClick={() => void openProject(p.id)}
                         className="rounded-lg p-1.5 text-white/25 opacity-0 transition-opacity hover:text-white/60 group-hover:opacity-100"
                       >
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>

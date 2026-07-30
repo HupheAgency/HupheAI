@@ -1,6 +1,7 @@
 import { ipcMain, app } from 'electron'
 import { createClient } from '@supabase/supabase-js'
 import { createHash } from 'crypto'
+import { mkdirSync, writeFileSync } from 'fs'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { extractDepthMap } from './lib/depth-extractor'
@@ -850,6 +851,42 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
       await writeFile(filePath, buffer)
 
+      return { ok: true, filePath }
+    } catch (err: any) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  ipcMain.handle('product-studio:download-asset', async (_e, args: {
+    assetUrl: string
+    suggestedName?: string
+  }) => {
+    const jwt = getJwt()
+    if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
+
+    try {
+      let buffer: Buffer
+      if (args.assetUrl.startsWith('huphe://file/')) {
+        const filePath = decodeURIComponent(args.assetUrl.replace('huphe://file/', '').split('?')[0])
+        buffer = await readFile(filePath)
+      } else if (args.assetUrl.startsWith('https://')) {
+        const assetResponse = await fetch(args.assetUrl)
+        if (!assetResponse.ok) {
+          return { ok: false, error: `Download mislukt: ${assetResponse.status}` }
+        }
+        buffer = Buffer.from(await assetResponse.arrayBuffer())
+      } else {
+        return { ok: false, error: 'Alleen HTTPS of huphe:// URLs toegestaan.' }
+      }
+
+      const rawName = args.suggestedName ?? `HupheAI_asset_${Date.now()}`
+      const fileName = rawName.replace(/[^a-zA-Z0-9._-]/g, '_')
+      const downloadsDir = app.getPath('downloads')
+      const filePath = join(downloadsDir, fileName)
+      if (!filePath.startsWith(downloadsDir)) {
+        return { ok: false, error: 'Ongeldig bestandspad.' }
+      }
+      await writeFile(filePath, buffer)
       return { ok: true, filePath }
     } catch (err: any) {
       return { ok: false, error: err.message }
@@ -2534,6 +2571,23 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       console.log('[create-textured-mesh] Start voor recon:', args.reconstructionVersionId)
 
       let viewImages: Array<{ angle: string; imageBuffer: Buffer }> = []
+      let sourceImageBuffer: Buffer | undefined
+
+      const { data: sourceAssets } = await sb
+        .from('source_assets')
+        .select('url')
+        .eq('project_id', args.projectId)
+        .eq('type', 'original-image')
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+      if (sourceAssets?.url) {
+        try {
+          sourceImageBuffer = await resolveAssetToBuffer(sourceAssets.url)
+        } catch {
+          console.warn('[create-textured-mesh] Originele bronfoto kon niet worden geladen')
+        }
+      }
 
       if (viewIds.length > 0) {
         const { data: views } = await sb
@@ -2565,34 +2619,11 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
 
       if (viewImages.length === 0) {
-        const { data: sourceAssets } = await sb
-          .from('source_assets')
-          .select('url')
-          .eq('project_id', args.projectId)
-          .eq('type', 'original-image')
-          .limit(1)
-          .maybeSingle()
-        if (sourceAssets?.url) {
-          try {
-            viewImages.push({ angle: 'front', imageBuffer: await resolveAssetToBuffer(sourceAssets.url) })
-          } catch { /* geen bronfoto beschikbaar */ }
-        }
+        if (sourceImageBuffer) viewImages.push({ angle: 'front', imageBuffer: sourceImageBuffer })
       }
 
       if (viewImages.length === 0) throw new Error('Geen referentiebeelden beschikbaar voor texture wrapping.')
 
-      // Simpelste betrouwbare route: TRELLIS-2 levert zelf een volledig
-      // getextureerde GLB die eruitziet als de inputfoto's. Eigen projectie
-      // (texture-projector) kan niet kloppen zonder echte camera-extrinsics
-      // van de AI-gegenereerde views. Alle goedgekeurde views gaan mee
-      // (front + zijkanten + achterkant) zodat print/labels op elke kant
-      // kloppen in plaats van door de AI verzonnen te worden.
-      const sniffImageMime = (buf: Buffer): string => {
-        if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
-        if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg'
-        if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
-        return 'image/png'
-      }
       // Eén beeld per hoek (de meest recente wint), front eerst
       const anglePriority = ['front', 'hero', 'left', 'right', 'rear', 'back', 'top']
       const byAngle = new Map<string, Buffer>()
@@ -2602,25 +2633,38 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
       })
       const usedAngles = orderedViews.map(([angle]) => angle)
-      console.log('[create-textured-mesh] Trellis skin-run op views:', usedAngles.join(', '))
-      const { callFalProxy } = await import('./lib/proxy')
-      const trellisResult = orderedViews.length > 1
-        ? await callFalProxy('fal-ai/trellis-2/multi', {
-            image_urls: orderedViews.map(([, buf]) => `data:${sniffImageMime(buf)};base64,${buf.toString('base64')}`),
-            ...(recon.seed != null ? { seed: recon.seed } : {}),
-          }, jwt) as any
-        : await callFalProxy('fal-ai/trellis-2', {
-            image_base64: orderedViews[0][1].toString('base64'),
-            image_mime_type: sniffImageMime(orderedViews[0][1]),
-            ...(recon.seed != null ? { seed: recon.seed } : {}),
-          }, jwt) as any
-      const skinGlbUrl = trellisResult?.model_glb?.url
-      if (!skinGlbUrl) throw new Error('Geen GLB ontvangen van TRELLIS 2 (skin-run).')
-      console.log('[create-textured-mesh] Skin GLB downloaden...')
-      const skinRes = await fetch(skinGlbUrl)
-      if (!skinRes.ok) throw new Error('Kan getextureerde GLB niet downloaden.')
-      const texturedGlbBuffer = Buffer.from(await skinRes.arrayBuffer())
-      console.log('[create-textured-mesh] Skin GLB:', texturedGlbBuffer.length, 'bytes')
+      console.log('[create-textured-mesh] Geometry-preserving bake op views:', usedAngles.join(', '))
+
+      const baseGlbBuffer = await resolveAssetToBuffer(recon.mesh_url)
+      const [{ projectTexture }, { assertGlbGeometryPreserved }] = await Promise.all([
+        import('./lib/texture-projector'),
+        import('./lib/geometry-integrity'),
+      ])
+      const projection = await projectTexture({
+        glbBuffer: baseGlbBuffer,
+        views: orderedViews.map(([angle, imageBuffer]) => ({ angle, imageBuffer })),
+        sourceImageBuffer,
+        atlasSize: 2048,
+      })
+      if (projection.manifest.triangles_textured === 0) {
+        throw new Error('Geen enkel vlak kon betrouwbaar vanuit de canonical views worden getextureerd.')
+      }
+
+      // Deze assert is de harde grens: UV's en materiaal mogen wijzigen,
+      // maar de Basic Shape, scene transforms en het oppervlak niet.
+      const geometryIntegrity = assertGlbGeometryPreserved(
+        baseGlbBuffer,
+        projection.texturedGlbBuffer,
+      )
+      const texturedGlbBuffer = projection.texturedGlbBuffer
+      const atlasBuffer = projection.atlasBuffer
+      console.log(
+        '[create-textured-mesh] Bake gevalideerd:',
+        projection.manifest.triangles_textured,
+        '/',
+        projection.manifest.triangles_total,
+        'triangles',
+      )
 
       const textureDir = join(
         app.getPath('userData'),
@@ -2629,26 +2673,284 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         args.projectId,
         'textures',
       )
-      await mkdir(textureDir, { recursive: true })
+      const contentAssetDir = join(textureDir, 'assets')
+      await Promise.all([
+        mkdir(textureDir, { recursive: true }),
+        mkdir(contentAssetDir, { recursive: true }),
+      ])
 
       const meshPath = join(textureDir, `textured_mesh_${args.reconstructionVersionId}.glb`)
+      const atlasPath = join(textureDir, `texture_atlas_${args.reconstructionVersionId}.png`)
+      const sourceProjectionPath = projection.sourceProjectionBuffer
+        ? join(textureDir, `texture_source_projection_${args.reconstructionVersionId}.png`)
+        : null
+      const reconstructionPath = projection.reconstructionBuffer
+        ? join(textureDir, `texture_reconstruction_${args.reconstructionVersionId}.png`)
+        : null
+      const confidenceMaskPath = projection.confidenceMaskBuffer
+        ? join(textureDir, `texture_confidence_${args.reconstructionVersionId}.png`)
+        : null
+      const skinDocumentPath = join(textureDir, `skin_document_${args.reconstructionVersionId}.json`)
       const manifestPath = join(textureDir, `material_manifest_${args.reconstructionVersionId}.json`)
       const runVersion = Date.now()
       const toHupheFileUrl = (filePath: string) => `huphe://file/${encodeURIComponent(filePath)}?v=${runVersion}`
       const texturedMeshUrl = toHupheFileUrl(meshPath)
+      const textureAtlasUrl = toHupheFileUrl(atlasPath)
+      const sourceProjectionUrl = sourceProjectionPath ? toHupheFileUrl(sourceProjectionPath) : null
+      const reconstructionUrl = reconstructionPath ? toHupheFileUrl(reconstructionPath) : null
+      const confidenceMaskUrl = confidenceMaskPath ? toHupheFileUrl(confidenceMaskPath) : null
+      const skinDocumentUrl = toHupheFileUrl(skinDocumentPath)
+
+      type ContentAsset = {
+        id: string
+        sha256: string
+        mime_type: string
+        relative_path: string
+        url: string
+        roles: string[]
+        immutable: true
+      }
+      const contentAssets = new Map<string, ContentAsset>()
+      const contentWrites: Promise<void>[] = []
+      const registerContentAsset = (
+        buffer: Buffer,
+        extension: string,
+        mimeType: string,
+        role: string,
+      ): ContentAsset => {
+        const sha256 = createHash('sha256').update(buffer).digest('hex')
+        const existing = contentAssets.get(sha256)
+        if (existing) {
+          if (!existing.roles.includes(role)) existing.roles.push(role)
+          return existing
+        }
+        const relativePath = `assets/${sha256}.${extension}`
+        const filePath = join(textureDir, relativePath)
+        const asset: ContentAsset = {
+          id: `sha256:${sha256}`,
+          sha256,
+          mime_type: mimeType,
+          relative_path: relativePath,
+          url: toHupheFileUrl(filePath),
+          roles: [role],
+          immutable: true,
+        }
+        contentAssets.set(sha256, asset)
+        contentWrites.push(writeFile(filePath, buffer))
+        return asset
+      }
+
+      const sourceExtension = sourceImageBuffer?.subarray(0, 2).equals(Buffer.from([0xff, 0xd8]))
+        ? 'jpg'
+        : 'png'
+      const sourceMimeType = sourceExtension === 'jpg' ? 'image/jpeg' : 'image/png'
+      const sourceAsset = sourceImageBuffer
+        ? registerContentAsset(sourceImageBuffer, sourceExtension, sourceMimeType, 'source-reference')
+        : null
+      const texturedMeshAsset = registerContentAsset(
+        texturedGlbBuffer,
+        'glb',
+        'model/gltf-binary',
+        'textured-mesh',
+      )
+      const compositeAtlasAsset = registerContentAsset(
+        atlasBuffer,
+        'png',
+        'image/png',
+        'composite-flatmap',
+      )
+      const sourceProjectionAsset = projection.sourceProjectionBuffer
+        ? registerContentAsset(
+            projection.sourceProjectionBuffer,
+            'png',
+            'image/png',
+            'observed-source-projection',
+          )
+        : null
+      const reconstructionAsset = projection.reconstructionBuffer
+        ? registerContentAsset(
+            projection.reconstructionBuffer,
+            'png',
+            'image/png',
+            'reconstructed-hidden-surface',
+          )
+        : null
+      const confidenceAsset = projection.confidenceMaskBuffer
+        ? registerContentAsset(
+            projection.confidenceMaskBuffer,
+            'png',
+            'image/png',
+            'source-confidence-map',
+          )
+        : null
+      const isCanonicalLathe = projection.manifest.route === 'canonical-lathe-skin-v1'
+      const createdAt = new Date().toISOString()
+      const skinDocument = {
+        schema_version: 1,
+        document_type: 'product-skin',
+        project_id: args.projectId,
+        reconstruction_version_id: args.reconstructionVersionId,
+        revision: 1,
+        created_at: createdAt,
+        geometry: {
+          family: isCanonicalLathe ? 'lathe' : 'freeform',
+          mesh_asset_id: texturedMeshAsset.id,
+          mapping_model: projection.manifest.mapping_model,
+          seam: isCanonicalLathe
+            ? {
+                type: 'vertical',
+                semantic_position: 'rear',
+                u: 0,
+                angle_radians: Math.PI,
+              }
+            : { type: 'existing-uv' },
+          panels: isCanonicalLathe
+            ? [{ id: 'body-wrap', type: 'continuous-wrap', u_start: 0, u_end: 1 }]
+            : [],
+        },
+        document: {
+          width: projection.manifest.atlas_size,
+          height: projection.manifest.atlas_size,
+          color_space: 'srgb',
+          composite_asset_id: compositeAtlasAsset.id,
+          source_confidence_map_asset_id: confidenceAsset?.id ?? null,
+          generated_area_map_asset_id: reconstructionAsset?.id ?? null,
+          layers: [
+            {
+              id: 'source-reference',
+              name: 'Source reference',
+              type: 'image',
+              asset_id: sourceAsset?.id ?? null,
+              visible: false,
+              locked: true,
+              exportable: false,
+              opacity: 1,
+              blend_mode: 'normal',
+              provenance: 'observed',
+            },
+            {
+              id: 'source-projection',
+              name: 'Observed source projection',
+              type: 'image',
+              asset_id: sourceProjectionAsset?.id ?? compositeAtlasAsset.id,
+              visible: true,
+              locked: true,
+              exportable: true,
+              opacity: 1,
+              blend_mode: 'normal',
+              provenance: 'observed',
+            },
+            {
+              id: 'reconstruction',
+              name: 'Reconstructed hidden surface',
+              type: 'image',
+              asset_id: reconstructionAsset?.id ?? null,
+              mask_asset_id: confidenceAsset?.id ?? null,
+              visible: Boolean(reconstructionAsset),
+              locked: false,
+              exportable: true,
+              opacity: 1,
+              blend_mode: 'normal',
+              provenance: 'reconstructed',
+            },
+            {
+              id: 'user-design',
+              name: 'User design',
+              type: 'group',
+              children: [],
+              visible: true,
+              locked: false,
+              exportable: true,
+            },
+            {
+              id: 'semantic-elements',
+              name: 'Semantic elements',
+              type: 'group',
+              children: [],
+              visible: true,
+              locked: false,
+              exportable: true,
+            },
+            {
+              id: 'material-variation',
+              name: 'Material variation',
+              type: 'group',
+              children: [],
+              visible: true,
+              locked: false,
+              exportable: true,
+            },
+            {
+              id: 'guides',
+              name: 'Guides',
+              type: 'guide',
+              visible: true,
+              locked: true,
+              exportable: false,
+              guides: isCanonicalLathe
+                ? [
+                    { type: 'vertical-seam', u: 0, label: 'Rear seam' },
+                    { type: 'center-line', u: 0.5, label: 'Front' },
+                  ]
+                : [],
+            },
+          ],
+        },
+        assets: Array.from(contentAssets.values()),
+        provenance: {
+          source: 'original-image',
+          hidden_surface: reconstructionAsset ? 'reconstructed' : 'not-separated',
+          hidden_surface_method: projection.manifest.unknown_fill ?? null,
+          canonical_views_are_projection_inputs: !isCanonicalLathe,
+        },
+      }
       const materialManifest = {
-        route: 'trellis-skin',
-        views_used: usedAngles,
+        schema_version: 2,
+        route: projection.manifest.route,
+        source_mesh_url: recon.mesh_url,
+        views_used: projection.manifest.views_used,
+        projection: projection.manifest,
+        geometry_integrity: geometryIntegrity,
+        material_defaults: {
+          base_color_factor: [1, 1, 1, 1],
+          metallic_factor: 0,
+          roughness_factor: 0.5,
+        },
         storage: 'local',
         textured_mesh_path: meshPath,
+        textured_mesh_url: texturedMeshUrl,
+        texture_atlas_path: atlasPath,
+        texture_atlas_url: textureAtlasUrl,
+        texture_source_projection_path: sourceProjectionPath,
+        texture_source_projection_url: sourceProjectionUrl,
+        texture_reconstruction_path: reconstructionPath,
+        texture_reconstruction_url: reconstructionUrl,
+        texture_confidence_path: confidenceMaskPath,
+        texture_confidence_url: confidenceMaskUrl,
+        skin_document_path: skinDocumentPath,
+        skin_document_url: skinDocumentUrl,
+        content_addressed_assets: Array.from(contentAssets.values()),
         material_manifest_path: manifestPath,
       }
 
       console.log('[create-textured-mesh] Writing local texture output:', textureDir)
-      await Promise.all([
+      const outputWrites = [
         writeFile(meshPath, texturedGlbBuffer),
+        writeFile(atlasPath, atlasBuffer),
+        writeFile(skinDocumentPath, JSON.stringify(skinDocument, null, 2)),
         writeFile(manifestPath, JSON.stringify(materialManifest, null, 2)),
-      ])
+        ...contentWrites,
+      ]
+      if (projection.sourceProjectionBuffer && sourceProjectionPath) {
+        outputWrites.push(writeFile(sourceProjectionPath, projection.sourceProjectionBuffer))
+      }
+      if (projection.reconstructionBuffer && reconstructionPath) {
+        outputWrites.push(writeFile(reconstructionPath, projection.reconstructionBuffer))
+      }
+      if (projection.confidenceMaskBuffer && confidenceMaskPath) {
+        outputWrites.push(writeFile(confidenceMaskPath, projection.confidenceMaskBuffer))
+      }
+      await Promise.all(outputWrites)
       console.log('[create-textured-mesh] Local texture output written')
 
       await sb
@@ -2657,7 +2959,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           texture_status: 'completed',
           texture_error: null,
           textured_mesh_url: texturedMeshUrl,
-          texture_atlas_url: null,
+          texture_atlas_url: textureAtlasUrl,
           material_manifest: materialManifest,
         })
         .eq('id', args.reconstructionVersionId)
@@ -2667,7 +2969,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         ok: true,
         reconstructionVersionId: args.reconstructionVersionId,
         texturedMeshUrl,
-        textureAtlasUrl: null,
+        textureAtlasUrl,
+        skinDocumentUrl,
         manifest: materialManifest,
         latencyMs: Date.now() - startTime,
       }
@@ -3629,7 +3932,11 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const jwt = getJwt()
     if (!jwt) return { ok: false }
     const sb = getUserClient(jwt)
-    await sb.from('final_render_versions').update({ layer_metadata: args.layerMetadata }).eq('id', args.versionId)
+    const { error } = await sb
+      .from('final_render_versions')
+      .update({ layer_metadata: args.layerMetadata })
+      .eq('id', args.versionId)
+    if (error) return { ok: false, error: error.message }
     return { ok: true }
   })
 
@@ -3862,7 +4169,11 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (orbitRunId) marbleSearchDirs.push(orbitRunsDir(args.projectId, orbitRunId))
     if (activeLocalPath && !marbleSearchDirs.includes(activeLocalPath)) marbleSearchDirs.push(activeLocalPath)
     if (args.renderVersionId) marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId))
-    marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId))
+    // Een projectroot bevat legacy-assets zonder betrouwbare foto-identiteit.
+    // Gebruik die alleen wanneer er bewust geen archive-versie is opgegeven.
+    if (!args.renderVersionId) {
+      marbleSearchDirs.push(join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId))
+    }
 
     // Een render kan meerdere orbit-runs hebben. De nieuwste run bevat niet
     // noodzakelijk neutral.png, dus doorzoek alle runs van dezelfde render.
@@ -5126,23 +5437,82 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     baseAlignment?: Record<string, unknown> | null
   }) => {
     try {
-      const { writeFile, mkdir } = await import('fs/promises')
+      const alignmentRenderVersionId = typeof args.alignment?.renderVersionId === 'string'
+        ? args.alignment.renderVersionId
+        : undefined
+      if (
+        args.renderVersionId &&
+        alignmentRenderVersionId &&
+        alignmentRenderVersionId !== args.renderVersionId
+      ) {
+        return { ok: false, error: 'Splat hoort bij een andere archive-foto en is niet opgeslagen.' }
+      }
+      const alignment = args.renderVersionId
+        ? { ...args.alignment, renderVersionId: args.renderVersionId }
+        : args.alignment
+      const baseAlignment = args.baseAlignment && args.renderVersionId
+        ? { ...args.baseAlignment, renderVersionId: args.renderVersionId }
+        : args.baseAlignment
       const dir = args.renderVersionId
         ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId)
         : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
-      await mkdir(dir, { recursive: true })
+      mkdirSync(dir, { recursive: true })
       const scenePath = join(dir, 'scene.json')
       const data = JSON.stringify({
         version: 2,
         savedAt: new Date().toISOString(),
         renderVersionId: args.renderVersionId ?? null,
-        alignment: args.alignment,
-        baseAlignment: args.baseAlignment ?? null,
+        alignment,
+        baseAlignment: baseAlignment ?? null,
       }, null, 2)
-      await writeFile(scenePath, data, 'utf8')
+      writeFileSync(scenePath, data, 'utf8')
       return { ok: true }
     } catch (err: any) {
       return { ok: false, error: err?.message }
+    }
+  })
+
+  // beforeunload kan niet wachten op een async ipcRenderer.invoke. Deze
+  // synchrone variant schrijft alleen het kleine scene.json-bestand en zorgt
+  // dat de laatste handmatige sliderstand ook bij app-close bewaard blijft.
+  ipcMain.on('product-studio:save-scene-alignment-sync', (event, args: {
+    projectId: string
+    renderVersionId?: string
+    alignment: Record<string, unknown>
+    baseAlignment?: Record<string, unknown> | null
+  }) => {
+    try {
+      const alignmentRenderVersionId = typeof args.alignment?.renderVersionId === 'string'
+        ? args.alignment.renderVersionId
+        : undefined
+      if (
+        args.renderVersionId &&
+        alignmentRenderVersionId &&
+        alignmentRenderVersionId !== args.renderVersionId
+      ) {
+        event.returnValue = { ok: false, error: 'Splat hoort bij een andere archive-foto en is niet opgeslagen.' }
+        return
+      }
+      const alignment = args.renderVersionId
+        ? { ...args.alignment, renderVersionId: args.renderVersionId }
+        : args.alignment
+      const baseAlignment = args.baseAlignment && args.renderVersionId
+        ? { ...args.baseAlignment, renderVersionId: args.renderVersionId }
+        : args.baseAlignment
+      const dir = args.renderVersionId
+        ? join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId, args.renderVersionId)
+        : join(app.getPath('userData'), 'product-studio', 'splat-validation', args.projectId)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'scene.json'), JSON.stringify({
+        version: 2,
+        savedAt: new Date().toISOString(),
+        renderVersionId: args.renderVersionId ?? null,
+        alignment,
+        baseAlignment: baseAlignment ?? null,
+      }, null, 2), 'utf8')
+      event.returnValue = { ok: true }
+    } catch (err: any) {
+      event.returnValue = { ok: false, error: err?.message }
     }
   })
 
@@ -5168,11 +5538,24 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
       const alignmentAny = alignment as Record<string, any> | undefined
       const baseAlignmentAny = baseAlignment as Record<string, any> | undefined
-      const plyPath = decodeHupheFileUrl(alignmentAny?.plyPath)
-      const splatPathFromAlignment = decodeHupheFileUrl(alignmentAny?.splatPath) ?? decodeHupheFileUrl(alignmentAny?.splatUrl)
-      const spzPath = decodeHupheFileUrl(alignmentAny?.spzPath)
+      if (
+        args.renderVersionId &&
+        alignmentAny?.renderVersionId &&
+        alignmentAny.renderVersionId !== args.renderVersionId
+      ) {
+        return { ok: false, error: 'Splat-koppeling in scene.json hoort bij een andere archive-foto.' }
+      }
+      const linkedAlignment = args.renderVersionId
+        ? { ...alignmentAny, renderVersionId: args.renderVersionId }
+        : alignmentAny
+      const linkedBaseAlignment = baseAlignmentAny && args.renderVersionId
+        ? { ...baseAlignmentAny, renderVersionId: args.renderVersionId }
+        : baseAlignmentAny
+      const plyPath = decodeHupheFileUrl(linkedAlignment?.plyPath)
+      const splatPathFromAlignment = decodeHupheFileUrl(linkedAlignment?.splatPath) ?? decodeHupheFileUrl(linkedAlignment?.splatUrl)
+      const spzPath = decodeHupheFileUrl(linkedAlignment?.spzPath)
       const isMarbleAlignment =
-        alignmentAny?.source === 'marble' ||
+        linkedAlignment?.source === 'marble' ||
         Boolean(spzPath?.endsWith('/world.spz')) ||
         Boolean(splatPathFromAlignment && /\/world(_hq|_preview)?\.splat$/.test(splatPathFromAlignment))
 
@@ -5184,8 +5567,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         return {
           ok: true,
           renderVersionId: parsed.renderVersionId ?? null,
-          alignment: { ...alignmentAny, plyPath, splatUrl },
-          baseAlignment: baseAlignmentAny ? { ...baseAlignmentAny, splatUrl } : null,
+          alignment: { ...linkedAlignment, plyPath, splatUrl },
+          baseAlignment: linkedBaseAlignment ? { ...linkedBaseAlignment, splatUrl } : null,
         }
       }
 
@@ -5197,8 +5580,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         return {
           ok: true,
           renderVersionId: parsed.renderVersionId ?? null,
-          alignment: { ...alignmentAny, splatUrl, spzPath },
-          baseAlignment: baseAlignmentAny ? { ...baseAlignmentAny, splatUrl, spzPath } : null,
+          alignment: { ...linkedAlignment, splatUrl, spzPath },
+          baseAlignment: linkedBaseAlignment ? { ...linkedBaseAlignment, splatUrl, spzPath } : null,
         }
       }
 

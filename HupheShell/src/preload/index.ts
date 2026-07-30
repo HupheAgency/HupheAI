@@ -267,6 +267,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:upload-glb', args),
     downloadPng: (args: { imageUrl: string; suggestedName?: string }) =>
       ipcRenderer.invoke('product-studio:download-png', args),
+    downloadAsset: (args: { assetUrl: string; suggestedName?: string }) =>
+      ipcRenderer.invoke('product-studio:download-asset', args),
     uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective'; dataUrl: string }) =>
       ipcRenderer.invoke('product-studio:upload-render-pass', args),
     generateReferenceViews: (args: { projectId: string; sourceAssetId: string; targetViews: Array<'front' | 'left' | 'right' | 'rear' | 'top'>; productNotes?: string }) =>
@@ -367,6 +369,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('product-studio:train-splat', args),
     saveSceneAlignment: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown>; baseAlignment?: Record<string, unknown> | null }) =>
       ipcRenderer.invoke('product-studio:save-scene-alignment', args),
+    saveSceneAlignmentSync: (args: { projectId: string; renderVersionId?: string; alignment: Record<string, unknown>; baseAlignment?: Record<string, unknown> | null }) =>
+      ipcRenderer.sendSync('product-studio:save-scene-alignment-sync', args),
     loadSceneAlignment: (args: { projectId: string; renderVersionId?: string }) =>
       ipcRenderer.invoke('product-studio:load-scene-alignment', args),
     reconvertSplat: (args: { plyPath: string; alphaThreshold?: number; scaleIqrFactor?: number; positionSigma?: number }) =>

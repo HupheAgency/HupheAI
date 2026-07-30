@@ -41,7 +41,7 @@ function extractMesh(json: any, bin: Buffer): ParsedMesh {
     const componentType = acc.componentType
     const components = acc.type === 'VEC3' ? 3 : acc.type === 'VEC2' ? 2 : 1
     const stride = bv.byteStride || 0
-    const bytesPerElement = componentType === 5126 ? 4 : 2
+    const bytesPerElement = componentType === 5126 || componentType === 5125 ? 4 : 2
     const tightStride = components * bytesPerElement
 
     if (stride > 0 && stride !== tightStride) {
@@ -104,7 +104,14 @@ function extractMesh(json: any, bin: Buffer): ParsedMesh {
   return { positions, normals, uvs, indices, triCount }
 }
 
-function computeBBox(mesh: ParsedMesh): { cx: number; cy: number; cz: number; radius: number } {
+interface MeshBounds {
+  minX: number; minY: number; minZ: number
+  maxX: number; maxY: number; maxZ: number
+  cx: number; cy: number; cz: number
+  radius: number
+}
+
+function computeBBox(mesh: ParsedMesh): MeshBounds {
   let minX = Infinity, minY = Infinity, minZ = Infinity
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
   const vCount = mesh.positions.length / 3
@@ -116,15 +123,26 @@ function computeBBox(mesh: ParsedMesh): { cx: number; cy: number; cz: number; ra
   }
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2
   const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ
-  return { cx, cy, cz, radius: Math.sqrt(dx * dx + dy * dy + dz * dz) / 2 }
+  return {
+    minX, minY, minZ, maxX, maxY, maxZ,
+    cx, cy, cz,
+    radius: Math.sqrt(dx * dx + dy * dy + dz * dz) / 2,
+  }
 }
 
 interface Camera {
+  angle: string
   dx: number; dy: number; dz: number
   rx: number; ry: number; rz: number
   ux: number; uy: number; uz: number
   pixels: Buffer; w: number; h: number
+  foreground: Uint8Array
   bgR: number; bgG: number; bgB: number
+  objectMinX: number; objectMinY: number
+  objectMaxX: number; objectMaxY: number
+  meshMinR: number; meshMaxR: number
+  meshMinU: number; meshMaxU: number
+  depth: Float32Array
 }
 
 function detectBackground(pixels: Buffer, w: number, h: number): [number, number, number] {
@@ -146,7 +164,136 @@ function isBackground(pixels: Buffer, off: number, bgR: number, bgG: number, bgB
   return (dr * dr + dg * dg + db * db) < threshold * threshold
 }
 
-function buildCamera(cfg: CameraConfig, pixels: Buffer, w: number, h: number, bgR: number, bgG: number, bgB: number): Camera {
+function detectObjectSilhouette(
+  pixels: Buffer,
+  w: number,
+  h: number,
+  bgR: number,
+  bgG: number,
+  bgB: number,
+): { minX: number; minY: number; maxX: number; maxY: number; foreground: Uint8Array } {
+  const pixelCount = w * h
+  const candidate = new Uint8Array(pixelCount)
+  const threshold = 22
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const off = (y * w + x) * 4
+      if (!isBackground(pixels, off, bgR, bgG, bgB, threshold)) {
+        candidate[y * w + x] = 1
+      }
+    }
+  }
+
+  const labels = new Int32Array(pixelCount)
+  labels.fill(-1)
+  const queue = new Int32Array(pixelCount)
+  const components: Array<{
+    label: number
+    count: number
+    minX: number
+    minY: number
+    maxX: number
+    maxY: number
+  }> = []
+  let nextLabel = 0
+
+  for (let seed = 0; seed < pixelCount; seed++) {
+    if (!candidate[seed] || labels[seed] !== -1) continue
+    let read = 0
+    let write = 0
+    queue[write++] = seed
+    labels[seed] = nextLabel
+    let count = 0
+    let minX = w
+    let minY = h
+    let maxX = -1
+    let maxY = -1
+
+    while (read < write) {
+      const index = queue[read++]
+      const x = index % w
+      const y = Math.floor(index / w)
+      count++
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+
+      for (let oy = -1; oy <= 1; oy++) {
+        const ny = y + oy
+        if (ny < 0 || ny >= h) continue
+        for (let ox = -1; ox <= 1; ox++) {
+          if (ox === 0 && oy === 0) continue
+          const nx = x + ox
+          if (nx < 0 || nx >= w) continue
+          const neighbor = ny * w + nx
+          if (!candidate[neighbor] || labels[neighbor] !== -1) continue
+          labels[neighbor] = nextLabel
+          queue[write++] = neighbor
+        }
+      }
+    }
+
+    components.push({ label: nextLabel, count, minX, minY, maxX, maxY })
+    nextLabel++
+  }
+
+  const minimumPixels = Math.max(64, Math.round(pixelCount * 0.001))
+  const centerMinX = w * 0.2
+  const centerMaxX = w * 0.8
+  const centerMinY = h * 0.03
+  const centerMaxY = h * 0.97
+  const selected = components
+    .filter((component) =>
+      component.count >= minimumPixels
+      && component.maxX >= centerMinX
+      && component.minX <= centerMaxX
+      && component.maxY >= centerMinY
+      && component.minY <= centerMaxY,
+    )
+    .sort((left, right) => right.count - left.count)[0]
+
+  if (!selected) {
+    throw new Error('Canonical view bevat geen herkenbaar product tegen de achtergrond.')
+  }
+
+  // The product can be white against a near-white background. The connected
+  // outline is reliable, so fill its horizontal interior instead of treating
+  // white porcelain as missing texture.
+  const foreground = new Uint8Array(pixelCount)
+  for (let y = selected.minY; y <= selected.maxY; y++) {
+    let rowMin = w
+    let rowMax = -1
+    for (let x = selected.minX; x <= selected.maxX; x++) {
+      if (labels[y * w + x] !== selected.label) continue
+      rowMin = Math.min(rowMin, x)
+      rowMax = Math.max(rowMax, x)
+    }
+    if (rowMax < rowMin) continue
+    for (let x = rowMin; x <= rowMax; x++) foreground[y * w + x] = 1
+  }
+
+  return {
+    minX: selected.minX,
+    minY: selected.minY,
+    maxX: selected.maxX,
+    maxY: selected.maxY,
+    foreground,
+  }
+}
+
+function buildCamera(
+  angle: string,
+  cfg: CameraConfig,
+  pixels: Buffer,
+  w: number,
+  h: number,
+  bgR: number,
+  bgG: number,
+  bgB: number,
+  mesh: ParsedMesh,
+  bounds: MeshBounds,
+): Camera {
   const len = Math.sqrt(cfg.dx * cfg.dx + cfg.dy * cfg.dy + cfg.dz * cfg.dz)
   const dx = cfg.dx / len, dy = cfg.dy / len, dz = cfg.dz / len
   // right = dir × up
@@ -159,12 +306,144 @@ function buildCamera(cfg: CameraConfig, pixels: Buffer, w: number, h: number, bg
   const uy = (rz * dx - rx * dz)
   const uz = (rx * dy - ry * dx)
   const uLen = Math.sqrt(ux * ux + uy * uy + uz * uz)
+  const objectBounds = detectObjectSilhouette(pixels, w, h, bgR, bgG, bgB)
+  let meshMinR = Infinity
+  let meshMaxR = -Infinity
+  let meshMinU = Infinity
+  let meshMaxU = -Infinity
+  for (let i = 0; i < mesh.positions.length; i += 3) {
+    const x = mesh.positions[i] - bounds.cx
+    const y = mesh.positions[i + 1] - bounds.cy
+    const z = mesh.positions[i + 2] - bounds.cz
+    const projectedR = x * (rx / rLen) + y * (ry / rLen) + z * (rz / rLen)
+    const projectedU = x * (ux / uLen) + y * (uy / uLen) + z * (uz / uLen)
+    meshMinR = Math.min(meshMinR, projectedR)
+    meshMaxR = Math.max(meshMaxR, projectedR)
+    meshMinU = Math.min(meshMinU, projectedU)
+    meshMaxU = Math.max(meshMaxU, projectedU)
+  }
   return {
+    angle,
     dx, dy, dz,
     rx: rx / rLen, ry: ry / rLen, rz: rz / rLen,
     ux: ux / uLen, uy: uy / uLen, uz: uz / uLen,
-    pixels, w, h, bgR, bgG, bgB,
+    pixels, w, h, foreground: objectBounds.foreground, bgR, bgG, bgB,
+    objectMinX: objectBounds.minX,
+    objectMinY: objectBounds.minY,
+    objectMaxX: objectBounds.maxX,
+    objectMaxY: objectBounds.maxY,
+    meshMinR, meshMaxR, meshMinU, meshMaxU,
+    depth: new Float32Array(w * h).fill(Infinity),
   }
+}
+
+function projectPoint(
+  camera: Camera,
+  bounds: MeshBounds,
+  x: number,
+  y: number,
+  z: number,
+): { x: number; y: number; depth: number } {
+  const px = x - bounds.cx
+  const py = y - bounds.cy
+  const pz = z - bounds.cz
+  const projectedR = px * camera.rx + py * camera.ry + pz * camera.rz
+  const projectedU = px * camera.ux + py * camera.uy + pz * camera.uz
+  const rangeR = Math.max(1e-8, camera.meshMaxR - camera.meshMinR)
+  const rangeU = Math.max(1e-8, camera.meshMaxU - camera.meshMinU)
+  return {
+    x: camera.objectMinX
+      + ((projectedR - camera.meshMinR) / rangeR) * (camera.objectMaxX - camera.objectMinX),
+    y: camera.objectMaxY
+      - ((projectedU - camera.meshMinU) / rangeU) * (camera.objectMaxY - camera.objectMinY),
+    depth: px * camera.dx + py * camera.dy + pz * camera.dz,
+  }
+}
+
+function triangleVertexIndices(mesh: ParsedMesh, triangle: number): [number, number, number] {
+  return mesh.indices
+    ? [mesh.indices[triangle * 3], mesh.indices[triangle * 3 + 1], mesh.indices[triangle * 3 + 2]]
+    : [triangle * 3, triangle * 3 + 1, triangle * 3 + 2]
+}
+
+function barycentric(
+  px: number,
+  py: number,
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  c: { x: number; y: number },
+): [number, number, number] | null {
+  const denominator = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y)
+  if (Math.abs(denominator) < 1e-10) return null
+  const w0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / denominator
+  const w1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / denominator
+  return [w0, w1, 1 - w0 - w1]
+}
+
+function buildDepthBuffer(mesh: ParsedMesh, bounds: MeshBounds, camera: Camera): void {
+  for (let triangle = 0; triangle < mesh.triCount; triangle++) {
+    const [i0, i1, i2] = triangleVertexIndices(mesh, triangle)
+    const projected = [i0, i1, i2].map(index => projectPoint(
+      camera,
+      bounds,
+      mesh.positions[index * 3],
+      mesh.positions[index * 3 + 1],
+      mesh.positions[index * 3 + 2],
+    ))
+    const minX = Math.max(0, Math.floor(Math.min(...projected.map(point => point.x))))
+    const maxX = Math.min(camera.w - 1, Math.ceil(Math.max(...projected.map(point => point.x))))
+    const minY = Math.max(0, Math.floor(Math.min(...projected.map(point => point.y))))
+    const maxY = Math.min(camera.h - 1, Math.ceil(Math.max(...projected.map(point => point.y))))
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const weights = barycentric(x + 0.5, y + 0.5, projected[0], projected[1], projected[2])
+        if (!weights || weights.some(weight => weight < -0.001)) continue
+        const depth = projected[0].depth * weights[0]
+          + projected[1].depth * weights[1]
+          + projected[2].depth * weights[2]
+        const offset = y * camera.w + x
+        if (depth < camera.depth[offset]) camera.depth[offset] = depth
+      }
+    }
+  }
+}
+
+function dilateAtlas(source: Buffer, size: number, passes = 10): Buffer {
+  let current = Buffer.from(source)
+  for (let pass = 0; pass < passes; pass++) {
+    const next = Buffer.from(current)
+    let changed = false
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const offset = (y * size + x) * 4
+        if (current[offset + 3] !== 0) continue
+        let count = 0
+        let r = 0
+        let g = 0
+        let b = 0
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const nx = x + dx
+          const ny = y + dy
+          if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue
+          const neighbor = (ny * size + nx) * 4
+          if (current[neighbor + 3] === 0) continue
+          r += current[neighbor]
+          g += current[neighbor + 1]
+          b += current[neighbor + 2]
+          count++
+        }
+        if (!count) continue
+        next[offset] = Math.round(r / count)
+        next[offset + 1] = Math.round(g / count)
+        next[offset + 2] = Math.round(b / count)
+        next[offset + 3] = 255
+        changed = true
+      }
+    }
+    current = next
+    if (!changed) break
+  }
+  return current
 }
 
 const DIGIT_GLYPHS: Record<string, number[]> = {
@@ -740,18 +1019,400 @@ export async function applyDebugTexture(glbBuffer: Buffer, atlasSize = 2048): Pr
 export interface TextureProjectionInput {
   glbBuffer: Buffer
   views: Array<{ angle: string; imageBuffer: Buffer }>
+  sourceImageBuffer?: Buffer
   atlasSize?: number
 }
 
 export interface TextureProjectionOutput {
   texturedGlbBuffer: Buffer
   atlasBuffer: Buffer
+  sourceProjectionBuffer?: Buffer
+  reconstructionBuffer?: Buffer
+  confidenceMaskBuffer?: Buffer
   manifest: {
+    route: 'canonical-lathe-skin-v1' | 'geometry-preserving-multiview-bake'
+    mapping_model: 'cylindrical-y' | 'existing-uv'
     atlas_size: number
     views_used: string[]
     triangles_textured: number
     triangles_total: number
+    atlas_texels_filled: number
+    atlas_coverage: number
+    triangle_coverage: number
+    fallback_color: [number, number, number]
+    view_bounds: Array<{ angle: string; minX: number; minY: number; maxX: number; maxY: number }>
+    shape_analysis?: {
+      rotational_confidence: number
+      width_depth_ratio: number
+      height_diameter_ratio: number
+      seam_angle_radians: number
+    }
+    source_confidence?: number
+    unknown_fill?: 'mirrored-front'
   }
+}
+
+interface LatheShapeAnalysis {
+  isLathe: boolean
+  rotationalConfidence: number
+  widthDepthRatio: number
+  heightDiameterRatio: number
+}
+
+function analyzeLatheShape(mesh: ParsedMesh, bbox: MeshBounds): LatheShapeAnalysis {
+  const width = Math.max(1e-8, bbox.maxX - bbox.minX)
+  const height = Math.max(1e-8, bbox.maxY - bbox.minY)
+  const depth = Math.max(1e-8, bbox.maxZ - bbox.minZ)
+  const widthDepthRatio = width / depth
+  const diameter = (width + depth) / 2
+  const heightDiameterRatio = height / Math.max(1e-8, diameter)
+
+  // Compare the radial envelope in horizontal slices. A lathed mesh should have
+  // comparable X/Z radii throughout most of its height, not only in its bbox.
+  const slices = 24
+  const minRadiusX = new Float64Array(slices)
+  const minRadiusZ = new Float64Array(slices)
+  const maxRadiusX = new Float64Array(slices)
+  const maxRadiusZ = new Float64Array(slices)
+  minRadiusX.fill(Infinity)
+  minRadiusZ.fill(Infinity)
+
+  const vertexCount = mesh.positions.length / 3
+  for (let index = 0; index < vertexCount; index++) {
+    const x = Math.abs(mesh.positions[index * 3] - bbox.cx)
+    const y = mesh.positions[index * 3 + 1]
+    const z = Math.abs(mesh.positions[index * 3 + 2] - bbox.cz)
+    const normalizedY = (y - bbox.minY) / height
+    const slice = Math.min(slices - 1, Math.max(0, Math.floor(normalizedY * slices)))
+    minRadiusX[slice] = Math.min(minRadiusX[slice], x)
+    minRadiusZ[slice] = Math.min(minRadiusZ[slice], z)
+    maxRadiusX[slice] = Math.max(maxRadiusX[slice], x)
+    maxRadiusZ[slice] = Math.max(maxRadiusZ[slice], z)
+  }
+
+  let comparableSlices = 0
+  let radialScore = 0
+  for (let slice = 0; slice < slices; slice++) {
+    const radiusX = maxRadiusX[slice]
+    const radiusZ = maxRadiusZ[slice]
+    if (radiusX <= 1e-6 || radiusZ <= 1e-6) continue
+    const ratio = Math.min(radiusX, radiusZ) / Math.max(radiusX, radiusZ)
+    radialScore += ratio
+    comparableSlices++
+  }
+  radialScore = comparableSlices > 0 ? radialScore / comparableSlices : 0
+
+  const bboxScore = Math.min(width, depth) / Math.max(width, depth)
+  const uprightScore = Math.min(1, Math.max(0, (heightDiameterRatio - 0.65) / 0.75))
+  const rotationalConfidence = bboxScore * 0.4 + radialScore * 0.45 + uprightScore * 0.15
+
+  return {
+    isLathe:
+      widthDepthRatio >= 0.72 &&
+      widthDepthRatio <= 1.38 &&
+      heightDiameterRatio >= 0.9 &&
+      rotationalConfidence >= 0.78,
+    rotationalConfidence,
+    widthDepthRatio,
+    heightDiameterRatio,
+  }
+}
+
+function createCylindricalYUVs(mesh: ParsedMesh, bbox: MeshBounds): Float32Array {
+  const vertexCount = mesh.positions.length / 3
+  const height = Math.max(1e-8, bbox.maxY - bbox.minY)
+  const uvs = new Float32Array(vertexCount * 2)
+
+  for (let index = 0; index < vertexCount; index++) {
+    const x = mesh.positions[index * 3] - bbox.cx
+    const y = mesh.positions[index * 3 + 1]
+    const z = mesh.positions[index * 3 + 2] - bbox.cz
+    // Front is +Z. The single seam therefore sits at the semantic rear (-Z).
+    const theta = Math.atan2(x, z)
+    uvs[index * 2] = (theta + Math.PI) / (Math.PI * 2)
+    uvs[index * 2 + 1] = Math.min(1, Math.max(0, (y - bbox.minY) / height))
+  }
+
+  return uvs
+}
+
+function medianForegroundColor(
+  pixels: Buffer,
+  foreground: Uint8Array,
+  width: number,
+  height: number,
+): [number, number, number] {
+  const red: number[] = []
+  const green: number[] = []
+  const blue: number[] = []
+  const step = Math.max(1, Math.floor(Math.sqrt((width * height) / 16000)))
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      if (!foreground[y * width + x]) continue
+      const offset = (y * width + x) * 4
+      red.push(pixels[offset])
+      green.push(pixels[offset + 1])
+      blue.push(pixels[offset + 2])
+    }
+  }
+  if (red.length === 0) return [224, 224, 224]
+  red.sort((a, b) => a - b)
+  green.sort((a, b) => a - b)
+  blue.sort((a, b) => a - b)
+  const middle = Math.floor(red.length / 2)
+  return [red[middle], green[middle], blue[middle]]
+}
+
+function sampleBilinear(
+  pixels: Buffer,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+): [number, number, number, number] {
+  const x0 = Math.max(0, Math.min(width - 1, Math.floor(x)))
+  const y0 = Math.max(0, Math.min(height - 1, Math.floor(y)))
+  const x1 = Math.min(width - 1, x0 + 1)
+  const y1 = Math.min(height - 1, y0 + 1)
+  const tx = Math.max(0, Math.min(1, x - x0))
+  const ty = Math.max(0, Math.min(1, y - y0))
+  const result: number[] = []
+  for (let channel = 0; channel < 4; channel++) {
+    const top =
+      pixels[(y0 * width + x0) * 4 + channel] * (1 - tx) +
+      pixels[(y0 * width + x1) * 4 + channel] * tx
+    const bottom =
+      pixels[(y1 * width + x0) * 4 + channel] * (1 - tx) +
+      pixels[(y1 * width + x1) * 4 + channel] * tx
+    result[channel] = Math.round(top * (1 - ty) + bottom * ty)
+  }
+  return result as [number, number, number, number]
+}
+
+async function projectCanonicalLatheSkin(
+  glbBuffer: Buffer,
+  mesh: ParsedMesh,
+  bbox: MeshBounds,
+  shapeAnalysis: LatheShapeAnalysis,
+  sourceImageBuffer: Buffer,
+  atlasSize: number,
+): Promise<TextureProjectionOutput> {
+  const sharp = (await import('sharp')).default
+  const metadata = await sharp(sourceImageBuffer).metadata()
+  const sourceWidth = metadata.width ?? 1024
+  const sourceHeight = metadata.height ?? 1024
+  const sourcePixels = await sharp(sourceImageBuffer)
+    .resize({ width: sourceWidth, height: sourceHeight })
+    .raw()
+    .ensureAlpha()
+    .toBuffer()
+  const [bgR, bgG, bgB] = detectBackground(sourcePixels, sourceWidth, sourceHeight)
+  const silhouette = detectObjectSilhouette(
+    sourcePixels,
+    sourceWidth,
+    sourceHeight,
+    bgR,
+    bgG,
+    bgB,
+  )
+  const fallbackColor = medianForegroundColor(
+    sourcePixels,
+    silhouette.foreground,
+    sourceWidth,
+    sourceHeight,
+  )
+
+  const rowMin = new Int32Array(sourceHeight)
+  const rowMax = new Int32Array(sourceHeight)
+  rowMin.fill(sourceWidth)
+  rowMax.fill(-1)
+  for (let y = 0; y < sourceHeight; y++) {
+    for (let x = silhouette.minX; x <= silhouette.maxX; x++) {
+      if (!silhouette.foreground[y * sourceWidth + x]) continue
+      rowMin[y] = Math.min(rowMin[y], x)
+      rowMax[y] = Math.max(rowMax[y], x)
+    }
+  }
+
+  const nearestValidRow = new Int32Array(sourceHeight)
+  let previous = -1
+  for (let y = 0; y < sourceHeight; y++) {
+    if (rowMax[y] >= rowMin[y]) previous = y
+    nearestValidRow[y] = previous
+  }
+  let next = -1
+  for (let y = sourceHeight - 1; y >= 0; y--) {
+    if (rowMax[y] >= rowMin[y]) next = y
+    if (nearestValidRow[y] < 0 || (next >= 0 && next - y < y - nearestValidRow[y])) {
+      nearestValidRow[y] = next
+    }
+  }
+
+  const atlas = Buffer.alloc(atlasSize * atlasSize * 4)
+  const sourceProjection = Buffer.alloc(atlasSize * atlasSize * 4)
+  const reconstruction = Buffer.alloc(atlasSize * atlasSize * 4)
+  const confidence = Buffer.alloc(atlasSize * atlasSize * 4)
+  let confidenceSum = 0
+  for (let py = 0; py < atlasSize; py++) {
+    const normalizedTopToBottom = py / Math.max(1, atlasSize - 1)
+    const desiredSourceY =
+      silhouette.minY +
+      normalizedTopToBottom * Math.max(1, silhouette.maxY - silhouette.minY)
+    const sourceYIndex = Math.max(0, Math.min(sourceHeight - 1, Math.round(desiredSourceY)))
+    const validRow = nearestValidRow[sourceYIndex]
+    const minX = validRow >= 0 ? rowMin[validRow] : silhouette.minX
+    const maxX = validRow >= 0 ? rowMax[validRow] : silhouette.maxX
+    const centerX = (minX + maxX) / 2
+    const rowHalfWidth = Math.max(0.5, (maxX - minX) / 2)
+    // Tangent samples have zero source confidence. Pull them slightly inward
+    // so antialiasing/background pixels at the silhouette edge do not become
+    // full-height bands in the cylindrical skin.
+    const edgeInset = Math.min(
+      Math.max(2, rowHalfWidth * 0.025),
+      Math.max(0, rowHalfWidth - 0.5)
+    )
+    const halfWidth = Math.max(0.5, rowHalfWidth - edgeInset)
+
+    for (let px = 0; px < atlasSize; px++) {
+      const u = px / Math.max(1, atlasSize - 1)
+      const theta = u * Math.PI * 2 - Math.PI
+      // sin(theta) projects the cylindrical surface into the source silhouette.
+      // On the hidden half this becomes a deterministic mirrored continuation.
+      const sourceX = centerX + Math.sin(theta) * halfWidth
+      const sample = sampleBilinear(sourcePixels, sourceWidth, sourceHeight, sourceX, desiredSourceY)
+      const offset = (py * atlasSize + px) * 4
+      atlas[offset] = sample[0]
+      atlas[offset + 1] = sample[1]
+      atlas[offset + 2] = sample[2]
+      atlas[offset + 3] = 255
+
+      const directConfidence = Math.max(0, Math.cos(theta))
+      const confidenceByte = Math.round(directConfidence * 255)
+      if (confidenceByte > 0) {
+        sourceProjection[offset] = sample[0]
+        sourceProjection[offset + 1] = sample[1]
+        sourceProjection[offset + 2] = sample[2]
+        sourceProjection[offset + 3] = confidenceByte
+      }
+      const reconstructionAlpha = 255 - confidenceByte
+      if (reconstructionAlpha > 0) {
+        reconstruction[offset] = sample[0]
+        reconstruction[offset + 1] = sample[1]
+        reconstruction[offset + 2] = sample[2]
+        reconstruction[offset + 3] = reconstructionAlpha
+      }
+      confidence[offset] = confidenceByte
+      confidence[offset + 1] = confidenceByte
+      confidence[offset + 2] = confidenceByte
+      confidence[offset + 3] = 255
+      confidenceSum += directConfidence
+    }
+  }
+
+  const [
+    atlasBuffer,
+    sourceProjectionBuffer,
+    reconstructionBuffer,
+    confidenceMaskBuffer,
+  ] = await Promise.all([
+    sharp(atlas, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
+      .png({ compressionLevel: 6 })
+      .toBuffer(),
+    sharp(sourceProjection, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
+      .png({ compressionLevel: 6 })
+      .toBuffer(),
+    sharp(reconstruction, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
+      .png({ compressionLevel: 6 })
+      .toBuffer(),
+    sharp(confidence, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
+      .png({ compressionLevel: 6 })
+      .toBuffer(),
+  ])
+
+  const cylindricalUVs = createCylindricalYUVs(mesh, bbox)
+  const rewrappedGlb = buildGlbWithNewUVs(glbBuffer, cylindricalUVs)
+  const { json: rewrappedJson, binChunk: rewrappedBin } = parseGlb(rewrappedGlb)
+  const texturedGlbBuffer = buildTexturedGlb(
+    rewrappedGlb,
+    rewrappedJson,
+    rewrappedBin,
+    atlasBuffer,
+  )
+  const pixelCount = atlasSize * atlasSize
+
+  return {
+    texturedGlbBuffer,
+    atlasBuffer,
+    sourceProjectionBuffer,
+    reconstructionBuffer,
+    confidenceMaskBuffer,
+    manifest: {
+      route: 'canonical-lathe-skin-v1',
+      mapping_model: 'cylindrical-y',
+      atlas_size: atlasSize,
+      views_used: ['original'],
+      triangles_textured: mesh.triCount,
+      triangles_total: mesh.triCount,
+      atlas_texels_filled: pixelCount,
+      atlas_coverage: 1,
+      triangle_coverage: 1,
+      fallback_color: fallbackColor,
+      view_bounds: [{
+        angle: 'original',
+        minX: silhouette.minX,
+        minY: silhouette.minY,
+        maxX: silhouette.maxX,
+        maxY: silhouette.maxY,
+      }],
+      shape_analysis: {
+        rotational_confidence: shapeAnalysis.rotationalConfidence,
+        width_depth_ratio: shapeAnalysis.widthDepthRatio,
+        height_diameter_ratio: shapeAnalysis.heightDiameterRatio,
+        seam_angle_radians: Math.PI,
+      },
+      source_confidence: confidenceSum / pixelCount,
+      unknown_fill: 'mirrored-front',
+    },
+  }
+}
+
+function foregroundMedianColor(cameras: Camera[]): [number, number, number] {
+  const red: number[] = []
+  const green: number[] = []
+  const blue: number[] = []
+  for (const camera of cameras) {
+    const step = Math.max(1, Math.floor(Math.sqrt((camera.w * camera.h) / 12000)))
+    for (let y = 0; y < camera.h; y += step) {
+      for (let x = 0; x < camera.w; x += step) {
+        if (!camera.foreground[y * camera.w + x]) continue
+        const offset = (y * camera.w + x) * 4
+        red.push(camera.pixels[offset])
+        green.push(camera.pixels[offset + 1])
+        blue.push(camera.pixels[offset + 2])
+      }
+    }
+  }
+  if (red.length === 0) return [224, 224, 224]
+  red.sort((a, b) => a - b)
+  green.sort((a, b) => a - b)
+  blue.sort((a, b) => a - b)
+  const middle = Math.floor(red.length / 2)
+  return [red[middle], green[middle], blue[middle]]
+}
+
+function fillTransparentAtlas(
+  atlas: Buffer,
+  color: [number, number, number],
+): Buffer {
+  const filled = Buffer.from(atlas)
+  for (let offset = 0; offset < filled.length; offset += 4) {
+    if (filled[offset + 3] !== 0) continue
+    filled[offset] = color[0]
+    filled[offset + 1] = color[1]
+    filled[offset + 2] = color[2]
+    filled[offset + 3] = 255
+  }
+  return filled
 }
 
 export async function projectTexture(input: TextureProjectionInput): Promise<TextureProjectionOutput> {
@@ -762,12 +1423,38 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
 
   console.log('[texture-projector] Parsing GLB (raw)...')
   const { json, binChunk } = parseGlb(input.glbBuffer)
+  if ((json.meshes?.length ?? 0) !== 1 || (json.meshes?.[0]?.primitives?.length ?? 0) !== 1) {
+    throw new Error('Texture bake ondersteunt momenteel exact één meshprimitive; de Basic Shape is niet aangepast.')
+  }
   console.log('[texture-projector] GLB parsed. Extracting mesh...')
   const mesh = extractMesh(json, binChunk)
   console.log('[texture-projector] Mesh:', mesh.triCount, 'triangles,', mesh.positions.length / 3, 'vertices')
 
   const bbox = computeBBox(mesh)
   console.log('[texture-projector] BBox center:', bbox.cx.toFixed(3), bbox.cy.toFixed(3), bbox.cz.toFixed(3), 'radius:', bbox.radius.toFixed(3))
+
+  const shapeAnalysis = analyzeLatheShape(mesh, bbox)
+  console.log(
+    '[texture-projector] Shape:',
+    shapeAnalysis.isLathe ? 'lathe' : 'generic',
+    'confidence:',
+    shapeAnalysis.rotationalConfidence.toFixed(3),
+    'width/depth:',
+    shapeAnalysis.widthDepthRatio.toFixed(3),
+    'height/diameter:',
+    shapeAnalysis.heightDiameterRatio.toFixed(3),
+  )
+  if (shapeAnalysis.isLathe && input.sourceImageBuffer) {
+    console.log('[texture-projector] Building one canonical cylindrical skin from the original source')
+    return projectCanonicalLatheSkin(
+      input.glbBuffer,
+      mesh,
+      bbox,
+      shapeAnalysis,
+      input.sourceImageBuffer,
+      atlasSize,
+    )
+  }
 
   const cameras: Camera[] = []
   for (const view of input.views) {
@@ -776,25 +1463,33 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
     const w = meta.width ?? 512, h = meta.height ?? 512
     const rawPixels = await sharp(view.imageBuffer).resize({ width: w, height: h }).raw().ensureAlpha().toBuffer()
     const [bgR, bgG, bgB] = detectBackground(rawPixels, w, h)
-    cameras.push(buildCamera(cfg, rawPixels, w, h, bgR, bgG, bgB))
-    console.log('[texture-projector] Camera:', view.angle, w, 'x', h, 'bg:', bgR, bgG, bgB)
+    const camera = buildCamera(view.angle, cfg, rawPixels, w, h, bgR, bgG, bgB, mesh, bbox)
+    buildDepthBuffer(mesh, bbox, camera)
+    cameras.push(camera)
+    console.log(
+      '[texture-projector] Camera:',
+      view.angle,
+      w,
+      'x',
+      h,
+      'object:',
+      camera.objectMinX,
+      camera.objectMinY,
+      camera.objectMaxX,
+      camera.objectMaxY,
+    )
   }
 
   const atlas = Buffer.alloc(atlasSize * atlasSize * 4, 0)
   let texturedCount = 0
+  let atlasTexelsFilled = 0
   const logEvery = Math.max(1, Math.floor(mesh.triCount / 10))
-  const fovScale = 0.8
-  const camDist = bbox.radius * 2.5
+  const depthTolerance = Math.max(1e-5, bbox.radius * 0.008)
 
   for (let t = 0; t < mesh.triCount; t++) {
     if (t % logEvery === 0) console.log(`[texture-projector] ${t}/${mesh.triCount}`)
 
-    let i0: number, i1: number, i2: number
-    if (mesh.indices) {
-      i0 = mesh.indices[t * 3]; i1 = mesh.indices[t * 3 + 1]; i2 = mesh.indices[t * 3 + 2]
-    } else {
-      i0 = t * 3; i1 = t * 3 + 1; i2 = t * 3 + 2
-    }
+    const [i0, i1, i2] = triangleVertexIndices(mesh, t)
 
     const p0x = mesh.positions[i0 * 3], p0y = mesh.positions[i0 * 3 + 1], p0z = mesh.positions[i0 * 3 + 2]
     const p1x = mesh.positions[i1 * 3], p1y = mesh.positions[i1 * 3 + 1], p1z = mesh.positions[i1 * 3 + 2]
@@ -810,14 +1505,14 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
     if (nLen < 1e-10) continue
     nx /= nLen; ny /= nLen; nz /= nLen
 
-    // best camera: dot(normal, -camDir)
-    let bestCam: Camera | null = null
-    let bestDot = -Infinity
-    for (const cam of cameras) {
-      const d = -(nx * cam.dx + ny * cam.dy + nz * cam.dz)
-      if (d > bestDot) { bestDot = d; bestCam = cam }
-    }
-    if (!bestCam || bestDot < 0.01) continue
+    const rankedCameras = cameras
+      .map(camera => ({
+        camera,
+        score: -(nx * camera.dx + ny * camera.dy + nz * camera.dz),
+      }))
+      .filter(candidate => candidate.score > 0.02)
+      .sort((left, right) => right.score - left.score)
+    if (rankedCameras.length === 0) continue
 
     const uv0u = mesh.uvs[i0 * 2] * atlasSize, uv0v = mesh.uvs[i0 * 2 + 1] * atlasSize
     const uv1u = mesh.uvs[i1 * 2] * atlasSize, uv1v = mesh.uvs[i1 * 2 + 1] * atlasSize
@@ -825,11 +1520,6 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
 
     const minY = Math.max(0, Math.floor(Math.min(uv0v, uv1v, uv2v)))
     const maxY = Math.min(atlasSize - 1, Math.ceil(Math.max(uv0v, uv1v, uv2v)))
-
-    const cam = bestCam
-    const camPx = bbox.cx - cam.dx * camDist
-    const camPy = bbox.cy - cam.dy * camDist
-    const camPz = bbox.cz - cam.dz * camDist
 
     let filled = false
     for (let py = minY; py <= maxY; py++) {
@@ -870,25 +1560,27 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
         const wy = p0y * w0 + p1y * w1 + p2y * w2
         const wz = p0z * w0 + p1z * w1 + p2z * w2
 
-        // project to view
-        const tpx = wx - camPx, tpy = wy - camPy, tpz = wz - camPz
-        const dist = tpx * cam.dx + tpy * cam.dy + tpz * cam.dz
-        if (dist <= 0) continue
+        let sample: { camera: Camera; x: number; y: number } | null = null
+        for (const candidate of rankedCameras) {
+          const projected = projectPoint(candidate.camera, bbox, wx, wy, wz)
+          const imgX = Math.round(projected.x)
+          const imgY = Math.round(projected.y)
+          if (imgX < 0 || imgX >= candidate.camera.w || imgY < 0 || imgY >= candidate.camera.h) continue
+          const depth = candidate.camera.depth[imgY * candidate.camera.w + imgX]
+          if (!Number.isFinite(depth) || projected.depth > depth + depthTolerance) continue
+          if (!candidate.camera.foreground[imgY * candidate.camera.w + imgX]) continue
+          sample = { camera: candidate.camera, x: imgX, y: imgY }
+          break
+        }
+        if (!sample) continue
 
-        const projR = (tpx * cam.rx + tpy * cam.ry + tpz * cam.rz) / dist
-        const projU = (tpx * cam.ux + tpy * cam.uy + tpz * cam.uz) / dist
-
-        const imgX = Math.floor((projR / fovScale + 0.5) * cam.w)
-        const imgY = Math.floor((0.5 - projU / fovScale) * cam.h)
-        if (imgX < 0 || imgX >= cam.w || imgY < 0 || imgY >= cam.h) continue
-
-        const srcOff = (imgY * cam.w + imgX) * 4
-        if (isBackground(cam.pixels, srcOff, cam.bgR, cam.bgG, cam.bgB)) continue
+        const srcOff = (sample.y * sample.camera.w + sample.x) * 4
         const flippedY = atlasSize - 1 - py
         const dstOff = (flippedY * atlasSize + px) * 4
-        atlas[dstOff] = cam.pixels[srcOff]
-        atlas[dstOff + 1] = cam.pixels[srcOff + 1]
-        atlas[dstOff + 2] = cam.pixels[srcOff + 2]
+        if (atlas[dstOff + 3] === 0) atlasTexelsFilled++
+        atlas[dstOff] = sample.camera.pixels[srcOff]
+        atlas[dstOff + 1] = sample.camera.pixels[srcOff + 1]
+        atlas[dstOff + 2] = sample.camera.pixels[srcOff + 2]
         atlas[dstOff + 3] = 255
         filled = true
       }
@@ -898,7 +1590,11 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
 
   console.log('[texture-projector] Textured', texturedCount, '/', mesh.triCount, 'triangles')
 
-  const atlasBuffer = await sharp(atlas, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
+  const dilatedAtlas = dilateAtlas(atlas, atlasSize)
+  const fallbackColor = foregroundMedianColor(cameras)
+  const completedAtlas = fillTransparentAtlas(dilatedAtlas, fallbackColor)
+  console.log('[texture-projector] Fallback color:', fallbackColor.join(', '))
+  const atlasBuffer = await sharp(completedAtlas, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
     .png({ compressionLevel: 6 })
     .toBuffer()
   console.log('[texture-projector] Atlas PNG:', atlasBuffer.length, 'bytes')
@@ -911,10 +1607,23 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
     texturedGlbBuffer,
     atlasBuffer,
     manifest: {
+      route: 'geometry-preserving-multiview-bake',
+      mapping_model: 'existing-uv',
       atlas_size: atlasSize,
       views_used: input.views.map(v => v.angle),
       triangles_textured: texturedCount,
       triangles_total: mesh.triCount,
+      atlas_texels_filled: atlasTexelsFilled,
+      atlas_coverage: atlasTexelsFilled / (atlasSize * atlasSize),
+      triangle_coverage: texturedCount / mesh.triCount,
+      fallback_color: fallbackColor,
+      view_bounds: cameras.map(camera => ({
+        angle: camera.angle,
+        minX: camera.objectMinX,
+        minY: camera.objectMinY,
+        maxX: camera.objectMaxX,
+        maxY: camera.objectMaxY,
+      })),
     },
   }
 }
@@ -960,8 +1669,9 @@ function buildTexturedGlb(originalGlb: Buffer, gltfJson: any, binChunk: Buffer, 
     json.materials.push({
       pbrMetallicRoughness: {
         baseColorTexture: { index: 0 },
+        baseColorFactor: [1, 1, 1, 1],
         metallicFactor: 0,
-        roughnessFactor: 0.8,
+        roughnessFactor: 0.5,
       },
       doubleSided: true,
     })
@@ -969,8 +1679,9 @@ function buildTexturedGlb(originalGlb: Buffer, gltfJson: any, binChunk: Buffer, 
     for (const mat of json.materials) {
       if (!mat.pbrMetallicRoughness) mat.pbrMetallicRoughness = {}
       mat.pbrMetallicRoughness.baseColorTexture = { index: 0 }
+      mat.pbrMetallicRoughness.baseColorFactor = [1, 1, 1, 1]
       mat.pbrMetallicRoughness.metallicFactor = 0
-      mat.pbrMetallicRoughness.roughnessFactor = 0.8
+      mat.pbrMetallicRoughness.roughnessFactor = 0.5
       mat.doubleSided = true
       delete mat.pbrMetallicRoughness.metallicRoughnessTexture
       delete mat.normalTexture
