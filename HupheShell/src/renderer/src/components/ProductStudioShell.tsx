@@ -2284,7 +2284,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const textureManifest = project.reconstruction?.material_manifest as Record<string, unknown> | undefined
   const textureProjection = textureManifest?.projection as Record<string, unknown> | undefined
   const textureRoute = typeof textureManifest?.route === 'string' ? textureManifest.route : undefined
-  const canonicalSkinReady = textureRoute === 'canonical-lathe-skin-v1'
+  const canonicalSkinV2 = textureRoute === 'canonical-lathe-skin-v2'
+  const canonicalSkinReady = canonicalSkinV2 || textureRoute === 'canonical-lathe-skin-v1'
   const textureSourceProjectionUrl = typeof textureManifest?.texture_source_projection_url === 'string'
     ? textureManifest.texture_source_projection_url
     : undefined
@@ -2293,6 +2294,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     : undefined
   const textureConfidenceUrl = typeof textureManifest?.texture_confidence_url === 'string'
     ? textureManifest.texture_confidence_url
+    : undefined
+  const textureProductMaskUrl = typeof textureManifest?.texture_product_mask_url === 'string'
+    ? textureManifest.texture_product_mask_url
+    : undefined
+  const textureUnknownMaskUrl = typeof textureManifest?.texture_unknown_mask_url === 'string'
+    ? textureManifest.texture_unknown_mask_url
     : undefined
   const skinDocumentUrl = typeof textureManifest?.skin_document_url === 'string'
     ? textureManifest.skin_document_url
@@ -4491,7 +4498,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                 <p className="mt-1 text-xs text-white/36">
                   {texturedMeshReady
                     ? canonicalSkinReady
-                      ? 'Doorlopende product-skin klaar. De bronprojectie en gereconstrueerde achterzijde blijven afzonderlijk bewaard.'
+                      ? canonicalSkinV2
+                        ? 'Doorlopende product-skin klaar. Alleen waargenomen bronpixels zijn ingevuld; onbekende delen blijven expliciet gemarkeerd.'
+                        : 'Doorlopende product-skin klaar. De bronprojectie en gereconstrueerde achterzijde blijven afzonderlijk bewaard.'
                       : textureCoverageIsLow
                       ? `Textuurprojectie is onvolledig (${Math.round(textureTriangleCoverage! * 100)}% driehoekdekking). De geometrie blijft intact, maar het materiaalresultaat moet opnieuw worden opgebouwd.`
                       : 'Textured mesh klaar. Controleer het resultaat in de 3D-preview.'
@@ -4590,10 +4599,28 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                         <figcaption className="mt-1 text-[9px] text-white/38">Bronzekerheid</figcaption>
                       </figure>
                     )}
+                    {textureProductMaskUrl && (
+                      <figure className="min-w-0">
+                        <div className="aspect-square overflow-hidden bg-black/30">
+                          <img src={textureProductMaskUrl} alt="Productmasker van de bron" className="h-full w-full object-contain" />
+                        </div>
+                        <figcaption className="mt-1 text-[9px] text-white/38">Productmasker</figcaption>
+                      </figure>
+                    )}
+                    {textureUnknownMaskUrl && (
+                      <figure className="min-w-0">
+                        <div className="aspect-square overflow-hidden bg-black/30">
+                          <img src={textureUnknownMaskUrl} alt="Onbekende delen van de product-skin" className="h-full w-full object-contain" />
+                        </div>
+                        <figcaption className="mt-1 text-[9px] text-white/38">Onbekende delen</figcaption>
+                      </figure>
+                    )}
                   </div>
                   {canonicalSkinReady && (
                     <p className="mt-2 text-[9px] leading-relaxed text-white/34">
-                      Een doorlopende cilindrische skin met de naad aan de achterzijde. Canonical views zijn controlebeelden, geen losse texture-scherven.
+                      {canonicalSkinV2
+                        ? 'Een nieuwe, doorlopende LATHE-mesh met een echte naad aan de achterzijde. De flatmap bevat uitsluitend bronbewijs; neutrale invulling is alleen voor de 3D-preview.'
+                        : 'Een doorlopende cilindrische skin met de naad aan de achterzijde. Canonical views zijn controlebeelden, geen losse texture-scherven.'}
                     </p>
                   )}
                 </div>

@@ -1,3 +1,11 @@
+import {
+  buildCanonicalLatheGeometry,
+  extractLatheProfile,
+  projectSourceToCanonicalFlatmap,
+  validateCanonicalLatheGeometry,
+} from '../product-skin/geometry/lathe/canonical-lathe-core'
+import { exportCanonicalLatheGlb } from '../product-skin/gltf/exportCanonicalLatheGlb'
+
 interface CameraConfig { dx: number; dy: number; dz: number; ux: number; uy: number; uz: number }
 
 const CAMERA_CONFIGS: Record<string, CameraConfig> = {
@@ -1029,9 +1037,11 @@ export interface TextureProjectionOutput {
   sourceProjectionBuffer?: Buffer
   reconstructionBuffer?: Buffer
   confidenceMaskBuffer?: Buffer
+  productMaskBuffer?: Buffer
+  unknownMaskBuffer?: Buffer
   manifest: {
-    route: 'canonical-lathe-skin-v1' | 'geometry-preserving-multiview-bake'
-    mapping_model: 'cylindrical-y' | 'existing-uv'
+    route: 'canonical-lathe-skin-v2' | 'geometry-preserving-multiview-bake'
+    mapping_model: 'lathe-canonical-wrap' | 'existing-uv'
     atlas_size: number
     views_used: string[]
     triangles_textured: number
@@ -1048,7 +1058,24 @@ export interface TextureProjectionOutput {
       seam_angle_radians: number
     }
     source_confidence?: number
-    unknown_fill?: 'mirrored-front'
+    unknown_fill?: 'explicit-mask'
+    preview_fill?: 'neutral-non-exporting'
+    canonical_geometry?: {
+      rings: number
+      radial_segments: number
+      vertex_count: number
+      triangle_count: number
+      max_triangle_u_span: number
+      profile: {
+        source_width: number
+        source_height: number
+        top: number
+        bottom: number
+        axis_x: number
+        max_radius_px: number
+        points: Array<{ sourceY: number; centerX: number; radiusPx: number; v: number }>
+      }
+    }
   }
 }
 
@@ -1190,7 +1217,6 @@ function sampleBilinear(
 }
 
 async function projectCanonicalLatheSkin(
-  glbBuffer: Buffer,
   mesh: ParsedMesh,
   bbox: MeshBounds,
   shapeAnalysis: LatheShapeAnalysis,
@@ -1222,139 +1248,111 @@ async function projectCanonicalLatheSkin(
     sourceHeight,
   )
 
-  const rowMin = new Int32Array(sourceHeight)
-  const rowMax = new Int32Array(sourceHeight)
-  rowMin.fill(sourceWidth)
-  rowMax.fill(-1)
-  for (let y = 0; y < sourceHeight; y++) {
-    for (let x = silhouette.minX; x <= silhouette.maxX; x++) {
-      if (!silhouette.foreground[y * sourceWidth + x]) continue
-      rowMin[y] = Math.min(rowMin[y], x)
-      rowMax[y] = Math.max(rowMax[y], x)
-    }
+  const productMask = new Uint8Array(sourceWidth * sourceHeight)
+  for (let pixel = 0; pixel < productMask.length; pixel++) {
+    productMask[pixel] = silhouette.foreground[pixel] ? 255 : 0
+  }
+  const profile = extractLatheProfile({
+    width: sourceWidth,
+    height: sourceHeight,
+    data: productMask,
+  })
+  const geometry = buildCanonicalLatheGeometry(
+    profile,
+    192,
+    Math.max(1e-8, bbox.maxY - bbox.minY),
+  )
+  const geometryValidation = validateCanonicalLatheGeometry(geometry)
+  const flatmap = projectSourceToCanonicalFlatmap(
+    {
+      width: sourceWidth,
+      height: sourceHeight,
+      data: new Uint8Array(
+        sourcePixels.buffer,
+        sourcePixels.byteOffset,
+        sourcePixels.byteLength,
+      ),
+    },
+    { width: sourceWidth, height: sourceHeight, data: productMask },
+    profile,
+    atlasSize,
+    atlasSize,
+  )
+
+  // The editable flatmap remains source-only and transparent where no source
+  // evidence exists. A neutral fill is used solely by the standalone GLB
+  // preview so unknown surface areas never masquerade as reconstructed truth.
+  const previewPixels = Buffer.from(flatmap.sourceRgba)
+  for (let pixel = 0; pixel < flatmap.unknownMask.length; pixel++) {
+    if (flatmap.unknownMask[pixel] === 0) continue
+    const offset = pixel * 4
+    previewPixels[offset] = fallbackColor[0]
+    previewPixels[offset + 1] = fallbackColor[1]
+    previewPixels[offset + 2] = fallbackColor[2]
+    previewPixels[offset + 3] = 255
+  }
+  const confidenceRgba = Buffer.alloc(atlasSize * atlasSize * 4)
+  const unknownRgba = Buffer.alloc(atlasSize * atlasSize * 4)
+  for (let pixel = 0; pixel < flatmap.confidence.length; pixel++) {
+    const confidenceValue = flatmap.confidence[pixel]
+    const unknownValue = flatmap.unknownMask[pixel]
+    confidenceRgba.fill(confidenceValue, pixel * 4, pixel * 4 + 3)
+    confidenceRgba[pixel * 4 + 3] = 255
+    unknownRgba.fill(unknownValue, pixel * 4, pixel * 4 + 3)
+    unknownRgba[pixel * 4 + 3] = 255
   }
 
-  const nearestValidRow = new Int32Array(sourceHeight)
-  let previous = -1
-  for (let y = 0; y < sourceHeight; y++) {
-    if (rowMax[y] >= rowMin[y]) previous = y
-    nearestValidRow[y] = previous
-  }
-  let next = -1
-  for (let y = sourceHeight - 1; y >= 0; y--) {
-    if (rowMax[y] >= rowMin[y]) next = y
-    if (nearestValidRow[y] < 0 || (next >= 0 && next - y < y - nearestValidRow[y])) {
-      nearestValidRow[y] = next
-    }
-  }
-
-  const atlas = Buffer.alloc(atlasSize * atlasSize * 4)
-  const sourceProjection = Buffer.alloc(atlasSize * atlasSize * 4)
-  const reconstruction = Buffer.alloc(atlasSize * atlasSize * 4)
-  const confidence = Buffer.alloc(atlasSize * atlasSize * 4)
-  let confidenceSum = 0
-  for (let py = 0; py < atlasSize; py++) {
-    const normalizedTopToBottom = py / Math.max(1, atlasSize - 1)
-    const desiredSourceY =
-      silhouette.minY +
-      normalizedTopToBottom * Math.max(1, silhouette.maxY - silhouette.minY)
-    const sourceYIndex = Math.max(0, Math.min(sourceHeight - 1, Math.round(desiredSourceY)))
-    const validRow = nearestValidRow[sourceYIndex]
-    const minX = validRow >= 0 ? rowMin[validRow] : silhouette.minX
-    const maxX = validRow >= 0 ? rowMax[validRow] : silhouette.maxX
-    const centerX = (minX + maxX) / 2
-    const rowHalfWidth = Math.max(0.5, (maxX - minX) / 2)
-    // Tangent samples have zero source confidence. Pull them slightly inward
-    // so antialiasing/background pixels at the silhouette edge do not become
-    // full-height bands in the cylindrical skin.
-    const edgeInset = Math.min(
-      Math.max(2, rowHalfWidth * 0.025),
-      Math.max(0, rowHalfWidth - 0.5)
-    )
-    const halfWidth = Math.max(0.5, rowHalfWidth - edgeInset)
-
-    for (let px = 0; px < atlasSize; px++) {
-      const u = px / Math.max(1, atlasSize - 1)
-      const theta = u * Math.PI * 2 - Math.PI
-      // sin(theta) projects the cylindrical surface into the source silhouette.
-      // On the hidden half this becomes a deterministic mirrored continuation.
-      const sourceX = centerX + Math.sin(theta) * halfWidth
-      const sample = sampleBilinear(sourcePixels, sourceWidth, sourceHeight, sourceX, desiredSourceY)
-      const offset = (py * atlasSize + px) * 4
-      atlas[offset] = sample[0]
-      atlas[offset + 1] = sample[1]
-      atlas[offset + 2] = sample[2]
-      atlas[offset + 3] = 255
-
-      const directConfidence = Math.max(0, Math.cos(theta))
-      const confidenceByte = Math.round(directConfidence * 255)
-      if (confidenceByte > 0) {
-        sourceProjection[offset] = sample[0]
-        sourceProjection[offset + 1] = sample[1]
-        sourceProjection[offset + 2] = sample[2]
-        sourceProjection[offset + 3] = confidenceByte
-      }
-      const reconstructionAlpha = 255 - confidenceByte
-      if (reconstructionAlpha > 0) {
-        reconstruction[offset] = sample[0]
-        reconstruction[offset + 1] = sample[1]
-        reconstruction[offset + 2] = sample[2]
-        reconstruction[offset + 3] = reconstructionAlpha
-      }
-      confidence[offset] = confidenceByte
-      confidence[offset + 1] = confidenceByte
-      confidence[offset + 2] = confidenceByte
-      confidence[offset + 3] = 255
-      confidenceSum += directConfidence
-    }
-  }
-
+  const rawPng = (pixels: Uint8Array | Buffer, width: number, height: number) =>
+    sharp(Buffer.from(pixels), { raw: { width, height, channels: 4 } })
+      .png({ compressionLevel: 6 })
+      .toBuffer()
+  const maskPng = (pixels: Uint8Array, width: number, height: number) =>
+    sharp(Buffer.from(pixels), { raw: { width, height, channels: 1 } })
+      .png({ compressionLevel: 6 })
+      .toBuffer()
   const [
     atlasBuffer,
-    sourceProjectionBuffer,
-    reconstructionBuffer,
+    previewAtlasBuffer,
     confidenceMaskBuffer,
+    unknownMaskBuffer,
+    productMaskBuffer,
   ] = await Promise.all([
-    sharp(atlas, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
-      .png({ compressionLevel: 6 })
-      .toBuffer(),
-    sharp(sourceProjection, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
-      .png({ compressionLevel: 6 })
-      .toBuffer(),
-    sharp(reconstruction, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
-      .png({ compressionLevel: 6 })
-      .toBuffer(),
-    sharp(confidence, { raw: { width: atlasSize, height: atlasSize, channels: 4 } })
-      .png({ compressionLevel: 6 })
-      .toBuffer(),
+    rawPng(flatmap.sourceRgba, atlasSize, atlasSize),
+    rawPng(previewPixels, atlasSize, atlasSize),
+    rawPng(confidenceRgba, atlasSize, atlasSize),
+    rawPng(unknownRgba, atlasSize, atlasSize),
+    maskPng(productMask, sourceWidth, sourceHeight),
   ])
-
-  const cylindricalUVs = createCylindricalYUVs(mesh, bbox)
-  const rewrappedGlb = buildGlbWithNewUVs(glbBuffer, cylindricalUVs)
-  const { json: rewrappedJson, binChunk: rewrappedBin } = parseGlb(rewrappedGlb)
-  const texturedGlbBuffer = buildTexturedGlb(
-    rewrappedGlb,
-    rewrappedJson,
-    rewrappedBin,
-    atlasBuffer,
+  const texturedGlbBuffer = await exportCanonicalLatheGlb(
+    geometry,
+    previewAtlasBuffer,
+    { center: [bbox.cx, bbox.cy, bbox.cz] },
   )
   const pixelCount = atlasSize * atlasSize
+  let observedPixelCount = 0
+  let confidenceSum = 0
+  for (let pixel = 0; pixel < pixelCount; pixel++) {
+    if (flatmap.unknownMask[pixel] === 0) observedPixelCount++
+    confidenceSum += flatmap.confidence[pixel] / 255
+  }
+  const triangleCount = geometry.indices.length / 3
 
   return {
     texturedGlbBuffer,
     atlasBuffer,
-    sourceProjectionBuffer,
-    reconstructionBuffer,
+    sourceProjectionBuffer: atlasBuffer,
     confidenceMaskBuffer,
+    productMaskBuffer,
+    unknownMaskBuffer,
     manifest: {
-      route: 'canonical-lathe-skin-v1',
-      mapping_model: 'cylindrical-y',
+      route: 'canonical-lathe-skin-v2',
+      mapping_model: 'lathe-canonical-wrap',
       atlas_size: atlasSize,
       views_used: ['original'],
-      triangles_textured: mesh.triCount,
-      triangles_total: mesh.triCount,
-      atlas_texels_filled: pixelCount,
-      atlas_coverage: 1,
+      triangles_textured: triangleCount,
+      triangles_total: triangleCount,
+      atlas_texels_filled: observedPixelCount,
+      atlas_coverage: observedPixelCount / pixelCount,
       triangle_coverage: 1,
       fallback_color: fallbackColor,
       view_bounds: [{
@@ -1371,7 +1369,24 @@ async function projectCanonicalLatheSkin(
         seam_angle_radians: Math.PI,
       },
       source_confidence: confidenceSum / pixelCount,
-      unknown_fill: 'mirrored-front',
+      unknown_fill: 'explicit-mask',
+      preview_fill: 'neutral-non-exporting',
+      canonical_geometry: {
+        rings: geometry.rings,
+        radial_segments: geometry.radialSegments,
+        vertex_count: geometry.positions.length / 3,
+        triangle_count: triangleCount,
+        max_triangle_u_span: geometryValidation.maxTriangleUSpan,
+        profile: {
+          source_width: profile.sourceWidth,
+          source_height: profile.sourceHeight,
+          top: profile.top,
+          bottom: profile.bottom,
+          axis_x: profile.axisX,
+          max_radius_px: profile.maxRadiusPx,
+          points: profile.points,
+        },
+      },
     },
   }
 }
@@ -1447,7 +1462,6 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
   if (shapeAnalysis.isLathe && input.sourceImageBuffer) {
     console.log('[texture-projector] Building one canonical cylindrical skin from the original source')
     return projectCanonicalLatheSkin(
-      input.glbBuffer,
       mesh,
       bbox,
       shapeAnalysis,

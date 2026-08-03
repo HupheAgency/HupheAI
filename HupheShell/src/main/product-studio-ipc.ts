@@ -7,6 +7,7 @@ import { join } from 'path'
 import { extractDepthMap } from './lib/depth-extractor'
 import { depthMapToGlb } from './lib/depth-to-mesh'
 import { buildMultiViewMesh } from './lib/multiview-mesh'
+import type { ProductSkinDocumentV2 } from './product-skin/domain/ProductSkinDocument'
 
 const meta = (import.meta as any).env ?? {}
 const SUPABASE_URL = (meta.MAIN_VITE_SUPABASE_URL as string) || ''
@@ -2650,12 +2651,27 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         throw new Error('Geen enkel vlak kon betrouwbaar vanuit de canonical views worden getextureerd.')
       }
 
-      // Deze assert is de harde grens: UV's en materiaal mogen wijzigen,
-      // maar de Basic Shape, scene transforms en het oppervlak niet.
-      const geometryIntegrity = assertGlbGeometryPreserved(
-        baseGlbBuffer,
-        projection.texturedGlbBuffer,
-      )
+      const isCanonicalLathe = projection.manifest.route === 'canonical-lathe-skin-v2'
+      // Freeform behoudt de bronmesh exact. Een canonical lathe wordt bewust opnieuw
+      // opgebouwd om een echte, dupliceerde achternaad en stabiele UV-grid te krijgen.
+      const geometryIntegrity = isCanonicalLathe
+        ? {
+            mode: 'canonical-lathe-v2-rebuild',
+            preserved: false,
+            intentional_topology_rebuild: true,
+            source_triangles: null,
+            output_triangles: projection.manifest.triangles_total,
+            validation: projection.manifest.canonical_geometry
+              ? {
+                  seam_vertices_duplicated: true,
+                  max_triangle_u_span: projection.manifest.canonical_geometry.max_triangle_u_span,
+                }
+              : null,
+          }
+        : assertGlbGeometryPreserved(
+            baseGlbBuffer,
+            projection.texturedGlbBuffer,
+          )
       const texturedGlbBuffer = projection.texturedGlbBuffer
       const atlasBuffer = projection.atlasBuffer
       console.log(
@@ -2690,6 +2706,12 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const confidenceMaskPath = projection.confidenceMaskBuffer
         ? join(textureDir, `texture_confidence_${args.reconstructionVersionId}.png`)
         : null
+      const productMaskPath = projection.productMaskBuffer
+        ? join(textureDir, `texture_product_mask_${args.reconstructionVersionId}.png`)
+        : null
+      const unknownMaskPath = projection.unknownMaskBuffer
+        ? join(textureDir, `texture_unknown_mask_${args.reconstructionVersionId}.png`)
+        : null
       const skinDocumentPath = join(textureDir, `skin_document_${args.reconstructionVersionId}.json`)
       const manifestPath = join(textureDir, `material_manifest_${args.reconstructionVersionId}.json`)
       const runVersion = Date.now()
@@ -2699,6 +2721,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const sourceProjectionUrl = sourceProjectionPath ? toHupheFileUrl(sourceProjectionPath) : null
       const reconstructionUrl = reconstructionPath ? toHupheFileUrl(reconstructionPath) : null
       const confidenceMaskUrl = confidenceMaskPath ? toHupheFileUrl(confidenceMaskPath) : null
+      const productMaskUrl = productMaskPath ? toHupheFileUrl(productMaskPath) : null
+      const unknownMaskUrl = unknownMaskPath ? toHupheFileUrl(unknownMaskPath) : null
       const skinDocumentUrl = toHupheFileUrl(skinDocumentPath)
 
       type ContentAsset = {
@@ -2783,9 +2807,24 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
             'source-confidence-map',
           )
         : null
-      const isCanonicalLathe = projection.manifest.route === 'canonical-lathe-skin-v1'
+      const productMaskAsset = projection.productMaskBuffer
+        ? registerContentAsset(
+            projection.productMaskBuffer,
+            'png',
+            'image/png',
+            'product-mask',
+          )
+        : null
+      const unknownMaskAsset = projection.unknownMaskBuffer
+        ? registerContentAsset(
+            projection.unknownMaskBuffer,
+            'png',
+            'image/png',
+            'unknown-surface-mask',
+          )
+        : null
       const createdAt = new Date().toISOString()
-      const skinDocument = {
+      const legacySkinDocument = {
         schema_version: 1,
         document_type: 'product-skin',
         project_id: args.projectId,
@@ -2904,8 +2943,148 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           canonical_views_are_projection_inputs: !isCanonicalLathe,
         },
       }
+      let skinDocument: ProductSkinDocumentV2 | typeof legacySkinDocument = legacySkinDocument
+      if (isCanonicalLathe) {
+        const canonical = projection.manifest.canonical_geometry
+        if (!canonical || !productMaskAsset || !confidenceAsset || !unknownMaskAsset) {
+          throw new Error('Canonical lathe-output mist verplichte geometrie- of maskerdata.')
+        }
+        skinDocument = {
+          schemaVersion: 2,
+          documentType: 'product-skin',
+          id: `skin:${args.reconstructionVersionId}:${runVersion}`,
+          projectId: args.projectId,
+          reconstructionVersionId: args.reconstructionVersionId,
+          createdAt,
+          productFamily: 'lathe',
+          source: {
+            imageAssetId: sourceAsset?.id ?? null,
+            productMaskAssetId: productMaskAsset.id,
+            calibration: {
+              kind: 'front-orthographic-approximation',
+              axisX: canonical.profile.axis_x,
+              top: canonical.profile.top,
+              bottom: canonical.profile.bottom,
+              sourceWidth: canonical.profile.source_width,
+              sourceHeight: canonical.profile.source_height,
+            },
+          },
+          geometry: {
+            meshAssetId: texturedMeshAsset.id,
+            seam: { kind: 'rear', u: 0 },
+            uvLayout: {
+              kind: 'lathe-canonical-wrap',
+              rings: canonical.rings,
+              radialSegments: canonical.radial_segments,
+              vertexCount: canonical.vertex_count,
+              triangleCount: canonical.triangle_count,
+              maxTriangleUSpan: canonical.max_triangle_u_span,
+            },
+            profile: {
+              maxRadiusPx: canonical.profile.max_radius_px,
+              points: canonical.profile.points,
+            },
+          },
+          canvas: {
+            width: projection.manifest.atlas_size,
+            height: projection.manifest.atlas_size,
+            colorSpace: 'srgb',
+            compositeAssetId: compositeAtlasAsset.id,
+            layers: [
+              {
+                id: 'source-reference',
+                name: 'Source reference',
+                type: 'image',
+                assetId: sourceAsset?.id ?? null,
+                visible: false,
+                locked: true,
+                exportable: false,
+                opacity: 1,
+                blendMode: 'normal',
+                provenance: 'observed',
+              },
+              {
+                id: 'source-projection',
+                name: 'Observed source projection',
+                type: 'image',
+                assetId: sourceProjectionAsset?.id ?? compositeAtlasAsset.id,
+                maskAssetId: confidenceAsset.id,
+                visible: true,
+                locked: true,
+                exportable: true,
+                opacity: 1,
+                blendMode: 'normal',
+                provenance: 'observed',
+              },
+              {
+                id: 'ai-reconstruction',
+                name: 'AI reconstruction',
+                type: 'group',
+                children: [],
+                visible: true,
+                locked: false,
+                exportable: true,
+                provenance: 'reconstructed',
+              },
+              {
+                id: 'user-design',
+                name: 'User design',
+                type: 'group',
+                children: [],
+                visible: true,
+                locked: false,
+                exportable: true,
+                provenance: 'user',
+              },
+              {
+                id: 'semantic-elements',
+                name: 'Semantic elements',
+                type: 'group',
+                children: [],
+                visible: true,
+                locked: false,
+                exportable: true,
+                provenance: 'user',
+              },
+              {
+                id: 'material-variation',
+                name: 'Material variation',
+                type: 'group',
+                children: [],
+                visible: true,
+                locked: false,
+                exportable: true,
+                provenance: 'user',
+              },
+              {
+                id: 'guides',
+                name: 'Guides',
+                type: 'guide',
+                visible: true,
+                locked: true,
+                exportable: false,
+                provenance: 'system',
+              },
+            ],
+          },
+          maps: {
+            sourceConfidenceAssetId: confidenceAsset.id,
+            unknownMaskAssetId: unknownMaskAsset.id,
+          },
+          aiJobs: [],
+          assets: Array.from(contentAssets.values()).map((asset) => ({
+            id: asset.id,
+            sha256: asset.sha256,
+            mimeType: asset.mime_type,
+            relativePath: asset.relative_path,
+            url: asset.url,
+            roles: asset.roles,
+            immutable: asset.immutable,
+          })),
+        }
+      }
       const materialManifest = {
-        schema_version: 2,
+        schema_version: isCanonicalLathe ? 3 : 2,
         route: projection.manifest.route,
         source_mesh_url: recon.mesh_url,
         views_used: projection.manifest.views_used,
@@ -2927,6 +3106,10 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         texture_reconstruction_url: reconstructionUrl,
         texture_confidence_path: confidenceMaskPath,
         texture_confidence_url: confidenceMaskUrl,
+        texture_product_mask_path: productMaskPath,
+        texture_product_mask_url: productMaskUrl,
+        texture_unknown_mask_path: unknownMaskPath,
+        texture_unknown_mask_url: unknownMaskUrl,
         skin_document_path: skinDocumentPath,
         skin_document_url: skinDocumentUrl,
         content_addressed_assets: Array.from(contentAssets.values()),
@@ -2949,6 +3132,12 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
       if (projection.confidenceMaskBuffer && confidenceMaskPath) {
         outputWrites.push(writeFile(confidenceMaskPath, projection.confidenceMaskBuffer))
+      }
+      if (projection.productMaskBuffer && productMaskPath) {
+        outputWrites.push(writeFile(productMaskPath, projection.productMaskBuffer))
+      }
+      if (projection.unknownMaskBuffer && unknownMaskPath) {
+        outputWrites.push(writeFile(unknownMaskPath, projection.unknownMaskBuffer))
       }
       await Promise.all(outputWrites)
       console.log('[create-textured-mesh] Local texture output written')
