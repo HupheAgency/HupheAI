@@ -82,8 +82,12 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
   viewMode?: ViewMode
   environmentMeshUrls?: string[]
   splatAlignment?: SplatAlignment | null
+  removeDefaultPlaceholder?: boolean
+  ensureDefaultPlaceholder?: boolean
+  productModelUrl?: string | null
+  productModelName?: string
   onOrbitChange?: (position: [number, number, number], target: [number, number, number]) => void
-}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, overlayOpacity = 1, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls, splatAlignment, onOrbitChange }, ref) {
+}>(function Scene3DEditor({ storageKey, className = '', onSceneDirty, hideProperties, overlayImageSrc, overlayOpacity = 1, productOverlaySrc, productOverlayBlend = 'normal', backgroundPlateSrc, transparentCanvas, debugRings, viewMode: viewModeProp, environmentMeshUrls, splatAlignment, removeDefaultPlaceholder = false, ensureDefaultPlaceholder = false, productModelUrl = null, productModelName = 'Product model', onOrbitChange }, ref) {
   const viewportRef = useRef<Scene3DViewportHandle>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
@@ -155,9 +159,56 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
     resetScene,
   } = useScene3D({ storageKey })
 
+  // Product Studio starts with a 2D shape reference. Do not present the
+  // generic starter cube as if it were the reconstructed product mesh.
+  useEffect(() => {
+    if (!removeDefaultPlaceholder) return
+    const placeholder = scene.objects.find((object) => object.type === 'cube' && object.name === 'Cube_1')
+    if (placeholder) deleteObject(placeholder.id)
+  }, [deleteObject, removeDefaultPlaceholder, scene.objects])
+
+  useEffect(() => {
+    if (ensureDefaultPlaceholder && scene.objects.length === 0) {
+      addObject('cube', { name: 'Cube_1' })
+    }
+  }, [addObject, ensureDefaultPlaceholder, scene.objects.length])
+
   const markSceneDirty = useCallback(() => {
     onSceneDirty?.()
   }, [onSceneDirty])
+
+  const syncModelFromUrl = useCallback((url: string, name = 'Product model') => {
+    const stripQuery = (value?: string) => value?.split('?')[0] ?? ''
+    const match = scene.objects.find((object) => (
+      object.type === 'gltf' && stripQuery(object.gltfUrl) === stripQuery(url)
+    ))
+    if (match) {
+      setSelectedObjectId(match.id)
+      return
+    }
+
+    const oldGltf = scene.objects.find((object) => object.type === 'gltf')
+    markSceneDirty()
+    if (oldGltf) {
+      updateObject(oldGltf.id, { name, gltfUrl: url })
+      setSelectedObjectId(oldGltf.id)
+      return
+    }
+
+    addObject('gltf', {
+      name,
+      gltfUrl: url,
+      position: [0, 0.5, 0],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+    })
+  }, [addObject, markSceneDirty, scene.objects, setSelectedObjectId, updateObject])
+
+  const productModelBase = productModelUrl?.split('?')[0] ?? null
+  useEffect(() => {
+    if (!productModelUrl) return
+    syncModelFromUrl(productModelUrl, productModelName)
+  }, [productModelBase, productModelName, productModelUrl, syncModelFromUrl])
 
   const addDirtyObject = useCallback((type: Scene3DObjectType, patch?: Partial<Scene3DObject>) => {
     markSceneDirty()
@@ -263,29 +314,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
       return scene
     },
     addModelFromUrl(url: string, name = 'Product model') {
-      const stripQuery = (u: string) => u.split('?')[0]
-      const match = scene.objects.find((object) => object.type === 'gltf' && object.gltfUrl && stripQuery(object.gltfUrl) === stripQuery(url))
-      if (match) {
-        setSelectedObjectId(match.id)
-        return
-      }
-      const oldGltf = scene.objects.find((o) => o.type === 'gltf')
-      markSceneDirty()
-      if (oldGltf) {
-        updateObject(oldGltf.id, {
-          name,
-          gltfUrl: url,
-        })
-        setSelectedObjectId(oldGltf.id)
-        return
-      }
-      addObject('gltf', {
-        name,
-        gltfUrl: url,
-        position: [0, 0.5, 0],
-        rotation: [0, 0, 0],
-        scale: [1, 1, 1],
-      })
+      syncModelFromUrl(url, name)
     },
     getSceneControls() {
       return {
@@ -317,7 +346,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
     setCameraOrbit(position: [number, number, number], target: [number, number, number], fov?: number, viewMatrix?: number[]) {
       viewportRef.current?.setCameraOrbit(position, target, fov, viewMatrix)
     },
-  }), [addDirtyObject, addDirtyLight, addCamera, deleteObject, deleteLight, deleteDirtySelected, markSceneDirty, resetScene, scene, selectedObjectId, selectedLightId, setSelectedObjectId, setSelectedLightId, setActiveCameraId, transformMode, setTransformMode, updateBackground, updateCamera, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, transformDirtyObject, showFrame])
+  }), [addDirtyObject, addDirtyLight, addCamera, deleteObject, deleteLight, deleteDirtySelected, markSceneDirty, resetScene, scene, selectedObjectId, selectedLightId, setSelectedObjectId, setSelectedLightId, setActiveCameraId, syncModelFromUrl, transformMode, setTransformMode, updateBackground, updateCamera, updateDirtyObject, updateDirtyLight, setDirtyEnvironment, transformDirtyObject, showFrame])
 
   return (
     <div className={['flex h-full w-full overflow-hidden rounded-xl border border-white/[0.06] bg-[#141414]', className].join(' ')}>

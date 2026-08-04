@@ -1,5 +1,6 @@
 import {
   buildCanonicalLatheGeometry,
+  composeCanonicalFlatmaps,
   extractLatheProfile,
   projectSourceToCanonicalFlatmap,
   validateCanonicalLatheGeometry,
@@ -1058,8 +1059,8 @@ export interface TextureProjectionOutput {
       seam_angle_radians: number
     }
     source_confidence?: number
-    unknown_fill?: 'explicit-mask'
-    preview_fill?: 'neutral-non-exporting'
+    unknown_fill?: 'explicit-mask' | 'canonical-multiview-completion'
+    preview_fill?: 'neutral-non-exporting' | 'composite-source-plus-reconstruction'
     canonical_geometry?: {
       rings: number
       radial_segments: number
@@ -1221,6 +1222,7 @@ async function projectCanonicalLatheSkin(
   bbox: MeshBounds,
   shapeAnalysis: LatheShapeAnalysis,
   sourceImageBuffer: Buffer,
+  views: Array<{ angle: string; imageBuffer: Buffer }>,
   atlasSize: number,
 ): Promise<TextureProjectionOutput> {
   const sharp = (await import('sharp')).default
@@ -1279,23 +1281,85 @@ async function projectCanonicalLatheSkin(
     atlasSize,
   )
 
-  // The editable flatmap remains source-only and transparent where no source
-  // evidence exists. A neutral fill is used solely by the standalone GLB
-  // preview so unknown surface areas never masquerade as reconstructed truth.
-  const previewPixels = Buffer.from(flatmap.sourceRgba)
-  for (let pixel = 0; pixel < flatmap.unknownMask.length; pixel++) {
-    if (flatmap.unknownMask[pixel] === 0) continue
-    const offset = pixel * 4
-    previewPixels[offset] = fallbackColor[0]
-    previewPixels[offset + 1] = fallbackColor[1]
-    previewPixels[offset + 2] = fallbackColor[2]
-    previewPixels[offset + 3] = 255
+  const canonicalAngles: Record<string, number> = {
+    front: 0,
+    hero: 0,
+    right: Math.PI / 2,
+    rear: Math.PI,
+    back: Math.PI,
+    left: -Math.PI / 2,
   }
+  const completionLayers: Array<{
+    flatmap: ReturnType<typeof projectSourceToCanonicalFlatmap>
+    angleRadians: number
+  }> = []
+  const viewsUsed = ['original']
+  const viewBounds: Array<{ angle: string; minX: number; minY: number; maxX: number; maxY: number }> = [{
+    angle: 'original',
+    minX: silhouette.minX,
+    minY: silhouette.minY,
+    maxX: silhouette.maxX,
+    maxY: silhouette.maxY,
+  }]
+
+  for (const view of views) {
+    const angle = view.angle.toLowerCase()
+    const angleRadians = canonicalAngles[angle]
+    if (angleRadians === undefined) continue
+    try {
+      const viewMetadata = await sharp(view.imageBuffer).metadata()
+      const viewWidth = viewMetadata.width ?? sourceWidth
+      const viewHeight = viewMetadata.height ?? sourceHeight
+      const viewPixels = await sharp(view.imageBuffer)
+        .resize({ width: viewWidth, height: viewHeight })
+        .raw()
+        .ensureAlpha()
+        .toBuffer()
+      const [viewBgR, viewBgG, viewBgB] = detectBackground(viewPixels, viewWidth, viewHeight)
+      const viewSilhouette = detectObjectSilhouette(
+        viewPixels,
+        viewWidth,
+        viewHeight,
+        viewBgR,
+        viewBgG,
+        viewBgB,
+      )
+      const viewMask = new Uint8Array(viewWidth * viewHeight)
+      for (let pixel = 0; pixel < viewMask.length; pixel++) {
+        viewMask[pixel] = viewSilhouette.foreground[pixel] ? 255 : 0
+      }
+      const viewProfile = extractLatheProfile({ width: viewWidth, height: viewHeight, data: viewMask })
+      const viewFlatmap = projectSourceToCanonicalFlatmap(
+        {
+          width: viewWidth,
+          height: viewHeight,
+          data: new Uint8Array(viewPixels.buffer, viewPixels.byteOffset, viewPixels.byteLength),
+        },
+        { width: viewWidth, height: viewHeight, data: viewMask },
+        viewProfile,
+        atlasSize,
+        atlasSize,
+      )
+      completionLayers.push({ flatmap: viewFlatmap, angleRadians })
+      viewsUsed.push(angle)
+      viewBounds.push({
+        angle,
+        minX: viewSilhouette.minX,
+        minY: viewSilhouette.minY,
+        maxX: viewSilhouette.maxX,
+        maxY: viewSilhouette.maxY,
+      })
+    } catch (error) {
+      console.warn(`[texture-projector] Canonical ${angle} view overgeslagen:`, error)
+    }
+  }
+
+  const composite = composeCanonicalFlatmaps(flatmap, completionLayers)
   const confidenceRgba = Buffer.alloc(atlasSize * atlasSize * 4)
   const unknownRgba = Buffer.alloc(atlasSize * atlasSize * 4)
-  for (let pixel = 0; pixel < flatmap.confidence.length; pixel++) {
-    const confidenceValue = flatmap.confidence[pixel]
-    const unknownValue = flatmap.unknownMask[pixel]
+  for (let pixel = 0; pixel < composite.confidence.length; pixel++) {
+    const confidenceValue = composite.confidence[pixel]
+    const unknownValue = composite.unresolvedMask[pixel]
     confidenceRgba.fill(confidenceValue, pixel * 4, pixel * 4 + 3)
     confidenceRgba[pixel * 4 + 3] = 255
     unknownRgba.fill(unknownValue, pixel * 4, pixel * 4 + 3)
@@ -1312,35 +1376,38 @@ async function projectCanonicalLatheSkin(
       .toBuffer()
   const [
     atlasBuffer,
-    previewAtlasBuffer,
+    sourceProjectionBuffer,
+    reconstructionBuffer,
     confidenceMaskBuffer,
     unknownMaskBuffer,
     productMaskBuffer,
   ] = await Promise.all([
+    rawPng(composite.compositeRgba, atlasSize, atlasSize),
     rawPng(flatmap.sourceRgba, atlasSize, atlasSize),
-    rawPng(previewPixels, atlasSize, atlasSize),
+    rawPng(composite.reconstructionRgba, atlasSize, atlasSize),
     rawPng(confidenceRgba, atlasSize, atlasSize),
     rawPng(unknownRgba, atlasSize, atlasSize),
     maskPng(productMask, sourceWidth, sourceHeight),
   ])
   const texturedGlbBuffer = await exportCanonicalLatheGlb(
     geometry,
-    previewAtlasBuffer,
+    atlasBuffer,
     { center: [bbox.cx, bbox.cy, bbox.cz] },
   )
   const pixelCount = atlasSize * atlasSize
   let observedPixelCount = 0
   let confidenceSum = 0
   for (let pixel = 0; pixel < pixelCount; pixel++) {
-    if (flatmap.unknownMask[pixel] === 0) observedPixelCount++
-    confidenceSum += flatmap.confidence[pixel] / 255
+    if (composite.unresolvedMask[pixel] === 0) observedPixelCount++
+    confidenceSum += composite.confidence[pixel] / 255
   }
   const triangleCount = geometry.indices.length / 3
 
   return {
     texturedGlbBuffer,
     atlasBuffer,
-    sourceProjectionBuffer: atlasBuffer,
+    sourceProjectionBuffer,
+    reconstructionBuffer,
     confidenceMaskBuffer,
     productMaskBuffer,
     unknownMaskBuffer,
@@ -1348,20 +1415,14 @@ async function projectCanonicalLatheSkin(
       route: 'canonical-lathe-skin-v2',
       mapping_model: 'lathe-canonical-wrap',
       atlas_size: atlasSize,
-      views_used: ['original'],
+      views_used: viewsUsed,
       triangles_textured: triangleCount,
       triangles_total: triangleCount,
       atlas_texels_filled: observedPixelCount,
       atlas_coverage: observedPixelCount / pixelCount,
       triangle_coverage: 1,
       fallback_color: fallbackColor,
-      view_bounds: [{
-        angle: 'original',
-        minX: silhouette.minX,
-        minY: silhouette.minY,
-        maxX: silhouette.maxX,
-        maxY: silhouette.maxY,
-      }],
+      view_bounds: viewBounds,
       shape_analysis: {
         rotational_confidence: shapeAnalysis.rotationalConfidence,
         width_depth_ratio: shapeAnalysis.widthDepthRatio,
@@ -1369,8 +1430,8 @@ async function projectCanonicalLatheSkin(
         seam_angle_radians: Math.PI,
       },
       source_confidence: confidenceSum / pixelCount,
-      unknown_fill: 'explicit-mask',
-      preview_fill: 'neutral-non-exporting',
+      unknown_fill: 'canonical-multiview-completion',
+      preview_fill: 'composite-source-plus-reconstruction',
       canonical_geometry: {
         rings: geometry.rings,
         radial_segments: geometry.radialSegments,
@@ -1466,6 +1527,7 @@ export async function projectTexture(input: TextureProjectionInput): Promise<Tex
       bbox,
       shapeAnalysis,
       input.sourceImageBuffer,
+      input.views,
       atlasSize,
     )
   }

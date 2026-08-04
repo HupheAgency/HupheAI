@@ -26,6 +26,19 @@ export interface CanonicalFlatmap {
   unknownMask: Uint8Array
 }
 
+export interface CanonicalFlatmapLayer {
+  flatmap: CanonicalFlatmap
+  angleRadians: number
+}
+
+export interface CanonicalFlatmapComposite {
+  compositeRgba: Uint8Array
+  reconstructionRgba: Uint8Array
+  confidence: Uint8Array
+  unresolvedMask: Uint8Array
+  reconstructedPixels: number
+}
+
 export interface ExtractProfileOptions {
   profileSamples?: number
   medianRadius?: number
@@ -245,6 +258,126 @@ export function projectSourceToCanonicalFlatmap(source: RgbaImage, mask: BinaryM
     }
   }
   return { width, height, sourceRgba, confidence, unknownMask }
+}
+
+export function composeCanonicalFlatmaps(
+  source: CanonicalFlatmap,
+  layers: CanonicalFlatmapLayer[],
+): CanonicalFlatmapComposite {
+  const { width, height } = source
+  if (width < 2 || height < 1) throw new Error('Canonieke flatmap heeft ongeldige afmetingen.')
+  const pixelCount = width * height
+  if (
+    source.sourceRgba.length !== pixelCount * 4 ||
+    source.confidence.length !== pixelCount ||
+    source.unknownMask.length !== pixelCount
+  ) throw new Error('Canonieke bronflatmap heeft ongeldige buffers.')
+  for (const { flatmap } of layers) {
+    if (flatmap.width !== width || flatmap.height !== height) {
+      throw new Error('Alle canonieke flatmaps moeten dezelfde afmetingen hebben.')
+    }
+  }
+
+  // U=0 and U=1 are the same lathe seam. Work on the unique ring and copy the
+  // first column to the duplicate seam column only after composition.
+  const ringWidth = width - 1
+  const compositeRgba = new Uint8Array(source.sourceRgba)
+  const reconstructionRgba = new Uint8Array(pixelCount * 4)
+  const confidence = new Uint8Array(source.confidence)
+  const sumR = new Uint32Array(pixelCount)
+  const sumG = new Uint32Array(pixelCount)
+  const sumB = new Uint32Array(pixelCount)
+  const sumWeight = new Uint32Array(pixelCount)
+
+  for (const { flatmap, angleRadians } of layers) {
+    const shift = Math.round((angleRadians / (Math.PI * 2)) * ringWidth)
+    for (let y = 0; y < height; y++) {
+      const row = y * width
+      for (let x = 0; x < ringWidth; x++) {
+        const sourcePixel = row + x
+        const sourceOffset = sourcePixel * 4
+        if (flatmap.sourceRgba[sourceOffset + 3] === 0) continue
+        const destinationX = ((x + shift) % ringWidth + ringWidth) % ringWidth
+        const destinationPixel = row + destinationX
+        if (source.sourceRgba[destinationPixel * 4 + 3] !== 0) continue
+        const weight = Math.max(1, flatmap.confidence[sourcePixel])
+        sumR[destinationPixel] += flatmap.sourceRgba[sourceOffset] * weight
+        sumG[destinationPixel] += flatmap.sourceRgba[sourceOffset + 1] * weight
+        sumB[destinationPixel] += flatmap.sourceRgba[sourceOffset + 2] * weight
+        sumWeight[destinationPixel] += weight
+        confidence[destinationPixel] = Math.max(confidence[destinationPixel], flatmap.confidence[sourcePixel])
+      }
+    }
+  }
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width
+    for (let x = 0; x < ringWidth; x++) {
+      const pixel = row + x
+      if (source.sourceRgba[pixel * 4 + 3] !== 0 || sumWeight[pixel] === 0) continue
+      const offset = pixel * 4
+      compositeRgba[offset] = Math.round(sumR[pixel] / sumWeight[pixel])
+      compositeRgba[offset + 1] = Math.round(sumG[pixel] / sumWeight[pixel])
+      compositeRgba[offset + 2] = Math.round(sumB[pixel] / sumWeight[pixel])
+      compositeRgba[offset + 3] = 255
+      reconstructionRgba.set(compositeRgba.subarray(offset, offset + 4), offset)
+    }
+  }
+
+  // Canonical views normally overlap enough to cover the ring. If segmentation
+  // leaves narrow holes, close them along the circumference instead of exposing
+  // neutral material. These pixels remain reconstruction provenance.
+  for (let y = 0; y < height; y++) {
+    const row = y * width
+    const known: number[] = []
+    for (let x = 0; x < ringWidth; x++) {
+      if (compositeRgba[(row + x) * 4 + 3] !== 0) known.push(x)
+    }
+    if (!known.length) continue
+    for (let index = 0; index < known.length; index++) {
+      const leftX = known[index]
+      const rightX = known[(index + 1) % known.length]
+      const span = (rightX - leftX + ringWidth) % ringWidth
+      if (span <= 1) continue
+      const leftPixel = row + leftX
+      const rightPixel = row + rightX
+      for (let step = 1; step < span; step++) {
+        const x = (leftX + step) % ringWidth
+        const pixel = row + x
+        const offset = pixel * 4
+        if (compositeRgba[offset + 3] !== 0) continue
+        const t = step / span
+        for (let channel = 0; channel < 3; channel++) {
+          compositeRgba[offset + channel] = Math.round(
+            compositeRgba[leftPixel * 4 + channel] * (1 - t) +
+            compositeRgba[rightPixel * 4 + channel] * t,
+          )
+        }
+        compositeRgba[offset + 3] = 255
+        reconstructionRgba.set(compositeRgba.subarray(offset, offset + 4), offset)
+        confidence[pixel] = Math.max(24, Math.min(confidence[leftPixel], confidence[rightPixel]))
+      }
+    }
+  }
+
+  const unresolvedMask = new Uint8Array(pixelCount)
+  let reconstructedPixels = 0
+  for (let y = 0; y < height; y++) {
+    const row = y * width
+    for (let x = 0; x < ringWidth; x++) {
+      const pixel = row + x
+      if (compositeRgba[pixel * 4 + 3] === 0) unresolvedMask[pixel] = 255
+      if (reconstructionRgba[pixel * 4 + 3] !== 0) reconstructedPixels++
+    }
+    const first = row
+    const seam = row + ringWidth
+    compositeRgba.set(compositeRgba.subarray(first * 4, first * 4 + 4), seam * 4)
+    reconstructionRgba.set(reconstructionRgba.subarray(first * 4, first * 4 + 4), seam * 4)
+    confidence[seam] = confidence[first]
+    unresolvedMask[seam] = unresolvedMask[first]
+  }
+
+  return { compositeRgba, reconstructionRgba, confidence, unresolvedMask, reconstructedPixels }
 }
 
 export function validateCanonicalLatheGeometry(geometry: LatheGeometry): { valid: true; maxTriangleUSpan: number } {

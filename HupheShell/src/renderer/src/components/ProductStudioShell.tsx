@@ -2313,6 +2313,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       : null
   const textureCoverageIsLow = textureTriangleCoverage !== null && textureTriangleCoverage < 0.8
   const activeStudioMeshUrl = texturedMeshReady ? texturedMeshUrl : project.reconstruction?.mesh_url
+  const visibleStudioMeshUrl = textureDeletedRef.current && texturedMeshReady
+    ? project.reconstruction?.mesh_url
+    : activeStudioMeshUrl
   const textureInProgress = textureStatus === 'pending' || textureStatus === 'processing'
   const renderPacketReady = Boolean(project.renderPacketRecord || project.renderPacket)
   const finalRenderRequiresTexture = meshReady && !texturedMeshReady
@@ -2876,6 +2879,12 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       })
       if (!result?.ok) throw new Error(result?.error || 'Views genereren mislukt.')
       await hydrateLatestState(project.backendProject.id, false)
+      if (result.failedViews?.length) {
+        const labels: Record<string, string> = { front: 'Voorkant', left: 'Links', right: 'Rechts', rear: 'Achterkant', top: 'Bovenkant' }
+        setError(result.failedViews
+          .map((failure: { angle: string; error: string }) => `${labels[failure.angle] ?? failure.angle}: ${failure.error}`)
+          .join(' '))
+      }
     } catch (err: any) {
       if (!notifyIfCreditsRequired(err)) setError(err?.message || 'Views genereren mislukt.')
     } finally {
@@ -2911,6 +2920,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       })
       if (!result?.ok) throw new Error(result?.error || 'View opnieuw genereren mislukt.')
       await hydrateLatestState(project.backendProject.id, false)
+      if (result.failedViews?.length) {
+        throw new Error(result.failedViews.map((failure: { error: string }) => failure.error).join(' '))
+      }
     } catch (err: any) {
       if (!notifyIfCreditsRequired(err)) setError(err?.message || 'View opnieuw genereren mislukt.')
     } finally {
@@ -2942,7 +2954,16 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       )
     }
 
-    let reconstruction = forceReconstruction ? undefined : project.reconstruction
+    const existingReconstruction = forceReconstruction ? undefined : project.reconstruction
+    const canReuseReconstruction = Boolean(
+      existingReconstruction
+      && (
+        route === 'primitive-proxy'
+          ? existingReconstruction.route === 'primitive-proxy'
+          : existingReconstruction.route === route && Boolean(existingReconstruction.mesh_url)
+      ),
+    )
+    let reconstruction = canReuseReconstruction ? existingReconstruction : undefined
     if (!reconstruction) {
       reconstruction = assertOk<ReconstructionVersion>(
         await api.startReconstruction({
@@ -2955,7 +2976,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       )
     }
 
-    const hadReconstruction = !!project.reconstruction
+    const previousMeshUrl = project.reconstruction?.texture_status === 'completed' && project.reconstruction.textured_mesh_url
+      ? project.reconstruction.textured_mesh_url
+      : project.reconstruction?.mesh_url
     setProject((prev) => ({
       ...prev,
       canonicalSet,
@@ -2963,12 +2986,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       activeStep: 'mesh',
       updatedAt: new Date().toISOString(),
     }))
-    if (!hadReconstruction) {
-      const reconstructedTextureReady = reconstruction.texture_status === 'completed' && Boolean(reconstruction.textured_mesh_url)
-      const bestMeshUrl = reconstructedTextureReady ? reconstruction.textured_mesh_url : reconstruction.mesh_url
-      if (bestMeshUrl) {
-        studioRef.current?.addModelFromUrl(bestMeshUrl, reconstructedTextureReady ? 'Textured product' : 'Reconstructed product')
-      }
+    const reconstructedTextureReady = reconstruction.texture_status === 'completed' && Boolean(reconstruction.textured_mesh_url)
+    const bestMeshUrl = reconstructedTextureReady ? reconstruction.textured_mesh_url : reconstruction.mesh_url
+    if (bestMeshUrl && bestMeshUrl !== previousMeshUrl) {
+      studioRef.current?.addModelFromUrl(bestMeshUrl, reconstructedTextureReady ? 'Textured product' : 'Reconstructed product')
     }
     return { canonicalSet, reconstruction }
   }
@@ -2977,11 +2998,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     setError(null)
     setBusy(route === 'primitive-proxy' ? 'Proxy mesh maken...' : 'Reconstructie starten...')
     try {
-      const result = await ensureCanonicalAndReconstruction(route)
-      if (route !== result.reconstruction.route && !result.reconstruction.mesh_url) {
-        setProject((prev) => ({ ...prev, reconstruction: undefined }))
-        await ensureCanonicalAndReconstruction(route)
-      }
+      await ensureCanonicalAndReconstruction(route)
       await hydrateLatestState(project.backendProject?.id, false)
     } catch (err: any) {
       if (!notifyIfCreditsRequired(err)) setError(err?.message || 'Reconstructie starten mislukt.')
@@ -6296,6 +6313,10 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           debugRings={debugRings}
           viewMode={viewMode}
           environmentMeshUrls={envMappingEnabled ? envMeshUrls : undefined}
+          productModelUrl={visibleStudioMeshUrl}
+          productModelName={texturedMeshReady && !textureDeletedRef.current ? 'Textured product' : 'Reconstructed product'}
+          ensureDefaultPlaceholder={!visibleStudioMeshUrl}
+          removeDefaultPlaceholder={Boolean(visibleStudioMeshUrl)}
           splatAlignment={
             splatVisible &&
             activeArchiveProjectId.current === project.backendProject?.id &&

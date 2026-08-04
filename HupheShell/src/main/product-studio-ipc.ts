@@ -2220,6 +2220,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
     const startTime = Date.now()
     const views: Array<{ angle: string; assetUrl: string; viewId: string }> = []
+    const failedViews: Array<{ angle: string; error: string }> = []
 
     try {
       const { callFalProxy } = await import('./lib/proxy')
@@ -2298,12 +2299,14 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           }, jwt) as any
         } catch (falErr: any) {
           console.error(`[generate-reference-views] fal call failed for angle=${angle}:`, falErr?.message ?? falErr)
+          failedViews.push({ angle, error: falErr?.message ?? String(falErr) })
           continue
         }
 
         const falImageUrl = result?.images?.[0]?.url
         if (!falImageUrl) {
           console.error(`[generate-reference-views] no image url for angle=${angle}, result=`, JSON.stringify(result))
+          failedViews.push({ angle, error: 'De beeldprovider gaf geen afbeelding terug.' })
           continue
         }
 
@@ -2311,18 +2314,20 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         const { data: { user: authUser } } = await sb.auth.getUser()
         if (!authUser) {
           console.error(`[generate-reference-views] no authUser for angle=${angle}`)
+          failedViews.push({ angle, error: 'De gebruikerssessie kon niet worden gelezen.' })
           continue
         }
         const imgRes = await fetch(falImageUrl)
         if (!imgRes.ok) {
           console.error(`[generate-reference-views] download failed for angle=${angle}: ${imgRes.status} ${imgRes.statusText}`)
+          failedViews.push({ angle, error: `De afbeelding kon niet worden opgehaald (${imgRes.status}).` })
           continue
         }
         const imgBuf = Buffer.from(await imgRes.arrayBuffer())
         const imageUrl = await saveAssetLocally(authUser.id, args.projectId, `views/${angle}_${Date.now()}.png`, imgBuf)
 
         // Reference view opslaan
-        const { data: view } = await sb
+        const { data: view, error: viewError } = await sb
           .from('reference_views')
           .insert({
             project_id: args.projectId,
@@ -2337,16 +2342,34 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           .select()
           .single()
 
-        if (view) {
-          await sb
-            .from('reference_views')
-            .update({ status: 'superseded' })
-            .eq('project_id', args.projectId)
-            .eq('angle', angle)
-            .in('status', ['draft', 'active'])
-            .neq('id', view.id)
-          views.push({ angle, assetUrl: imageUrl, viewId: view.id })
+        if (viewError || !view) {
+          failedViews.push({ angle, error: viewError?.message ?? 'Het aanzicht kon niet worden opgeslagen.' })
+          continue
         }
+
+        await sb
+          .from('reference_views')
+          .update({ status: 'superseded' })
+          .eq('project_id', args.projectId)
+          .eq('angle', angle)
+          .in('status', ['draft', 'active'])
+          .neq('id', view.id)
+        views.push({ angle, assetUrl: imageUrl, viewId: view.id })
+      }
+
+      const failureSummary = failedViews.map(({ angle, error }) => `${angle}: ${error}`).join(' | ')
+
+      if (views.length === 0 && failedViews.length > 0) {
+        await sb
+          .from('provider_runs')
+          .update({
+            status: 'failed',
+            error_message: failureSummary,
+            latency_ms: Date.now() - startTime,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', run.id)
+        return { ok: false, error: `Geen aanzichten gegenereerd. ${failureSummary}`, failedViews }
       }
 
       // Provider run updaten
@@ -2354,6 +2377,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         .from('provider_runs')
         .update({
           status: 'completed',
+          error_message: failureSummary || null,
           latency_ms: Date.now() - startTime,
           completed_at: new Date().toISOString(),
         })
@@ -2365,7 +2389,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         .update({ status: 'references_review' })
         .eq('id', args.projectId)
 
-      return { ok: true, views, providerRunId: run.id }
+      return { ok: true, views, providerRunId: run.id, failedViews }
     } catch (err: any) {
       await sb
         .from('provider_runs')

@@ -19,6 +19,7 @@ try {
 
   const {
     buildCanonicalLatheGeometry,
+    composeCanonicalFlatmaps,
     extractLatheProfile,
     hardMaskComposite,
     projectSourceToCanonicalFlatmap,
@@ -112,12 +113,38 @@ try {
   assert.equal(flatmap.confidence[rearPixel], 0)
   assert.equal(flatmap.unknownMask[rearPixel], 255)
 
+  const sourceFrontRgba = [...flatmap.sourceRgba.subarray(frontPixel * 4, frontPixel * 4 + 4)]
+  const completed = composeCanonicalFlatmaps(flatmap, [
+    { flatmap, angleRadians: Math.PI / 2 },
+    { flatmap, angleRadians: Math.PI },
+    { flatmap, angleRadians: -Math.PI / 2 },
+  ])
+  assert.deepEqual(
+    [...completed.compositeRgba.subarray(frontPixel * 4, frontPixel * 4 + 4)],
+    sourceFrontRgba,
+    'Canonical completion must not overwrite observed source pixels',
+  )
+  assert.equal(completed.compositeRgba[rearPixel * 4 + 3], 255)
+  assert.equal(completed.reconstructionRgba[rearPixel * 4 + 3], 255)
+  assert.ok(completed.reconstructedPixels > 0)
+  assert.equal(completed.unresolvedMask[rearPixel], 0)
+
+  for (let y = 0; y < completed.height; y++) {
+    const firstOffset = y * completed.width * 4
+    const seamOffset = (y * completed.width + completed.width - 1) * 4
+    assert.deepEqual(
+      [...completed.compositeRgba.subarray(firstOffset, firstOffset + 4)],
+      [...completed.compositeRgba.subarray(seamOffset, seamOffset + 4)],
+      `Canonical seam mismatch on row ${y}`,
+    )
+  }
+
   const original = new Uint8Array([10, 20, 30, 255, 40, 50, 60, 255])
   const edited = new Uint8Array([110, 120, 130, 255, 140, 150, 160, 255])
   const composited = hardMaskComposite(original, edited, new Uint8Array([0, 255]))
   assert.deepEqual([...composited], [10, 20, 30, 255, 140, 150, 160, 255])
 
-  console.log('Canonical LATHE core: seam, UV, source evidence, unknown mask and hard-mask tests passed.')
+  console.log('Canonical LATHE core: seam, UV, 360 completion, provenance and hard-mask tests passed.')
 } finally {
   await rm(temporaryDirectory, { recursive: true, force: true })
 }
