@@ -163,8 +163,11 @@ export function extractLatheProfile(
     arcLength += Math.hypot(smoothed[index].sourceY - smoothed[index - 1].sourceY, smoothed[index].radiusPx - smoothed[index - 1].radiusPx)
     arcs.push(arcLength)
   }
-  // Pixel row zero is top, while canonical V=1 is top.
-  smoothed.forEach((point, index) => { point.v = arcLength > 0 ? 1 - arcs[index] / arcLength : 1 - index / (smoothed.length - 1) })
+  // Pixelrij 0 is de bovenkant (hals) van de flatmap-textuur. glTF/three.js
+  // laden textuur-UV's met flipY=false, dus V=0 = bovenste textuurrij. De hals
+  // (ring 0, index 0) moet daarom V=0 krijgen; anders sampelt de hals de
+  // onderste rij van de flatmap en komt de skin ondersteboven op de mesh.
+  smoothed.forEach((point, index) => { point.v = arcLength > 0 ? arcs[index] / arcLength : index / (smoothed.length - 1) })
   return { sourceWidth: mask.width, sourceHeight: mask.height, top, bottom, axisX, maxRadiusPx: Math.max(...smoothed.map((point) => point.radiusPx)), points: smoothed }
 }
 

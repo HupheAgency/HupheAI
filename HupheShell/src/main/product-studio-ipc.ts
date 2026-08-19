@@ -1247,16 +1247,18 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         {
           type: 'text',
           text: [
-            'You will receive three labeled images.',
-            'Output CALIBRATION with the skin/texture from CANONICAL applied. Keep the exact composition, camera angle, scale, crop, silhouette and product position from CALIBRATION. Use BEAUTY for lighting and 3D shape reference.',
-            'Do not change the pose, crop, size or angle.',
+            'You will receive three labeled reference images of the SAME product. Produce ONE polished, photorealistic product image.',
+            'CAMERA & POSE (authoritative = BEAUTY): the output MUST be seen from the exact same viewpoint as BEAUTY — identical camera angle, orientation, tilt, scale, crop, silhouette and product position. BEAUTY is the real 3D render from the scene camera; that viewpoint is fixed and must be reproduced exactly.',
+            'CALIBRATION shows that same viewpoint as a reference; use it only to confirm the silhouette and placement. Do not deviate from it.',
+            'TEXTURE & PRINT (from CANONICAL only): copy the skin, material, colors, labels, logos, print and text ONLY from CANONICAL. CANONICAL is a straight-on FRONT product shot used purely for print fidelity — you must IGNORE its camera angle.',
+            'HARD CONSTRAINT: do NOT output a straight-on front view. Do NOT rotate, re-center, rescale or reface the product toward the camera. Do NOT adopt CANONICAL\'s frontal pose. Keep BEAUTY\'s exact angle and framing; only improve lighting, sharpness and finish to a clean studio product shot.',
           ].join('\n'),
         },
-        { type: 'text', text: 'CALIBRATION — Keep this exact composition, camera angle, scale, crop, silhouette and product position:' },
-        { type: 'image_url', image_url: { url: calibrationDataUrl } },
-        { type: 'text', text: 'BEAUTY — Same product pose with real lighting and 3D shape:' },
+        { type: 'text', text: 'BEAUTY — AUTHORITATIVE viewpoint. Match this exact camera angle, pose, tilt, scale, crop and product position:' },
         { type: 'image_url', image_url: { url: beautyDataUrl } },
-        { type: 'text', text: 'CANONICAL — Use only its skin, texture, material, print and colors:' },
+        { type: 'text', text: 'CALIBRATION — same viewpoint reference for silhouette and placement (do not change the angle):' },
+        { type: 'image_url', image_url: { url: calibrationDataUrl } },
+        { type: 'text', text: 'CANONICAL — FRONT product shot. Use ONLY its skin, texture, material, print, labels and colors. IGNORE its camera angle — do not output a front view:' },
         { type: 'image_url', image_url: { url: canonicalDataUrl } },
       ]
 
@@ -2665,10 +2667,19 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         import('./lib/texture-projector'),
         import('./lib/geometry-integrity'),
       ])
+      // Het silhouet/profiel van de canonical LATHE wordt uit deze bron gehaald.
+      // Gebruik bij voorkeur de recht-van-voren front-view: die is geometrisch
+      // correcter dan de rauwe originele foto, die schuin genomen kan zijn en het
+      // profiel dan als een kegel/vaas vervormt i.p.v. een echte fles-silhouet.
+      // Valt terug op de originele bronfoto en anders op de eerste beschikbare view.
+      const profileSourceBuffer =
+        orderedViews.find(([angle]) => angle === 'front')?.[1]
+        ?? sourceImageBuffer
+        ?? orderedViews[0][1]
       const projection = await projectTexture({
         glbBuffer: baseGlbBuffer,
         views: orderedViews.map(([angle, imageBuffer]) => ({ angle, imageBuffer })),
-        sourceImageBuffer,
+        sourceImageBuffer: profileSourceBuffer,
         atlasSize: 2048,
       })
       if (projection.manifest.triangles_textured === 0) {

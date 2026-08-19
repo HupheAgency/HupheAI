@@ -1308,13 +1308,11 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
   const [neutralGen, setNeutralGen] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; neutralUrl?: string; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [assetsPrep, setAssetsPrep] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; colmap?: { registered: number; total: number; pct: number; pass: boolean; method?: string }; sampleClayUrls?: string[]; error?: string }>({ phase: 'idle', step: '', progress: 0 })
   const [splatTraining, setSplatTraining] = useState<{ phase: 'idle' | 'running' | 'done' | 'error'; step: string; progress: number; currentStep?: number; totalSteps?: number; error?: string }>({ phase: 'idle', step: '', progress: 0 })
-  const [marbleGen, setMarbleGen] = useState<MarbleRunState>(() => {
-    try {
-      const raw = localStorage.getItem('huphe:marble-gen:v1')
-      if (raw) return JSON.parse(raw)
-    } catch { /* ignore */ }
-    return { phase: 'idle', step: '', progress: 0 }
-  })
+  // Marble-wereldstatus is per-product. Nooit uit een globale cache
+  // initialiseren, anders lekt de laatst gegenereerde wereld naar een
+  // nieuw/ander product. De echte wereld voor dít project wordt per
+  // project van schijf hersteld via check-orbit-video (resolveMarble).
+  const [marbleGen, setMarbleGen] = useState<MarbleRunState>({ phase: 'idle', step: '', progress: 0 })
   const [marblePrompt, setMarblePrompt] = useState('')
   const orbitBelongsToCurrentRender = Boolean(project.finalRenderRecord?.id && orbitTest.renderVersionId === project.finalRenderRecord.id)
   const orbitModel = 'seedance' as const
@@ -2028,11 +2026,13 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
     }
   }
 
-  // Persist marble gen state (niet tijdens genereren)
+  // Marble-status resetten zodra je naar een ander product wisselt, zodat de
+  // wereld van het vorige product niet blijft staan. check-orbit-video hydrateert
+  // hierna de eigen wereld van dit project vanaf schijf (indien aanwezig). Een
+  // lopende generatie laten we met rust.
   useEffect(() => {
-    if (marbleGen.phase === 'running') return
-    try { localStorage.setItem('huphe:marble-gen:v1', JSON.stringify(marbleGen)) } catch { /* ignore */ }
-  }, [marbleGen])
+    setMarbleGen((prev) => prev.phase === 'running' ? prev : { phase: 'idle', step: '', progress: 0 })
+  }, [project.id])
 
   // (Geen auto-load meer: marble wordt alleen geladen via restoreRenderState bij archive-klik)
 
@@ -3066,9 +3066,14 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
       setError('Product Studio API is nog niet beschikbaar.')
       return
     }
-    const sourceViewIds = project.canonicalSet?.view_ids?.length
-      ? project.canonicalSet.view_ids
-      : approvedBackendViewIds
+    // De canonical set wordt bij aanmaak bevroren; views die daarna worden
+    // goedgekeurd (bijv. een rear die pas later gegenereerd is) zitten er niet in.
+    // Voor de texture-bake gebruiken we daarom de unie van de canonical set én
+    // alle actueel goedgekeurde views, zodat geen enkele goedgekeurde hoek mist.
+    const sourceViewIds = Array.from(new Set([
+      ...(project.canonicalSet?.view_ids ?? []),
+      ...approvedBackendViewIds,
+    ]))
     setBusy(forceRetry ? 'Texture opnieuw starten...' : 'Product texture voorbereiden...')
     setError(null)
     try {
