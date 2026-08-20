@@ -1243,23 +1243,31 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const calibrationDataUrl = await h.toDataUrl(calibrationBuffer ?? beautyBuffer)
       const beautyDataUrl = await h.toDataUrl(beautyBuffer)
 
+      // Dit is een EDIT-taak, geen synthese-uit-drie-referenties: als je het model
+      // vraagt "één beeld uit drie referenties" kiest het de grote, schone CANONICAL
+      // en negeert het de kleine/donkere BEAUTY, waardoor de product layer een
+      // vooraanzicht wordt. Daarom is BASE (=beauty) het te bewerken beeld: pose,
+      // hoek, perspectief, schaal en positie liggen daarmee vast; alleen het
+      // oppervlak (belichting/scherpte/print) wordt verbeterd met CANONICAL als
+      // uitsluitend een print-referentie.
       const productParts: any[] = [
         {
           type: 'text',
           text: [
-            'You will receive three labeled reference images of the SAME product. Produce ONE polished, photorealistic product image.',
-            'CAMERA & POSE (authoritative = BEAUTY): the output MUST be seen from the exact same viewpoint as BEAUTY — identical camera angle, orientation, tilt, scale, crop, silhouette and product position. BEAUTY is the real 3D render from the scene camera; that viewpoint is fixed and must be reproduced exactly.',
-            'CALIBRATION shows that same viewpoint as a reference; use it only to confirm the silhouette and placement. Do not deviate from it.',
-            'TEXTURE & PRINT (from CANONICAL only): copy the skin, material, colors, labels, logos, print and text ONLY from CANONICAL. CANONICAL is a straight-on FRONT product shot used purely for print fidelity — you must IGNORE its camera angle.',
-            'HARD CONSTRAINT: do NOT output a straight-on front view. Do NOT rotate, re-center, rescale or reface the product toward the camera. Do NOT adopt CANONICAL\'s frontal pose. Keep BEAUTY\'s exact angle and framing; only improve lighting, sharpness and finish to a clean studio product shot.',
+            'You are ENHANCING one product render into a polished, photorealistic studio product photo. This is an edit of BASE, not a new composition.',
+            'BASE (first image) already shows the product in the correct camera angle, perspective, tilt, position, scale and framing. You MUST preserve ALL of these EXACTLY. Do NOT rotate, turn, re-center, rescale, crop, or re-frame the product. The output product silhouette and its position within the frame must match BASE pixel-for-pixel. Keep the same empty background area around it.',
+            'Improve ONLY the surface appearance of BASE: realistic studio lighting, correct/brighter exposure, sharpness, clean glass and material, and crisp legible labels.',
+            'PRINT_REFERENCE (second image) is a straight-on FRONT shot of the SAME product. Use it ONLY to reproduce the exact label artwork, logos, text, and colors faithfully on the surfaces that are visible in BASE. IGNORE its camera angle, pose, scale and framing completely — do NOT turn the product to face the camera, do NOT copy its front-on composition.',
+            'STRUCTURE_REFERENCE (third image) is the same viewpoint as BASE shown as a calibration mesh; use it only to confirm the 3D orientation and silhouette. Do not change the angle.',
+            'HARD CONSTRAINTS: the result must be at the SAME angle and SAME small size/position as BASE. It must NOT become a large, centered, straight-on front product shot. If BASE shows a three-quarter/angled view, the output stays a three-quarter/angled view.',
           ].join('\n'),
         },
-        { type: 'text', text: 'BEAUTY — AUTHORITATIVE viewpoint. Match this exact camera angle, pose, tilt, scale, crop and product position:' },
+        { type: 'text', text: 'BASE — the image you are enhancing. Preserve its exact product angle, perspective, position, scale and framing pixel-for-pixel:' },
         { type: 'image_url', image_url: { url: beautyDataUrl } },
-        { type: 'text', text: 'CALIBRATION — same viewpoint reference for silhouette and placement (do not change the angle):' },
-        { type: 'image_url', image_url: { url: calibrationDataUrl } },
-        { type: 'text', text: 'CANONICAL — FRONT product shot. Use ONLY its skin, texture, material, print, labels and colors. IGNORE its camera angle — do not output a front view:' },
+        { type: 'text', text: 'PRINT_REFERENCE — front product shot; use ONLY its label artwork, logos, text and colors. IGNORE its angle, pose, scale and framing:' },
         { type: 'image_url', image_url: { url: canonicalDataUrl } },
+        { type: 'text', text: 'STRUCTURE_REFERENCE — calibration mesh at the same viewpoint as BASE; confirm orientation/silhouette only, do not change the angle:' },
+        { type: 'image_url', image_url: { url: calibrationDataUrl } },
       ]
 
       const productJson = await h.callModel([{ role: 'user', content: productParts }], 'google/gemini-3.1-flash-image-preview')

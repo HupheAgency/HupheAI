@@ -823,19 +823,19 @@ function renderToDataUrl(gl: THREE.WebGLRenderer, scene: THREE.Scene, camera: TH
   return _offscreenCanvas.toDataURL('image/png')
 }
 
-function withOffscreenCamera(camera: THREE.Camera, fovScale: number | undefined, fn: () => void) {
+function withOffscreenCamera(camera: THREE.Camera, _fovScale: number | undefined, fn: () => void) {
   const origFov = (camera as any).fov as number | undefined
   const origAspect = (camera as any).aspect as number | undefined
 
   if ((camera as any).aspect !== undefined) {
     ;(camera as any).aspect = OUTPUT_ASPECT
+    // canonicalCameraFov levert de UITVOER-FOV van het 16:9-kader (__outputFovY).
+    // Die is al de uitgesneden kader-lens — de on-screen 1920x1080-gids toont
+    // exact dezelfde FOV via applyOutputFrameProjection. fovScale (kader/canvas)
+    // hier nog eens toepassen zou dubbel inzoomen en het product te groot maken;
+    // daarom negeren we _fovScale bewust en renderen we op de canonieke output-FOV.
     const outputFov = camera instanceof THREE.PerspectiveCamera ? canonicalCameraFov(camera) : origFov
     if (outputFov !== undefined) (camera as any).fov = outputFov
-    if (fovScale && fovScale > 0 && fovScale < 1 && outputFov !== undefined) {
-      const halfRad = (outputFov * Math.PI) / 360
-      const scaledHalfRad = Math.atan(Math.tan(halfRad) * fovScale)
-      ;(camera as any).fov = (scaledHalfRad * 360) / Math.PI
-    }
     ;(camera as any).updateProjectionMatrix()
   }
 
