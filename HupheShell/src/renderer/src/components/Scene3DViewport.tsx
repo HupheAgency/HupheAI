@@ -257,7 +257,7 @@ export interface Scene3DViewportHandle {
   captureScreenshot: () => string | null
   captureCleanScreenshot: (fovScale?: number) => string | null
   captureAllPasses: (fovScale?: number) => RenderPasses | null
-  captureRenderManifest: () => Scene3DRenderManifest | null
+  captureRenderManifest: (fovScale?: number) => Scene3DRenderManifest | null
   getCanvasElement: () => HTMLCanvasElement | null
   setCameraOrbit: (
     position: [number, number, number],
@@ -823,7 +823,7 @@ function renderToDataUrl(gl: THREE.WebGLRenderer, scene: THREE.Scene, camera: TH
   return _offscreenCanvas.toDataURL('image/png')
 }
 
-function withOffscreenCamera(camera: THREE.Camera, _fovScale: number | undefined, fn: () => void) {
+function withOffscreenCamera<T>(camera: THREE.Camera, _fovScale: number | undefined, fn: () => T): T {
   const origFov = (camera as any).fov as number | undefined
   const origAspect = (camera as any).aspect as number | undefined
 
@@ -839,12 +839,14 @@ function withOffscreenCamera(camera: THREE.Camera, _fovScale: number | undefined
     ;(camera as any).updateProjectionMatrix()
   }
 
-  fn()
-
-  if ((camera as any).aspect !== undefined) {
-    ;(camera as any).aspect = origAspect
-    if (origFov !== undefined) (camera as any).fov = origFov
-    ;(camera as any).updateProjectionMatrix()
+  try {
+    return fn()
+  } finally {
+    if ((camera as any).aspect !== undefined) {
+      ;(camera as any).aspect = origAspect
+      if (origFov !== undefined) (camera as any).fov = origFov
+      ;(camera as any).updateProjectionMatrix()
+    }
   }
 }
 
@@ -972,16 +974,18 @@ function SceneManifestCapture({
   sceneState,
   orbitStateRef,
 }: {
-  manifestRef: React.MutableRefObject<(() => Scene3DRenderManifest | null) | null>
+  manifestRef: React.MutableRefObject<((fovScale?: number) => Scene3DRenderManifest | null) | null>
   sceneState: Scene3DState
   orbitStateRef: React.MutableRefObject<{ position: [number, number, number]; target: [number, number, number] } | null>
 }) {
-  const { gl, scene, camera } = useThree()
+  const { scene, camera } = useThree()
 
   useEffect(() => {
-    manifestRef.current = () => {
-      const width = gl.domElement.width || gl.domElement.clientWidth || sceneState.resolution[0]
-      const height = gl.domElement.height || gl.domElement.clientHeight || sceneState.resolution[1]
+    manifestRef.current = (fovScale?: number) => withOffscreenCamera(camera, fovScale, () => {
+      const width = RENDER_WIDTH
+      const height = RENDER_HEIGHT
+      camera.updateMatrixWorld(true)
+      camera.matrixWorldInverse.copy(camera.matrixWorld).invert()
       const productObject = sceneState.objects.find((object) => object.type === 'gltf') ?? sceneState.objects[0]
       const productIndex = productObject ? sceneState.objects.indexOf(productObject) : -1
       const sceneObjects = scene.children.find((child) => child.type === 'Group' && child.userData.__sceneObjects)
@@ -1035,6 +1039,7 @@ function SceneManifestCapture({
           width,
           height,
           aspect: width / Math.max(height, 1),
+          ...(fovScale !== undefined ? { fovScale } : {}),
         },
         camera: {
           position: camera.position.toArray() as [number, number, number],
@@ -1068,9 +1073,9 @@ function SceneManifestCapture({
           resolution: sceneState.resolution,
         },
       }
-    }
+    })
     return () => { manifestRef.current = null }
-  }, [camera, gl, manifestRef, orbitStateRef, scene, sceneState])
+  }, [camera, manifestRef, orbitStateRef, scene, sceneState])
 
   return null
 }
@@ -1373,8 +1378,8 @@ const Scene3DViewport = forwardRef<Scene3DViewportHandle, {
     captureAllPasses(fovScale?: number) {
       return passRef.current?.(fovScale) ?? null
     },
-    captureRenderManifest() {
-      return manifestRef.current?.() ?? null
+    captureRenderManifest(fovScale?: number) {
+      return manifestRef.current?.(fovScale) ?? null
     },
     getCanvasElement() {
       return canvasRef.current

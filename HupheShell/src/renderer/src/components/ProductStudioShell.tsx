@@ -143,8 +143,8 @@ type ProductStudioApi = {
   getTextureStatus: (reconstructionVersionId: string) => Promise<any>
   retryTextureWrap: (reconstructionVersionId: string) => Promise<any>
   saveScene: (args: { projectId: string; reconstructionVersionId: string; camera: Record<string, unknown>; lights: Record<string, unknown>[]; productTransform: Record<string, unknown>; environment: Record<string, unknown>; output: Record<string, unknown> }) => Promise<any>
-  uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective'; dataUrl: string }) => Promise<any>
-  createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; calibrationUrl?: string; lightMapUrl?: string; sceneManifest?: Record<string, unknown> }) => Promise<any>
+  uploadRenderPass: (args: { projectId: string; passType: 'beauty' | 'textured' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective'; dataUrl: string }) => Promise<any>
+  createRenderPacket: (args: { projectId: string; canonicalReferenceSetId: string; reconstructionVersionId: string; studioSceneVersionId: string; beautyUrl: string; texturedUrl?: string; objectMaskUrl?: string; depthUrl?: string; normalUrl?: string; calibrationUrl?: string; lightMapUrl?: string; perspectiveUrl?: string; sceneManifest?: Record<string, unknown> }) => Promise<any>
   listFinalRenders: (projectId: string) => Promise<any>
   updateFinalRenderStatus: (id: string, status: string) => Promise<any>
   generateProductLayer: (args: { projectId: string; renderPacketId: string }) => Promise<any>
@@ -3375,6 +3375,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
 
       const uploads = await Promise.all([
         packet.beauty ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'beauty', dataUrl: packet.beauty }) : Promise.resolve(null),
+        packet.passes?.textured ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'textured', dataUrl: packet.passes.textured }) : Promise.resolve(null),
         packet.passes?.calibration ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'calibration', dataUrl: packet.passes.calibration }) : Promise.resolve(null),
         packet.passes?.mask ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'object-mask', dataUrl: packet.passes.mask }) : Promise.resolve(null),
         packet.passes?.light ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'light-map', dataUrl: packet.passes.light }) : Promise.resolve(null),
@@ -3382,8 +3383,9 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
         packet.passes?.normal ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'normal', dataUrl: packet.passes.normal }) : Promise.resolve(null),
         packet.passes?.perspective ? api.uploadRenderPass({ projectId: project.backendProject.id, passType: 'perspective', dataUrl: packet.passes.perspective }) : Promise.resolve(null),
       ])
-      const [beautyUpload, calibrationUpload, objectMaskUpload, lightMapUpload, depthUpload, normalUpload, perspectiveUpload] = uploads
+      const [beautyUpload, texturedUpload, calibrationUpload, objectMaskUpload, lightMapUpload, depthUpload, normalUpload, perspectiveUpload] = uploads
       if (beautyUpload && !beautyUpload.ok) throw new Error(beautyUpload.error || 'Beauty upload mislukt.')
+      if (texturedUpload && !texturedUpload.ok) throw new Error(texturedUpload.error || 'Textured upload mislukt.')
       if (calibrationUpload && !calibrationUpload.ok) throw new Error(calibrationUpload.error || 'Calibration upload mislukt.')
       if (objectMaskUpload && !objectMaskUpload.ok) throw new Error(objectMaskUpload.error || 'Object-mask upload mislukt.')
       if (lightMapUpload && !lightMapUpload.ok) throw new Error(lightMapUpload.error || 'Light-map upload mislukt.')
@@ -3430,6 +3432,7 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
           reconstructionVersionId: reconstruction.id,
           studioSceneVersionId: studioScene.id,
           beautyUrl: beautyUpload?.url ?? packet.beauty ?? packet.passes?.textured,
+          texturedUrl: texturedUpload?.url ?? packet.passes?.textured,
           objectMaskUrl: objectMaskUpload?.url ?? objectMaskUrl,
           depthUrl: depthUpload?.url,
           normalUrl: normalUpload?.url,
@@ -5796,6 +5799,8 @@ export default function ProductStudioShell({ initialImageSrc, renderLayout }: {
                               newCalibrationDataUrl: packet.passes?.calibration,
                               newPerspectiveDataUrl: packet.passes?.perspective,
                               newDepthDataUrl: packet.passes?.depth,
+                              newTexturedDataUrl: packet.passes?.textured,
+                              newObjectMaskDataUrl: packet.passes?.objectMask,
                             })
                             if (!result?.ok) throw new Error(result?.error || 'Angle variant genereren mislukt.')
                             if (result.render?.output_url) triggerAiDepthExtraction(result.backgroundPlateUrl ?? result.render.background_plate_url ?? result.render.output_url)

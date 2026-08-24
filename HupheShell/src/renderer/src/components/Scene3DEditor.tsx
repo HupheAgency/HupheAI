@@ -300,10 +300,7 @@ const Scene3DEditor = forwardRef<Scene3DEditorHandle, {
     },
     async captureRenderPacketPreview() {
       const fovScale = showFrame ? computeFovScale() : undefined
-      const manifest = viewportRef.current?.captureRenderManifest() ?? null
-      if (manifest && fovScale !== undefined) {
-        manifest.viewport.fovScale = fovScale
-      }
+      const manifest = viewportRef.current?.captureRenderManifest(fovScale) ?? null
       return {
         beauty: viewportRef.current?.captureCleanScreenshot(fovScale) ?? null,
         passes: viewportRef.current?.captureAllPasses(fovScale) ?? null,

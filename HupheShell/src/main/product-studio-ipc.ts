@@ -435,6 +435,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     calibrationUrl?: string
     lightMapUrl?: string
     perspectiveUrl?: string
+    texturedUrl?: string
     sceneManifest?: Record<string, unknown>
   }) => {
     const jwt = getJwt()
@@ -456,6 +457,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     if (args.calibrationUrl) auxiliaryAssetUrls.calibration_url = args.calibrationUrl
     if (args.lightMapUrl) auxiliaryAssetUrls.light_map_url = args.lightMapUrl
     if (args.perspectiveUrl) auxiliaryAssetUrls.perspective_url = args.perspectiveUrl
+    if (args.texturedUrl) auxiliaryAssetUrls.textured_url = args.texturedUrl
     if (Object.keys(auxiliaryAssetUrls).length > 0) insert.auxiliary_asset_urls = auxiliaryAssetUrls
 
     const { data, error } = await sb
@@ -898,7 +900,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
 
   ipcMain.handle('product-studio:upload-render-pass', async (_e, args: {
     projectId: string
-    passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective'
+    passType: 'beauty' | 'depth' | 'normal' | 'object-mask' | 'calibration' | 'light-map' | 'perspective' | 'textured'
     dataUrl: string
   }) => {
     const jwt = getJwt()
@@ -1177,7 +1179,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     return { init, loadImageBuffer, extractImageFromResponse, callModel, toDataUrl, get sharp() { return _sharp } }
   }
 
-  // --- STAP 1: Generate Product Layer (retexturing: calibration pose + canonical skin) ---
+  // --- STAP 1: Build an exact product layer from the authoritative 3D render ---
 
   ipcMain.handle('product-studio:generate-product-layer', async (_e, args: {
     projectId: string
@@ -1195,8 +1197,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     const { data: run, error: runError } = await sb.from('provider_runs').insert({
       project_id: args.projectId,
       provider_type: 'final-render',
-      provider_name: 'openrouter',
-      model_name: 'google/gemini-3.1-flash-image-preview',
+      provider_name: 'local',
+      model_name: 'sharp-exact-product-layer',
       status: 'processing',
       idempotency_key: `product-layer-${args.renderPacketId}-${Date.now()}`,
     }).select().single()
@@ -1207,80 +1209,45 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const h = createImageHelpers(jwt)
       await h.init()
 
-      const beautyBuffer = await h.loadImageBuffer(packet.beauty_url, 'Beauty', true)
-      if (!beautyBuffer) throw new Error('Beauty render ontbreekt.')
       const auxiliaryAssetUrls = (packet.auxiliary_asset_urls ?? {}) as Record<string, unknown>
-      const calibrationUrl = typeof auxiliaryAssetUrls.calibration_url === 'string' ? auxiliaryAssetUrls.calibration_url : null
-      const calibrationBuffer = await h.loadImageBuffer(calibrationUrl, 'Calibration')
+      const texturedUrl = typeof auxiliaryAssetUrls.textured_url === 'string' ? auxiliaryAssetUrls.textured_url : null
+      const exactRenderBuffer = await h.loadImageBuffer(texturedUrl ?? packet.beauty_url, 'Exact product render', true)
+      if (!exactRenderBuffer) throw new Error('Exacte 3D-productrender ontbreekt.')
 
-      const { data: sourceAssets } = await sb.from('source_assets').select('type, url').eq('project_id', args.projectId).in('type', ['original-image', 'object-mask'])
-      let sourceUrl: string | null = null
-      let maskUrl: string | null = null
-      for (const sa of sourceAssets ?? []) {
-        if (sa.type === 'original-image') sourceUrl = sa.url
-        if (sa.type === 'object-mask') maskUrl = sa.url
-      }
+      const exactMeta = await h.sharp(exactRenderBuffer).rotate().metadata()
+      const width = exactMeta.width ?? 1920
+      const height = exactMeta.height ?? 1080
+      let alphaMask: Buffer | null = null
+      const maskBuffer = await h.loadImageBuffer(packet.object_mask_url, 'Object mask')
 
-      let canonicalReferenceUrls: string[] = []
-      if (packet.canonical_reference_set_id) {
-        const { data: canonicalSet } = await sb.from('canonical_reference_sets').select('view_ids').eq('id', packet.canonical_reference_set_id).maybeSingle()
-        const viewIds = Array.isArray(canonicalSet?.view_ids) ? canonicalSet.view_ids : []
-        if (viewIds.length > 0) {
-          const { data: canonicalViews } = await sb.from('reference_views').select('id, asset_url').in('id', viewIds).neq('status', 'rejected')
-          const canonicalById = new Map((canonicalViews ?? []).map((view) => [view.id, view.asset_url] as const))
-          canonicalReferenceUrls = viewIds.map((id) => canonicalById.get(id)).filter((url): url is string => typeof url === 'string' && url.length > 0).slice(0, 4)
-        }
-      }
-
-      const activeMaskUrl = packet.object_mask_url ?? maskUrl
-      const maskBuffer = await h.loadImageBuffer(activeMaskUrl, 'Object mask')
-
-      const primaryCanonicalUrl = canonicalReferenceUrls[0] ?? sourceUrl
-      const primaryCanonicalBuffer = await h.loadImageBuffer(primaryCanonicalUrl, 'Canonical')
-      if (!primaryCanonicalBuffer) throw new Error('Geen canonical referentie beschikbaar.')
-
-      const canonicalDataUrl = await h.toDataUrl(primaryCanonicalBuffer)
-      const calibrationDataUrl = await h.toDataUrl(calibrationBuffer ?? beautyBuffer)
-      const beautyDataUrl = await h.toDataUrl(beautyBuffer)
-
-      // Dit is een EDIT-taak, geen synthese-uit-drie-referenties: als je het model
-      // vraagt "één beeld uit drie referenties" kiest het de grote, schone CANONICAL
-      // en negeert het de kleine/donkere BEAUTY, waardoor de product layer een
-      // vooraanzicht wordt. Daarom is BASE (=beauty) het te bewerken beeld: pose,
-      // hoek, perspectief, schaal en positie liggen daarmee vast; alleen het
-      // oppervlak (belichting/scherpte/print) wordt verbeterd met CANONICAL als
-      // uitsluitend een print-referentie.
-      const productParts: any[] = [
-        {
-          type: 'text',
-          text: [
-            'You are ENHANCING one product render into a polished, photorealistic studio product photo. This is an edit of BASE, not a new composition.',
-            'BASE (first image) already shows the product in the correct camera angle, perspective, tilt, position, scale and framing. You MUST preserve ALL of these EXACTLY. Do NOT rotate, turn, re-center, rescale, crop, or re-frame the product. The output product silhouette and its position within the frame must match BASE pixel-for-pixel. Keep the same empty background area around it.',
-            'Improve ONLY the surface appearance of BASE: realistic studio lighting, correct/brighter exposure, sharpness, clean glass and material, and crisp legible labels.',
-            'PRINT_REFERENCE (second image) is a straight-on FRONT shot of the SAME product. Use it ONLY to reproduce the exact label artwork, logos, text, and colors faithfully on the surfaces that are visible in BASE. IGNORE its camera angle, pose, scale and framing completely — do NOT turn the product to face the camera, do NOT copy its front-on composition.',
-            'STRUCTURE_REFERENCE (third image) is the same viewpoint as BASE shown as a calibration mesh; use it only to confirm the 3D orientation and silhouette. Do not change the angle.',
-            'HARD CONSTRAINTS: the result must be at the SAME angle and SAME small size/position as BASE. It must NOT become a large, centered, straight-on front product shot. If BASE shows a three-quarter/angled view, the output stays a three-quarter/angled view.',
-          ].join('\n'),
-        },
-        { type: 'text', text: 'BASE — the image you are enhancing. Preserve its exact product angle, perspective, position, scale and framing pixel-for-pixel:' },
-        { type: 'image_url', image_url: { url: beautyDataUrl } },
-        { type: 'text', text: 'PRINT_REFERENCE — front product shot; use ONLY its label artwork, logos, text and colors. IGNORE its angle, pose, scale and framing:' },
-        { type: 'image_url', image_url: { url: canonicalDataUrl } },
-        { type: 'text', text: 'STRUCTURE_REFERENCE — calibration mesh at the same viewpoint as BASE; confirm orientation/silhouette only, do not change the angle:' },
-        { type: 'image_url', image_url: { url: calibrationDataUrl } },
-      ]
-
-      const productJson = await h.callModel([{ role: 'user', content: productParts }], 'google/gemini-3.1-flash-image-preview')
-      let productLayerBuffer = await h.extractImageFromResponse(productJson)
-
-      // Apply object mask als alpha channel
       if (maskBuffer) {
-        const productMeta = await h.sharp(productLayerBuffer).metadata()
-        const pw = productMeta.width ?? 1536
-        const ph = productMeta.height ?? 1536
-        const alphaMask = await h.sharp(maskBuffer).resize(pw, ph, { fit: 'fill' }).grayscale().threshold(32).toBuffer()
-        productLayerBuffer = await h.sharp(productLayerBuffer).resize(pw, ph, { fit: 'fill' }).removeAlpha().joinChannel(alphaMask).png({ compressionLevel: 9 }).toBuffer()
+        alphaMask = await h.sharp(maskBuffer)
+          .rotate()
+          .resize(width, height, { fit: 'fill' })
+          .grayscale()
+          .threshold(32)
+          .png()
+          .toBuffer()
+      } else if ((exactMeta.channels ?? 3) === 4) {
+        alphaMask = await h.sharp(exactRenderBuffer)
+          .rotate()
+          .resize(width, height, { fit: 'fill' })
+          .extractChannel('alpha')
+          .png()
+          .toBuffer()
       }
+
+      if (!alphaMask) {
+        throw new Error('Objectmask ontbreekt. Maak eerst een RenderPacket met object mask; zonder masker kan de producthoek niet pixelvast worden gecomponeerd.')
+      }
+
+      const productLayerBuffer = await h.sharp(exactRenderBuffer)
+        .rotate()
+        .resize(width, height, { fit: 'fill' })
+        .removeAlpha()
+        .joinChannel(alphaMask)
+        .png({ compressionLevel: 9 })
+        .toBuffer()
 
       const productLayerUrl = await saveAssetLocally(user.id, args.projectId, `product_layer_${run.id}.png`, productLayerBuffer)
 
@@ -1303,7 +1270,7 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     }
   })
 
-  // --- STAP 2: Generate Final Render (background + clean plate, gebruikt bestaande product layer) ---
+  // --- STAP 2: Generate an empty scene plate, then composite the exact product locally ---
 
   ipcMain.handle('product-studio:generate-final-render', async (_e, args: {
     projectId: string
@@ -1345,9 +1312,20 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const beautyBuffer = await h.loadImageBuffer(packet.beauty_url, 'Beauty', true)
       if (!beautyBuffer) throw new Error('Beauty render ontbreekt.')
 
-      const inputDataUrl = productLayerBuffer
-        ? await h.toDataUrl(productLayerBuffer)
-        : await h.toDataUrl(beautyBuffer)
+      if (!productLayerBuffer) {
+        throw new Error('Exacte productlaag ontbreekt. Bouw eerst de productlaag opnieuw.')
+      }
+
+      const productMeta = await h.sharp(productLayerBuffer).rotate().metadata()
+      const outputWidth = productMeta.width ?? 1920
+      const outputHeight = productMeta.height ?? 1080
+      const exactProductLayer = await h.sharp(productLayerBuffer)
+        .rotate()
+        .resize(outputWidth, outputHeight, { fit: 'fill' })
+        .ensureAlpha()
+        .png({ compressionLevel: 9 })
+        .toBuffer()
+      const reservedMask = await h.sharp(exactProductLayer).extractChannel('alpha').png().toBuffer()
 
       // Camera-beschrijving uit manifest
       let cameraDescription = ''
@@ -1373,29 +1351,33 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       const depthBuffer = await h.loadImageBuffer(depthUrl, 'Depth')
       const perspectiveBuffer = await h.loadImageBuffer(perspectiveUrl, 'Perspective')
 
-      // Background genereren
+      // AI generates only the clean environment plate. Product pixels never pass
+      // through the image model and are composited below at their exact coordinates.
       const backgroundParts: any[] = [
         {
           type: 'text',
           text: [
-            `Place the product into a scene. Scene description: ${args.prompt}`,
+            `Generate an EMPTY environment plate. Scene description: ${args.prompt}`,
             '', cameraDescription ? `CAMERA: ${cameraDescription}` : '', '',
-            'You will receive labeled reference images to help you match the exact camera perspective.',
+            'SHOT_REFERENCE is the absolute authority for the full-frame camera, FOV, horizon, vanishing points, crop and composition.',
             '',
             'CRITICAL RULES (in priority order):',
-            '1. PRODUCT_RENDER is the ABSOLUTE authority for product position, size, shape, texture, and silhouette. The product in your output MUST match PRODUCT_RENDER pixel-for-pixel in position and scale.',
-            '2. Do NOT move, resize, crop, or re-interpret the product. It must appear at EXACTLY the same position and size as in PRODUCT_RENDER.',
-            '3. Only generate the environment/background around and behind the product.',
-            '4. The background perspective and vanishing points MUST match the product\'s camera angle.',
-            '5. The surface/floor the product sits on must align with the product\'s ground plane — the product must look like it sits ON the surface, not floating.',
-            calibrationBuffer ? '6. Use CALIBRATION_3D ONLY for background perspective reference (vanishing points, horizon line). Do NOT use it to reposition or resize the product.' : '',
-            perspectiveBuffer ? '7. Use PERSPECTIVE_GRID ONLY for floor/surface perspective direction. Do NOT use it to change the product position.' : '',
-            depthBuffer ? '8. Use DEPTH_MAP ONLY for spatial depth context of the background.' : '',
-            '9. Match the lighting direction of the environment to the product.',
+            '1. Output the environment only. Do NOT render the product, a substitute, a silhouette, a pedestal, or any central hero object.',
+            '2. Preserve SHOT_REFERENCE camera and framing exactly. Do not zoom, crop, rotate, recenter or choose a more attractive camera angle.',
+            '3. Remove the product visible in SHOT_REFERENCE and continue the environment naturally behind it.',
+            '4. RESERVED_PRODUCT_MASK marks pixels that will later receive the exact local 3D product. Keep that region free of foreground objects, but continue the support surface behind it.',
+            '5. The support surface must intersect the bottom of the reserved mask naturally so the later product does not float.',
+            '6. Create professional commercial lighting in the environment while keeping the requested composition.',
+            calibrationBuffer ? '7. Use CALIBRATION_3D only to preserve camera perspective and the support plane.' : '',
+            perspectiveBuffer ? '8. Use PERSPECTIVE_GRID only to preserve the floor/surface vanishing directions.' : '',
+            depthBuffer ? '9. Use DEPTH_MAP only for spatial depth context.' : '',
+            `10. Output exactly the same ${outputWidth}:${outputHeight} aspect ratio as SHOT_REFERENCE.`,
           ].filter(Boolean).join('\n'),
         },
-        { type: 'text', text: 'PRODUCT_RENDER — The product to place in the scene:' },
-        { type: 'image_url', image_url: { url: inputDataUrl } },
+        { type: 'text', text: 'SHOT_REFERENCE — preserve this exact full-frame camera, perspective and product location; remove only the product:' },
+        { type: 'image_url', image_url: { url: await h.toDataUrl(beautyBuffer, 1920) } },
+        { type: 'text', text: 'RESERVED_PRODUCT_MASK — white pixels are reserved for local product compositing; render only the empty environment behind them:' },
+        { type: 'image_url', image_url: { url: await h.toDataUrl(reservedMask, 1920) } },
       ]
       if (calibrationBuffer) {
         backgroundParts.push(
@@ -1417,33 +1399,19 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
       }
 
       const backgroundJson = await h.callModel([{ role: 'user', content: backgroundParts }])
-      const outBuffer = await h.extractImageFromResponse(backgroundJson)
-      const finalUrl = await saveAssetLocally(user.id, args.projectId, `final_${run.id}.png`, outBuffer)
-
-      // Clean plate
-      let bgSignedUrl: string | null = null
-      try {
-        const cleanPlateParts: any[] = [
-          {
-            type: 'text',
-            text: [
-              'Remove the single main/central product from FINAL_RENDER.',
-              'Fill the area where the product was with a natural, seamless continuation of the background.',
-              'The result should look like the product was never there.',
-              'Keep everything else in the scene exactly as it is — lighting, surfaces, other objects, shadows.',
-              'Output the full image at the same resolution.',
-            ].join('\n'),
-          },
-          { type: 'text', text: 'FINAL_RENDER — The image with the product to remove:' },
-          { type: 'image_url', image_url: { url: await h.toDataUrl(outBuffer) } },
-        ]
-        const cleanPlateJson = await h.callModel([{ role: 'user', content: cleanPlateParts }])
-        const cleanPlateBuffer = await h.extractImageFromResponse(cleanPlateJson)
-        bgSignedUrl = await saveAssetLocally(user.id, args.projectId, `clean_plate_${run.id}.png`, cleanPlateBuffer)
-      } catch (cleanErr: any) {
-        console.error('[clean-plate] Failed:', cleanErr?.message ?? cleanErr)
-        bgSignedUrl = finalUrl
-      }
+      const generatedBackground = await h.extractImageFromResponse(backgroundJson)
+      const cleanPlateBuffer = await h.sharp(generatedBackground)
+        .rotate()
+        .resize(outputWidth, outputHeight, { fit: 'fill' })
+        .removeAlpha()
+        .png({ compressionLevel: 9 })
+        .toBuffer()
+      const finalBuffer = await h.sharp(cleanPlateBuffer)
+        .composite([{ input: exactProductLayer, left: 0, top: 0 }])
+        .png({ compressionLevel: 9 })
+        .toBuffer()
+      const bgSignedUrl = await saveAssetLocally(user.id, args.projectId, `clean_plate_${run.id}.png`, cleanPlateBuffer)
+      const finalUrl = await saveAssetLocally(user.id, args.projectId, `final_${run.id}.png`, finalBuffer)
 
       const { data: render, error: renderError } = await sb.from('final_render_versions').insert({
         project_id: args.projectId,
@@ -1458,9 +1426,11 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
         resolution,
         status: 'review',
         layer_metadata: {
-          route: 'split-product-background',
-          has_background_plate: bgSignedUrl !== finalUrl,
-          has_product_layer: !!productLayerUrl,
+          route: 'deterministic-local-product-composite',
+          product_pose_locked: true,
+          has_background_plate: true,
+          has_product_layer: true,
+          output_size: [outputWidth, outputHeight],
         },
       }).select().single()
       if (renderError) throw new Error(renderError.message)
@@ -1496,6 +1466,8 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     newCalibrationDataUrl?: string
     newPerspectiveDataUrl?: string
     newDepthDataUrl?: string
+    newTexturedDataUrl?: string
+    newObjectMaskDataUrl?: string
   }) => {
     const jwt = getJwt()
     if (!jwt) return { ok: false, error: 'Niet ingelogd.' }
@@ -1522,6 +1494,146 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
     try {
       const h = createImageHelpers(jwt)
       await h.init()
+
+      // The captured render packet is the camera truth. AI may rebuild only the
+      // empty environment; the product pixels are composited locally unchanged.
+      {
+        const sharp = (await import('sharp')).default
+        const decodeDataUrl = (value: string) => Buffer.from(
+          value.replace(/^data:image\/[^;]+;base64,/, ''),
+          'base64',
+        )
+
+        const beautyBuffer = decodeDataUrl(args.newBeautyDataUrl)
+        const beautyMeta = await sharp(beautyBuffer).rotate().metadata()
+        const width = beautyMeta.width
+        const height = beautyMeta.height
+        if (!width || !height) throw new Error('De nieuwe cameracapture heeft geen geldige afmetingen.')
+
+        const productSourceBuffer = decodeDataUrl(args.newTexturedDataUrl ?? args.newBeautyDataUrl)
+        const productSourceMeta = await sharp(productSourceBuffer).rotate().metadata()
+        const normalizedProduct = await sharp(productSourceBuffer)
+          .rotate()
+          .resize({ width, height, fit: 'fill' })
+          .ensureAlpha()
+          .png()
+          .toBuffer()
+
+        let rawMaskBuffer: Buffer
+        if (args.newObjectMaskDataUrl) {
+          rawMaskBuffer = decodeDataUrl(args.newObjectMaskDataUrl)
+        } else if (productSourceMeta.hasAlpha) {
+          rawMaskBuffer = await sharp(normalizedProduct).extractChannel('alpha').png().toBuffer()
+        } else {
+          throw new Error('Objectmasker ontbreekt; de exacte productpixels kunnen niet veilig worden vrijgesteld.')
+        }
+
+        const productMaskBuffer = await sharp(rawMaskBuffer)
+          .rotate()
+          .resize({ width, height, fit: 'fill' })
+          .greyscale()
+          .threshold(16)
+          .png()
+          .toBuffer()
+        const productRgb = await sharp(normalizedProduct).removeAlpha().png().toBuffer()
+        const exactProductLayer = await sharp(productRgb).joinChannel(productMaskBuffer).png().toBuffer()
+
+        const originalPlateBuffer = await h.loadImageBuffer(
+          (originalRender as any).background_plate_url as string | null,
+          'Originele lege omgeving',
+        )
+        if (!originalPlateBuffer) throw new Error('De originele lege omgeving ontbreekt.')
+
+        const exactShotDataUrl = await h.toDataUrl(beautyBuffer)
+        const reservedMaskDataUrl = await h.toDataUrl(productMaskBuffer)
+        const originalPlateDataUrl = await h.toDataUrl(originalPlateBuffer)
+        const environmentParts: any[] = [
+          {
+            type: 'text',
+            text: [
+              'Create only the EMPTY environment plate for a deterministic product composite.',
+              'EXACT_SHOT is the absolute camera truth: preserve its camera angle, projection, FOV, horizon, crop and framing exactly.',
+              'RESERVED_PRODUCT_MASK marks pixels that must remain empty of any product. Reconstruct the environment behind this white region.',
+              'ORIGINAL_EMPTY_ENVIRONMENT defines the same room identity, furniture, materials, lighting and visual style.',
+              `Scene intent: ${args.originalPrompt}`,
+              'Do not draw, restyle, move, resize, relight or include the product.',
+              `Return one empty environment image with aspect ratio ${width}:${height}.`,
+            ].join('\n'),
+          },
+          { type: 'text', text: 'EXACT_SHOT — absolute camera and composition reference:' },
+          { type: 'image_url', image_url: { url: exactShotDataUrl } },
+          { type: 'text', text: 'RESERVED_PRODUCT_MASK — white is reserved for the exact local product layer:' },
+          { type: 'image_url', image_url: { url: reservedMaskDataUrl } },
+          { type: 'text', text: 'ORIGINAL_EMPTY_ENVIRONMENT — room identity and appearance reference:' },
+          { type: 'image_url', image_url: { url: originalPlateDataUrl } },
+        ]
+
+        for (const [label, value] of [
+          ['CALIBRATION', args.newCalibrationDataUrl],
+          ['PERSPECTIVE', args.newPerspectiveDataUrl],
+          ['DEPTH', args.newDepthDataUrl],
+        ] as const) {
+          if (!value) continue
+          environmentParts.push(
+            { type: 'text', text: `${label} — additional geometry reference only:` },
+            { type: 'image_url', image_url: { url: await h.toDataUrl(decodeDataUrl(value)) } },
+          )
+        }
+
+        const environmentJson = await h.callModel([{ role: 'user', content: environmentParts }])
+        const generatedPlate = await h.extractImageFromResponse(environmentJson)
+        const exactPlate = await sharp(generatedPlate)
+          .rotate()
+          .resize({ width, height, fit: 'fill' })
+          .png()
+          .toBuffer()
+        const finalBuffer = await sharp(exactPlate)
+          .composite([{ input: exactProductLayer, blend: 'over' }])
+          .png()
+          .toBuffer()
+
+        const newBgPlateUrl = await saveAssetLocally(user.id, args.projectId, `clean_plate_angle_${run.id}.png`, exactPlate)
+        const productLayerUrl = await saveAssetLocally(user.id, args.projectId, `product_layer_angle_${run.id}.png`, exactProductLayer)
+        const finalUrl = await saveAssetLocally(user.id, args.projectId, `angle_${run.id}.png`, finalBuffer)
+
+        const { data: render, error: renderError } = await sb.from('final_render_versions').insert({
+          project_id: args.projectId,
+          render_packet_id: args.renderPacketId,
+          provider_run_id: run.id,
+          output_url: finalUrl,
+          background_plate_url: newBgPlateUrl,
+          product_layer_url: productLayerUrl,
+          composite_url: finalUrl,
+          preservation_policy: (originalRender as any).preservation_policy ?? 'strict',
+          prompt: args.originalPrompt,
+          resolution: (originalRender as any).resolution ?? '2K',
+          status: 'review',
+          layer_metadata: {
+            route: 'angle-variant-deterministic-v2',
+            original_final_render_id: args.originalFinalRenderVersionId,
+            camera_source: 'captured-render-packet',
+            local_composite: true,
+            product_pixels_ai_generated: false,
+            width,
+            height,
+          },
+        }).select().single()
+        if (renderError) throw new Error(renderError.message)
+
+        await sb.from('provider_runs').update({
+          status: 'completed',
+          latency_ms: Date.now() - startTime,
+          completed_at: new Date().toISOString(),
+          output_metadata: {
+            route: 'angle-variant-deterministic-v2',
+            camera_source: 'captured-render-packet',
+            local_composite: true,
+            product_pixels_ai_generated: false,
+          },
+        }).eq('id', run.id)
+
+        return { ok: true, render, providerRunId: run.id, backgroundPlateUrl: newBgPlateUrl }
+      }
 
       // Laad originele achtergrond (clean plate)
       const bgPlateUrl = (originalRender as any).background_plate_url as string | null
@@ -3413,6 +3525,151 @@ export function registerProductStudioIPC(getJwt: () => string | null): void {
           }
           if (!url.startsWith('https://')) return null
           const r = await fetch(url); return r.ok ? Buffer.from(await r.arrayBuffer()) : null
+        }
+
+        // A retry must preserve the exact 3D product pixels too. The model only
+        // regenerates the empty environment; the product is composited locally.
+        {
+          const beautyBuffer = await loadBuf(packet.beauty_url)
+          if (!beautyBuffer) throw new Error('Beauty render ontbreekt.')
+
+          const beautyMeta = await sharp(beautyBuffer).rotate().metadata()
+          const width = beautyMeta.width
+          const height = beautyMeta.height
+          if (!width || !height) throw new Error('Ongeldige afmetingen voor beauty render.')
+
+          const normalizeRgba = async (buffer: Buffer): Promise<Buffer> => (
+            sharp(buffer)
+              .rotate()
+              .resize(width, height, { fit: 'fill' })
+              .ensureAlpha()
+              .png()
+              .toBuffer()
+          )
+
+          let exactProductLayer = await loadBuf(frv.product_layer_url ?? packet.product_layer_url)
+          if (exactProductLayer) {
+            exactProductLayer = await normalizeRgba(exactProductLayer)
+          } else {
+            const auxiliary = packet.auxiliary_asset_urls ?? {}
+            const texturedBuffer = await loadBuf(auxiliary.textured_url) ?? beautyBuffer
+            const objectMaskBuffer = await loadBuf(packet.object_mask_url)
+            if (!objectMaskBuffer) {
+              throw new Error('Exact productmasker ontbreekt; retry kan het product niet veilig behouden.')
+            }
+
+            const productRgb = await sharp(texturedBuffer)
+              .rotate()
+              .resize(width, height, { fit: 'fill' })
+              .removeAlpha()
+              .png()
+              .toBuffer()
+            const productAlpha = await sharp(objectMaskBuffer)
+              .rotate()
+              .resize(width, height, { fit: 'fill' })
+              .greyscale()
+              .threshold(16)
+              .png()
+              .toBuffer()
+            exactProductLayer = await sharp(productRgb)
+              .joinChannel(productAlpha)
+              .png()
+              .toBuffer()
+          }
+
+          const reservedMask = await sharp(exactProductLayer)
+            .extractChannel('alpha')
+            .png()
+            .toBuffer()
+          const originalPlate = await loadBuf(frv.background_plate_url)
+          const calibrationBuffer = await loadBuf(packet.calibration_url)
+          const perspectiveBuffer = await loadBuf(packet.perspective_url)
+          const depthBuffer = await loadBuf(packet.depth_url)
+
+          const content: any[] = [
+            { type: 'image_url', image_url: { url: await toDataUrl(beautyBuffer) } },
+            { type: 'text', text: '[SHOT REFERENCE] Exact authority for camera, lens, perspective, crop and composition.' },
+            { type: 'image_url', image_url: { url: await toDataUrl(reservedMask) } },
+            { type: 'text', text: '[RESERVED PRODUCT MASK] White pixels are reserved. Render only the empty environment there; do not draw a product.' },
+          ]
+          if (originalPlate) {
+            content.push({ type: 'image_url', image_url: { url: await toDataUrl(originalPlate) } })
+            content.push({ type: 'text', text: '[PREVIOUS EMPTY PLATE] Style reference only. The shot reference remains the camera authority.' })
+          }
+          if (calibrationBuffer) {
+            content.push({ type: 'image_url', image_url: { url: await toDataUrl(calibrationBuffer) } })
+            content.push({ type: 'text', text: '[CALIBRATION] Preserve this exact framing and object footprint.' })
+          }
+          if (perspectiveBuffer) {
+            content.push({ type: 'image_url', image_url: { url: await toDataUrl(perspectiveBuffer) } })
+            content.push({ type: 'text', text: '[PERSPECTIVE GUIDE] Match horizon and vanishing directions exactly.' })
+          }
+          if (depthBuffer) {
+            content.push({ type: 'image_url', image_url: { url: await toDataUrl(depthBuffer) } })
+            content.push({ type: 'text', text: '[DEPTH GUIDE] Preserve scene depth and support-surface distance.' })
+          }
+          content.push({
+            type: 'text',
+            text: [
+              'Generate an EMPTY photorealistic environment plate for the requested scene.',
+              'Do not render, redraw, reconstruct, retouch or invent the product.',
+              'The output must use exactly the shot-reference camera angle, lens, perspective, crop, horizon and framing.',
+              'Keep the reserved product region free of foreground objects and visual obstructions.',
+              'Build a physically plausible support surface, lighting, shadows and reflections around the reserved region.',
+              `Requested scene: ${frv.prompt}`,
+              'Return only the empty environment image, without text.',
+            ].join('\n'),
+          })
+
+          const plateResponse = await callModel([{ role: 'user', content }])
+          const generatedPlate = await extractImageFromResponse(plateResponse)
+          const normalizedPlate = await sharp(generatedPlate)
+            .rotate()
+            .resize(width, height, { fit: 'fill' })
+            .removeAlpha()
+            .png()
+            .toBuffer()
+          const finalComposite = await sharp(normalizedPlate)
+            .composite([{ input: exactProductLayer, blend: 'over' }])
+            .png()
+            .toBuffer()
+
+          const retryNumber = run.retry_count + 1
+          const backgroundPlateUrl = await saveAssetLocally(user.id, run.project_id, `background_${runId}_retry${retryNumber}.png`, normalizedPlate)
+          const productLayerUrl = await saveAssetLocally(user.id, run.project_id, `product_${runId}_retry${retryNumber}.png`, exactProductLayer)
+          const finalRetryUrl = await saveAssetLocally(user.id, run.project_id, `final_${runId}_retry${retryNumber}.png`, finalComposite)
+          const route = 'retry-deterministic-local-product-composite'
+
+          await sb.from('final_render_versions').update({
+            output_url: finalRetryUrl,
+            background_plate_url: backgroundPlateUrl,
+            product_layer_url: productLayerUrl,
+            composite_url: finalRetryUrl,
+            status: 'review',
+            layer_metadata: {
+              ...(frv.layer_metadata ?? {}),
+              route,
+              product_source: packet.auxiliary_asset_urls?.textured_url ? 'textured-pass' : 'beauty-pass',
+              product_pixels_ai_generated: false,
+              camera_source: 'render-packet',
+              retry: true,
+            },
+          }).eq('id', frv.id)
+          await sb.from('provider_runs').update({
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+            latency_ms: Date.now() - startTime,
+            metadata: {
+              ...(run.metadata ?? {}),
+              route,
+              retry: true,
+              background_plate_url: backgroundPlateUrl,
+              product_layer_url: productLayerUrl,
+              output_url: finalRetryUrl,
+            },
+          }).eq('id', runId)
+
+          return { ok: true, retryCount: retryNumber }
         }
 
         const beautyBuffer = await loadBuf(packet.beauty_url)
