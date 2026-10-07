@@ -20,6 +20,7 @@ import { useAssetSync } from '../hooks/useAssetSync'
 import { saveLastActiveDocId } from '../lib/typewriter-documents'
 import { UnsavedChangesDialog } from '../components/UnsavedChangesDialog'
 import { CREDITS_REQUIRED_EVENT } from '../lib/credits-required'
+import { loadAllGenerationSettings } from '../lib/generation-settings-cache'
 
 const TypewriterPage = lazy(() => import('./TypewriterPage'))
 
@@ -150,6 +151,7 @@ export default function AppShell({ session, allowedModuleSlugs, activeModuleSlug
   // Asset sync: luistert naar Supabase Realtime en houdt lokale cache vers
   const { initialSync: syncAssetsOnMount } = useAssetSync(session.user.id)
   useEffect(() => { syncAssetsOnMount() }, [session.user.id])
+  useEffect(() => { loadAllGenerationSettings() }, [])
 
   const [active, setActive] = useState<ActiveView>('home')
   const [unsavedDialogTarget, setUnsavedDialogTarget] = useState<ActiveView | null>(null)

@@ -176,7 +176,20 @@ contextBridge.exposeInMainWorld('api', {
   generateImage: (prompt: string, provider: string) => ipcRenderer.invoke('image:generate', prompt, provider),
   generateAtelierImage: (prompt: string, model: string, systemPrompt?: string, referenceImageSrc?: string, accessToken?: string, modelLabel?: string, maskImageSrc?: string) => ipcRenderer.invoke('image:generate-ai', { prompt, model, modelLabel, systemPrompt, referenceImageSrc, maskImageSrc, accessToken }),
   deleteLocalFile: (filePath: string) => ipcRenderer.invoke('image:delete-file', filePath),
-  generateAtelierVideo: (prompt: string, model: string, systemPrompt?: string, accessToken?: string, referenceImageSrc?: string) => ipcRenderer.invoke('video:generate-ai', { prompt, model, systemPrompt, accessToken, referenceImageSrc }),
+  generateAtelierVideo: (prompt: string, model: string, systemPrompt?: string, accessToken?: string, referenceImageSrc?: string, settings?: { duration?: number | 'auto'; resolution?: string; aspectRatio?: string; generateAudio?: boolean; seed?: number; bitrateMode?: string; codec?: string; draft?: boolean }, provider?: 'openrouter' | 'fal', references?: { imageUrls?: string[]; videoUrls?: string[]; audioUrls?: string[]; task?: string }, requestId?: string, endImageSrc?: string) =>
+    ipcRenderer.invoke('video:generate-ai', { prompt, model, systemPrompt, accessToken, referenceImageSrc, ...settings, provider, ...references, requestId, endImageSrc }),
+  cancelVideoGeneration: (requestId: string, accessToken?: string) =>
+    ipcRenderer.invoke('video:cancel-generation', { requestId, accessToken }),
+  uploadVideoReference: (dataUrl: string, fileName: string, accessToken?: string) =>
+    ipcRenderer.invoke('video:upload-reference', { dataUrl, fileName, accessToken }),
+  getVideoCapabilities: (accessToken?: string) => ipcRenderer.invoke('video:get-capabilities', { accessToken }),
+  renderVideoDraftFinal: (model: string, draftId: string, duration: number, codec?: string, accessToken?: string, requestId?: string) =>
+    ipcRenderer.invoke('video:finalize-draft', { model, draftId, duration, codec, accessToken, requestId }),
+  onVideoGenerateProgress: (cb: (data: { step: string; progress: number }) => void) => {
+    const handler = (_: unknown, data: { step: string; progress: number }) => cb(data)
+    ipcRenderer.on('video:generate-progress', handler)
+    return () => ipcRenderer.removeListener('video:generate-progress', handler)
+  },
   generateScene3D: (screenshotDataUrl: string, prompt: string, referenceImageSrc?: string, accessToken?: string) => ipcRenderer.invoke('scene3d:generate', { screenshotDataUrl, prompt, referenceImageSrc, accessToken }),
   importPresentation: (fileName: string, buffer: ArrayBuffer) =>
     ipcRenderer.invoke('presentation:import', { fileName, buffer }),

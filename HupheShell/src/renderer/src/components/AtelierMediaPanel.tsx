@@ -7,7 +7,13 @@ import {
   type AtelierMediaProject,
   type AtelierMediaProjectType,
   type AtelierMediaAsset,
+  type AtelierVideoCapability,
+  type AtelierVideoJob,
+  type VideoReferenceSlot,
+  type VideoReferenceKind,
+  type VideoTaskMode,
 } from '../hooks/useAtelierMedia'
+import type { VideoGenerationSettings } from '../lib/video-generation-settings'
 import AtelierRightPanel, { type AtelierProjectsPanelConfig } from './AtelierRightPanel'
 import AtelierCreationModeButtons, { ATELIER_CREATION_OPTIONS } from './AtelierCreationModeButtons'
 import type { AtelierCreationType } from './AtelierCreationModeButtons'
@@ -28,6 +34,8 @@ export function AtelierMediaCreationPanel({
   projectsPanel,
   initialImageSrc,
   onShellLevel,
+  videoJobs,
+  setVideoJobs,
 }: {
   type: AtelierCreationType
   project?: AtelierMediaProject | null
@@ -39,6 +47,8 @@ export function AtelierMediaCreationPanel({
   mediaAssets?: MediaAsset[]
   onSaveMediaAsset?: (asset: MediaAsset) => void
   onShellLevel?: (level: 'landing' | 'funnel' | 'editor') => void
+  videoJobs?: AtelierVideoJob[]
+  setVideoJobs?: (updater: (jobs: AtelierVideoJob[]) => AtelierVideoJob[]) => void
 }) {
   const option = ATELIER_CREATION_OPTIONS.find((item) => item.id === type) ?? ATELIER_CREATION_OPTIONS[0]
   const mediaType = type === 'images' || type === 'video' ? type : null
@@ -46,7 +56,9 @@ export function AtelierMediaCreationPanel({
   const [activeToolId, setActiveToolId] = useState('select')
   const [inputFileSrc, setInputFileSrc] = useState<string | null>(null)
   const [inputFileName, setInputFileName] = useState<string | null>(null)
+  const [endFrameSrc, setEndFrameSrc] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const endFrameInputRef = useRef<HTMLInputElement>(null)
   const create3dInputRef = useRef<HTMLInputElement>(null)
   const [productStudioOpen, setProductStudioOpen] = useState(false)
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
@@ -138,6 +150,7 @@ export function AtelierMediaCreationPanel({
     setModelQuery,
     filteredModels,
     generating,
+    generatingLabel,
     resultItems,
     setResultItems,
     activeResultIndex,
@@ -147,14 +160,24 @@ export function AtelierMediaCreationPanel({
     error,
     canGenerate,
     handleGenerate,
+    cancelGeneration,
     handleSaveResult,
     handleDeleteAsset,
+    handleRenderFinal,
     stepLightbox,
+    videoSettings,
+    updateVideoSettings,
+    selectedVideoCapability,
+    videoReferences,
+    setVideoReferences,
+    videoTask,
+    setVideoTask,
   } = useAtelierMediaCreator({
     mediaType,
     project,
     onProjectGenerated,
     initialImageSrc,
+    setVideoJobs,
   })
   const [canvasScale, setCanvasScale] = useState(1)
   const [canvasOffset, setCanvasOffset] = useState({ x: 0, y: 0 })
@@ -479,7 +502,8 @@ export function AtelierMediaCreationPanel({
       maskDataUrl = (await exportMaskCompositeDataUrl()) ?? undefined
     }
     const videoStartImage = mediaType === 'video' && inputFileIsImage ? inputFileSrc ?? undefined : undefined
-    void handleGenerate(event, maskDataUrl, videoStartImage).finally(() => {
+    const videoEndImage = mediaType === 'video' && inputFileIsImage ? endFrameSrc ?? undefined : undefined
+    void handleGenerate(event, maskDataUrl, videoStartImage, videoEndImage).finally(() => {
       requestAnimationFrame(() => promptInputRef.current?.focus())
     })
     requestAnimationFrame(() => promptInputRef.current?.focus())
@@ -689,7 +713,7 @@ export function AtelierMediaCreationPanel({
             <svg className="animate-spin" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 12a9 9 0 1 1-6.219-8.56" />
             </svg>
-            <p className="text-sm">Genereren…</p>
+            <p className="text-sm">{generatingLabel || 'Genereren…'}</p>
           </div>
         )}
 
@@ -738,7 +762,7 @@ export function AtelierMediaCreationPanel({
                   <svg className="animate-spin" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                   </svg>
-                  <p className="text-sm">Genereren…</p>
+                  <p className="text-sm">{generatingLabel || 'Genereren…'}</p>
                 </div>
               </div>
             )}
@@ -785,6 +809,17 @@ export function AtelierMediaCreationPanel({
                   <CloseTinyIcon />
                 </button>
               </>
+            )}
+
+            {!generating && mediaType === 'video' && activeItem.isDraft && (
+              <button
+                type="button"
+                onClick={() => void handleRenderFinal(activeItem.id)}
+                className="absolute right-4 top-4 flex items-center gap-1.5 rounded-full border border-white/[0.14] bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 opacity-0 shadow-lg backdrop-blur-md transition-opacity hover:bg-black/60 hover:text-[#facc15] group-hover:opacity-100 [div:hover>&]:opacity-100"
+                title="Render deze draft door naar volledige 1080p-kwaliteit"
+              >
+                Render in 1080p
+              </button>
             )}
           </div>
         )}
@@ -844,6 +879,20 @@ export function AtelierMediaCreationPanel({
             e.target.value = ''
           }}
         />
+        <input
+          ref={endFrameInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (!file) return
+            const reader = new FileReader()
+            reader.onload = (ev) => setEndFrameSrc(ev.target?.result as string)
+            reader.readAsDataURL(file)
+            e.target.value = ''
+          }}
+        />
         <form
           onSubmit={handleGenerateWithFocus}
           className={[
@@ -858,14 +907,39 @@ export function AtelierMediaCreationPanel({
                   <img src={inputFileSrc} alt="" className="h-10 w-10 rounded-lg object-cover border border-white/[0.10]" />
                   <button
                     type="button"
-                    onClick={() => { setInputFileSrc(null); setInputFileName(null) }}
+                    onClick={() => { setInputFileSrc(null); setInputFileName(null); setEndFrameSrc(null) }}
                     className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#1e1e1e] border border-white/[0.15] text-white/60 hover:text-white"
                     aria-label="Startbeeld verwijderen"
                   >
                     <CloseTinyIcon />
                   </button>
                 </div>
-              ) : (
+              ) : null}
+              {mediaType === 'video' && inputFileIsImage && (
+                endFrameSrc ? (
+                  <div className="relative flex-shrink-0">
+                    <img src={endFrameSrc} alt="" className="h-10 w-10 rounded-lg object-cover border border-white/[0.10]" />
+                    <button
+                      type="button"
+                      onClick={() => setEndFrameSrc(null)}
+                      className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#1e1e1e] border border-white/[0.15] text-white/60 hover:text-white"
+                      aria-label="Eindbeeld verwijderen"
+                    >
+                      <CloseTinyIcon />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => endFrameInputRef.current?.click()}
+                    title="Eindbeeld toevoegen"
+                    className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg border border-dashed border-white/[0.15] text-white/40 transition-colors hover:border-white/30 hover:text-white/70"
+                  >
+                    <PlusTinyIcon />
+                  </button>
+                )
+              )}
+              {mediaType !== 'images' && !inputFileIsImage && (
                 <div className="relative flex items-center gap-2 rounded-lg border border-white/[0.10] bg-white/[0.04] px-2.5 py-1.5">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-white/50">
                     <polygon points="5 3 19 12 5 21 5 3" />
@@ -1072,6 +1146,8 @@ export function AtelierMediaCreationPanel({
       {!productStudioOpen && <AtelierMediaEditSidebar
         mediaType={mediaType}
         projectsPanel={projectsPanel}
+        videoJobs={videoJobs}
+        onCancelVideoJob={() => cancelGeneration()}
         currentImageSrc={activeItem?.src}
         activeToolId={activeToolId}
         onToolSelect={setActiveToolId}
@@ -1083,6 +1159,13 @@ export function AtelierMediaCreationPanel({
         onRedoMask={redoMask}
         maskHistoryLen={maskHistoryLen}
         maskRedoLen={maskRedoLen}
+        videoSettings={videoSettings}
+        onVideoSettingsChange={updateVideoSettings}
+        videoCapability={selectedVideoCapability}
+        videoReferences={videoReferences}
+        onVideoReferencesChange={setVideoReferences}
+        videoTask={videoTask}
+        onVideoTaskChange={setVideoTask}
         scene3dProjects={existingProjects}
         scene3dProjectsLoading={scene3dProjectsLoading}
         onSelectScene3DProject={handleSelectScene3DProject}
@@ -1255,6 +1338,8 @@ const VIDEO_EDIT_TOOLS: AtelierEditTool[] = [
 function AtelierMediaEditSidebar({
   mediaType,
   projectsPanel,
+  videoJobs,
+  onCancelVideoJob,
   currentImageSrc,
   activeToolId,
   onToolSelect,
@@ -1266,6 +1351,13 @@ function AtelierMediaEditSidebar({
   onRedoMask,
   maskHistoryLen,
   maskRedoLen,
+  videoSettings,
+  onVideoSettingsChange,
+  videoCapability,
+  videoReferences,
+  onVideoReferencesChange,
+  videoTask,
+  onVideoTaskChange,
   onScene3DResult,
   scene3dProjects,
   scene3dProjectsLoading,
@@ -1275,6 +1367,8 @@ function AtelierMediaEditSidebar({
 }: {
   mediaType: AtelierMediaProjectType
   projectsPanel?: AtelierProjectsPanelConfig
+  videoJobs?: AtelierVideoJob[]
+  onCancelVideoJob?: (jobId: string) => void
   currentImageSrc?: string
   activeToolId?: string
   onToolSelect?: (id: string) => void
@@ -1286,6 +1380,13 @@ function AtelierMediaEditSidebar({
   onRedoMask?: () => void
   maskHistoryLen?: number
   maskRedoLen?: number
+  videoSettings?: VideoGenerationSettings | null
+  onVideoSettingsChange?: (patch: Partial<VideoGenerationSettings>) => void
+  videoCapability?: AtelierVideoCapability
+  videoReferences?: VideoReferenceSlot[]
+  onVideoReferencesChange?: (updater: VideoReferenceSlot[] | ((prev: VideoReferenceSlot[]) => VideoReferenceSlot[])) => void
+  videoTask?: VideoTaskMode
+  onVideoTaskChange?: (task: VideoTaskMode) => void
   onScene3DResult?: (imageUrl: string) => void
   scene3dProjects?: any[]
   scene3dProjectsLoading?: boolean
@@ -1301,6 +1402,8 @@ function AtelierMediaEditSidebar({
       projectsPanel={projectsPanel}
       convertContent={<AdToHtmlToolPanel currentImageSrc={currentImageSrc} />}
       editTabLabelOverride={activeToolId === 'scene3d' ? 'Projecten' : undefined}
+      videoJobs={videoJobs}
+      onCancelVideoJob={onCancelVideoJob}
     >
       {activeToolId === 'scene3d' ? (
         <Scene3DProjectsInline
@@ -1322,6 +1425,13 @@ function AtelierMediaEditSidebar({
           onRedoMask={onRedoMask}
           maskHistoryLen={maskHistoryLen}
           maskRedoLen={maskRedoLen}
+          videoSettings={videoSettings}
+          onVideoSettingsChange={onVideoSettingsChange}
+          videoCapability={videoCapability}
+          videoReferences={videoReferences}
+          onVideoReferencesChange={onVideoReferencesChange}
+          videoTask={videoTask}
+          onVideoTaskChange={onVideoTaskChange}
         />
       )}
     </AtelierRightPanel>
@@ -1683,6 +1793,13 @@ function AtelierToolDetailPanel({
   onRedoMask,
   maskHistoryLen,
   maskRedoLen,
+  videoSettings,
+  onVideoSettingsChange,
+  videoCapability,
+  videoReferences,
+  onVideoReferencesChange,
+  videoTask,
+  onVideoTaskChange,
 }: {
   tool?: AtelierEditTool
   mediaType: AtelierMediaProjectType
@@ -1694,8 +1811,36 @@ function AtelierToolDetailPanel({
   onRedoMask?: () => void
   maskHistoryLen?: number
   maskRedoLen?: number
+  videoSettings?: VideoGenerationSettings | null
+  onVideoSettingsChange?: (patch: Partial<VideoGenerationSettings>) => void
+  videoCapability?: AtelierVideoCapability
+  videoReferences?: VideoReferenceSlot[]
+  onVideoReferencesChange?: (updater: VideoReferenceSlot[] | ((prev: VideoReferenceSlot[]) => VideoReferenceSlot[])) => void
+  videoTask?: VideoTaskMode
+  onVideoTaskChange?: (task: VideoTaskMode) => void
 }) {
-  if (!tool) return null
+  if (!tool) {
+    if (mediaType === 'video') {
+      return (
+        <>
+          <VideoReferencesPanel
+            capability={videoCapability}
+            references={videoReferences ?? []}
+            onChange={onVideoReferencesChange ?? (() => {})}
+            task={videoTask ?? 'reference'}
+            onTaskChange={onVideoTaskChange ?? (() => {})}
+          />
+          <VideoGenerationSettingsPanel
+            settings={videoSettings}
+            onChange={onVideoSettingsChange}
+            capability={videoCapability}
+            hasReferences={(videoReferences?.length ?? 0) > 0}
+          />
+        </>
+      )
+    }
+    return null
+  }
 
   return (
     <div className="px-5 py-5">
@@ -1792,6 +1937,445 @@ function AtelierToolDetailPanel({
           </p>
         </div>
       )}
+    </div>
+  )
+}
+
+// Spiegelt resolveRatePerSecond() in de edge function — alleen voor een live
+// preview, de server rekent altijd authoritatief opnieuw bij submit.
+function resolveRatePerSecond(pricingSkus: Record<string, string>, resolution: string, generateAudio: boolean): number | null {
+  const resSuffix = `_${resolution.toLowerCase()}`
+  const audioKeys = generateAudio
+    ? [`duration_seconds_with_audio${resSuffix}`, 'duration_seconds_with_audio']
+    : [`duration_seconds_without_audio${resSuffix}`, 'duration_seconds_without_audio']
+  const candidates = [...audioKeys, `duration_seconds${resSuffix}`, 'duration_seconds', `per-video-second-${resolution}`, 'per-video-second']
+  for (const key of candidates) {
+    const raw = pricingSkus[key]
+    if (raw == null) continue
+    const parsed = Number.parseFloat(raw)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+function estimateVideoCreditsCost(capability: AtelierVideoCapability, settings: VideoGenerationSettings): number | null {
+  // Bij duration "auto" weet niemand vooraf de echte lengte -- de backend rekent dan
+  // ook met een 5s-schatting (zie proxy-fal-video/index.ts), dus dezelfde aanname hier.
+  const billedDuration = typeof settings.duration === 'number' ? settings.duration : 5
+  if (settings.draft && capability.draft_rate_per_second != null) {
+    return Math.ceil(capability.draft_rate_per_second * billedDuration * 100000 * (1 + capability.markup_pct / 100))
+  }
+  const ratePerSecond = resolveRatePerSecond(capability.pricing_skus, settings.resolution, settings.generateAudio)
+  const usd = ratePerSecond != null
+    ? ratePerSecond * billedDuration
+    : (capability.video_cost_estimate / 100000) * (billedDuration / 5)
+  return Math.ceil(usd * 100000 * (1 + capability.markup_pct / 100))
+}
+
+function VideoReferencesPanel({
+  capability,
+  references,
+  onChange,
+  task,
+  onTaskChange,
+}: {
+  capability?: AtelierVideoCapability
+  references: VideoReferenceSlot[]
+  onChange: (updater: VideoReferenceSlot[] | ((prev: VideoReferenceSlot[]) => VideoReferenceSlot[])) => void
+  task: VideoTaskMode
+  onTaskChange: (task: VideoTaskMode) => void
+}) {
+  if (!capability?.supports_references) return null
+  const limits = capability.reference_limits ?? { image: 30, video: 10, audio: 10 }
+  const hasReferences = references.length > 0
+  const pillClass = (active: boolean) => [
+    'rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+    !hasReferences
+      ? 'bg-white/[0.04] text-white/20 cursor-not-allowed'
+      : active ? 'bg-[#facc15] text-black' : 'bg-white/[0.06] text-white/50 hover:bg-white/[0.1]',
+  ].join(' ')
+
+  return (
+    <div className="px-5 pt-5">
+      <div className="mb-3">
+        <h2 className="text-sm font-semibold text-white/90">Referenties</h2>
+        <p className="text-xs leading-relaxed text-white/35">Voeg beeld, video of audio toe om de generatie te sturen.</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <VideoReferenceKindRow kind="image" label="Image" limit={limits.image} accept="image/png,image/jpeg,image/webp,image/gif" references={references} onChange={onChange} />
+        <VideoReferenceKindRow kind="video" label="Video" limit={limits.video} accept="video/mp4,video/webm,video/quicktime" references={references} onChange={onChange} />
+        <VideoReferenceKindRow kind="audio" label="Audio" limit={limits.audio} accept="audio/mpeg,audio/wav,audio/mp4" references={references} onChange={onChange} />
+      </div>
+      {hasReferences && (
+        <p className="mt-2 text-[10px] leading-relaxed text-white/30">
+          Tip: verwijs in je prompt naar een referentie met <span className="text-white/45">@Image1</span>, <span className="text-white/45">@Video1</span> of <span className="text-white/45">@Audio1</span> (oplopend per toegevoegd bestand van dat type).
+        </p>
+      )}
+      <div className="mt-3">
+        <p className="mb-1.5 text-[11px] font-medium uppercase tracking-widest text-white/35">
+          Modus{!hasReferences && <span className="text-white/25"> — vereist referenties</span>}
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          <button type="button" disabled={!hasReferences} onClick={() => onTaskChange('reference')} className={pillClass(task === 'reference')}>Referentie</button>
+          <button type="button" disabled={!hasReferences} onClick={() => onTaskChange('editing')} className={pillClass(task === 'editing')}>Bewerken</button>
+          <button type="button" disabled={!hasReferences} onClick={() => onTaskChange('extension')} className={pillClass(task === 'extension')}>Verlengen</button>
+        </div>
+        {hasReferences && task !== 'reference' && (
+          <p className="mt-1.5 text-[10px] leading-relaxed text-white/30">Lengte en beeldverhouding worden in deze modus automatisch door fal bepaald.</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// fal's harde eisen per referentietype (bevestigd via fal's OpenAPI-schema): max
+// bestandsgrootte, en voor video/audio ook min/max duur per bestand + gecombineerde
+// duur per modaliteit. Clientside afgevangen zodat gebruikers een Nederlandse melding
+// krijgen i.p.v. pas na indienen een Engelse fal-foutmelding.
+const REFERENCE_MAX_SIZE_BYTES: Record<VideoReferenceKind, number> = {
+  image: 30 * 1024 * 1024,
+  video: 200 * 1024 * 1024,
+  audio: 15 * 1024 * 1024,
+}
+const REFERENCE_MIN_DURATION_SEC = 1.8
+const REFERENCE_MAX_DURATION_SEC = 30.2
+
+function VideoReferenceKindRow({
+  kind,
+  label,
+  limit,
+  accept,
+  references,
+  onChange,
+}: {
+  kind: VideoReferenceKind
+  label: string
+  limit: number
+  accept: string
+  references: VideoReferenceSlot[]
+  onChange: (updater: VideoReferenceSlot[] | ((prev: VideoReferenceSlot[]) => VideoReferenceSlot[])) => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const slots = references.filter((r) => r.kind === kind)
+
+  function addFile(file: File) {
+    const id = `ref_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
+    const maxSize = REFERENCE_MAX_SIZE_BYTES[kind]
+    if (file.size > maxSize) {
+      const maxMb = Math.round(maxSize / (1024 * 1024))
+      onChange((prev) => [...prev, { id, kind, status: 'error', fileName: file.name, error: `Bestand te groot (max ${maxMb}MB).` }])
+      return
+    }
+
+    const startUpload = (durationSec?: number) => {
+      const reader = new FileReader()
+      reader.onload = async (ev) => {
+        const dataUrl = ev.target?.result as string
+        if (kind === 'image') {
+          onChange((prev) => [...prev, { id, kind, status: 'ready', previewSrc: dataUrl, fileUrl: dataUrl, fileName: file.name }])
+          return
+        }
+        onChange((prev) => [...prev, { id, kind, status: 'uploading', fileName: file.name, durationSec }])
+        try {
+          const api = (window as any).api
+          const { data: { session } } = await supabase!.auth.getSession()
+          const res = await api.uploadVideoReference(dataUrl, file.name, session?.access_token ?? undefined)
+          if (!res?.ok) throw new Error(res?.error ?? 'Upload mislukt.')
+          onChange((prev) => prev.map((s) => (s.id === id ? { ...s, status: 'ready' as const, fileUrl: res.fileUrl } : s)))
+        } catch (err: any) {
+          onChange((prev) => prev.map((s) => (s.id === id ? { ...s, status: 'error' as const, error: err.message ?? 'Upload mislukt.' } : s)))
+        }
+      }
+      reader.readAsDataURL(file)
+    }
+
+    if (kind === 'image') {
+      startUpload()
+      return
+    }
+
+    // video/audio: duur meten vóór upload -- fal eist 1.8-30.2s per bestand en een
+    // gecombineerde duur van max 30.2s over alle referenties van dezelfde modaliteit.
+    const objectUrl = URL.createObjectURL(file)
+    const mediaEl = document.createElement(kind)
+    mediaEl.preload = 'metadata'
+    mediaEl.src = objectUrl
+    mediaEl.onloadedmetadata = () => {
+      const dur = mediaEl.duration
+      URL.revokeObjectURL(objectUrl)
+      if (!Number.isFinite(dur)) {
+        // Kon de duur niet meten (bv. ongebruikelijke codec) -- laat fal zelf valideren.
+        startUpload()
+        return
+      }
+      if (dur < REFERENCE_MIN_DURATION_SEC || dur > REFERENCE_MAX_DURATION_SEC) {
+        onChange((prev) => [...prev, {
+          id, kind, status: 'error', fileName: file.name,
+          error: `Lengte moet tussen ${REFERENCE_MIN_DURATION_SEC}s en ${REFERENCE_MAX_DURATION_SEC}s zijn (dit bestand: ${dur.toFixed(1)}s).`,
+        }])
+        return
+      }
+      const existingTotal = slots.reduce((sum, s) => sum + (s.durationSec ?? 0), 0)
+      if (existingTotal + dur > REFERENCE_MAX_DURATION_SEC) {
+        onChange((prev) => [...prev, {
+          id, kind, status: 'error', fileName: file.name,
+          error: `Totale lengte van alle ${label.toLowerCase()}-referenties mag max ${REFERENCE_MAX_DURATION_SEC}s zijn.`,
+        }])
+        return
+      }
+      startUpload(dur)
+    }
+    mediaEl.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      startUpload()
+    }
+  }
+
+  function removeSlot(id: string) {
+    onChange((prev) => prev.filter((s) => s.id !== id))
+  }
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept={accept}
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) addFile(file)
+          e.target.value = ''
+        }}
+      />
+      {slots.map((slot, index) => (
+        <div key={slot.id} className="relative flex items-center gap-1.5 rounded-full border border-white/[0.10] bg-white/[0.04] px-2.5 py-1.5">
+          {kind === 'image' && slot.previewSrc ? (
+            <img src={slot.previewSrc} alt="" className="h-5 w-5 rounded-full object-cover" />
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-white/50">
+              {kind === 'video' ? <polygon points="5 3 19 12 5 21 5 3" /> : <path d="M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm12-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />}
+            </svg>
+          )}
+          <span className="max-w-[90px] truncate text-xs text-white/60">
+            {slot.status === 'uploading' ? 'Uploaden...' : slot.status === 'error' ? (slot.error ?? 'Fout') : (slot.fileName ?? `${label} ${index + 1}`)}
+          </span>
+          <button
+            type="button"
+            onClick={() => removeSlot(slot.id)}
+            className="ml-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-white/40 hover:text-white"
+            aria-label={`${label} verwijderen`}
+          >
+            <CloseTinyIcon />
+          </button>
+        </div>
+      ))}
+      {slots.length < limit && (
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          className="inline-flex h-8 items-center gap-1 rounded-full border border-dashed border-white/[0.15] px-3 text-xs font-medium text-white/50 transition-colors hover:border-white/30 hover:text-white/80"
+        >
+          {label}{slots.length > 0 ? ` ${slots.length + 1}` : ''} <PlusTinyIcon />
+        </button>
+      )}
+    </>
+  )
+}
+
+function VideoGenerationSettingsPanel({
+  settings,
+  onChange,
+  capability,
+  hasReferences,
+}: {
+  settings?: VideoGenerationSettings | null
+  onChange?: (patch: Partial<VideoGenerationSettings>) => void
+  capability?: AtelierVideoCapability
+  hasReferences?: boolean
+}) {
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+
+  if (!capability || !settings) {
+    return (
+      <div className="px-5 py-5">
+        <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+          <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Video-instellingen</p>
+          <p className="mt-3 text-sm leading-relaxed text-white/42">Instellingen laden...</p>
+        </div>
+      </div>
+    )
+  }
+
+  const estimatedMillicredits = estimateVideoCreditsCost(capability, settings)
+  const pillClass = (active: boolean) => [
+    'rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+    active ? 'bg-[#facc15] text-black' : 'bg-white/[0.06] text-white/50 hover:bg-white/[0.1]',
+  ].join(' ')
+
+  return (
+    <div className="px-5 py-5">
+      <div className="mb-4">
+        <h2 className="text-sm font-semibold text-white/90">Video-instellingen</h2>
+        <p className="text-xs leading-relaxed text-white/35">Lengte, formaat en audio voor deze generatie.</p>
+      </div>
+
+      <div className="space-y-3">
+        <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Lengte</p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs font-medium text-white/70">{settings.duration === 'auto' ? 'Auto' : `${settings.duration}s`}</p>
+              {capability.supports_auto_duration && (
+                <button
+                  type="button"
+                  onClick={() => onChange?.({ duration: settings.duration === 'auto' ? (capability.supported_durations[0] ?? 5) : 'auto' })}
+                  className={pillClass(settings.duration === 'auto')}
+                >
+                  Auto
+                </button>
+              )}
+            </div>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={Math.max(capability.supported_durations.length - 1, 0)}
+            step={1}
+            disabled={settings.duration === 'auto'}
+            value={Math.max(capability.supported_durations.indexOf(typeof settings.duration === 'number' ? settings.duration : -1), 0)}
+            onChange={(e) => onChange?.({ duration: capability.supported_durations[Number(e.target.value)] })}
+            className="w-full accent-[#facc15] disabled:opacity-30"
+          />
+          <div className="mt-1.5 flex justify-between text-[10px] text-white/30">
+            <span>{capability.supported_durations[0]}s</span>
+            <span>{capability.supported_durations[capability.supported_durations.length - 1]}s</span>
+          </div>
+          {settings.duration === 'auto' && (
+            <p className="mt-1.5 text-[10px] leading-relaxed text-white/30">fal bepaalt de lengte zelf op basis van de prompt.</p>
+          )}
+        </div>
+
+        {capability.supports_draft && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Draft</p>
+                <p className="mt-1 text-xs leading-relaxed text-white/40">
+                  {hasReferences
+                    ? 'Niet beschikbaar in combinatie met referentie-media.'
+                    : 'Genereer eerst goedkoop in 480p, render later desgewenst door naar 1080p.'}
+                </p>
+              </div>
+              <Toggle checked={Boolean(settings.draft) && !hasReferences} onChange={(value) => onChange?.({ draft: value })} disabled={hasReferences} />
+            </div>
+          </div>
+        )}
+
+        <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Resolutie</p>
+            {settings.draft && <p className="text-[10px] text-white/30">Draft levert altijd 480p</p>}
+          </div>
+          <div className={['flex flex-wrap gap-1.5', settings.draft ? 'pointer-events-none opacity-30' : ''].join(' ')}>
+            {capability.supported_resolutions.map((r) => (
+              <button key={r} type="button" onClick={() => onChange?.({ resolution: r })} className={pillClass(settings.resolution === r)}>
+                {r}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+          <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Beeldverhouding</p>
+          <div className="flex flex-wrap gap-1.5">
+            {capability.supported_aspect_ratios.map((ratio) => (
+              <button key={ratio} type="button" onClick={() => onChange?.({ aspectRatio: ratio })} className={pillClass(settings.aspectRatio === ratio)}>
+                {ratio}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {capability.generate_audio && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Audio</p>
+                <p className="mt-1 text-xs text-white/40">Geluid genereren bij deze video</p>
+              </div>
+              <Toggle checked={settings.generateAudio} onChange={(value) => onChange?.({ generateAudio: value })} />
+            </div>
+          </div>
+        )}
+
+        {(capability.seed || capability.bitrate_mode || capability.codec) && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <button type="button" onClick={() => setAdvancedOpen((v) => !v)} className="flex w-full items-center justify-between text-left">
+              <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Geavanceerd</p>
+              <svg
+                width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"
+                className={['text-white/30 transition-transform', advancedOpen ? 'rotate-180' : ''].join(' ')}
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+            {advancedOpen && (
+              <div className="mt-3 space-y-4">
+                {capability.seed && (
+                  <div>
+                    <label className="text-xs text-white/40">
+                      Seed (optioneel, voor herhaalbare resultaten)
+                      {!hasReferences && <span className="text-white/25"> — vereist referenties</span>}
+                    </label>
+                    <input
+                      type="number"
+                      disabled={!hasReferences}
+                      value={settings.seed ?? ''}
+                      onChange={(e) => onChange?.({ seed: e.target.value ? Number(e.target.value) : undefined })}
+                      placeholder="Willekeurig"
+                      className="mt-2 w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20 disabled:opacity-40"
+                    />
+                  </div>
+                )}
+                {capability.bitrate_mode && (
+                  <div>
+                    <p className="text-xs text-white/40">Bitrate</p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {(['standard', 'high'] as const).map((mode) => (
+                        <button key={mode} type="button" onClick={() => onChange?.({ bitrateMode: mode })} className={pillClass(settings.bitrateMode === mode)}>
+                          {mode === 'standard' ? 'Standaard' : 'Hoog'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {capability.codec && (
+                  <div>
+                    <p className="text-xs text-white/40">Codec</p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {(['auto', 'H264', 'H265'] as const).map((c) => (
+                        <button key={c} type="button" onClick={() => onChange?.({ codec: c })} className={pillClass(settings.codec === c)}>
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {estimatedMillicredits != null && (
+          <div className="rounded-2xl border border-white/[0.06] bg-[#0f0f0f] p-3">
+            <p className="text-[10px] leading-relaxed text-white/25">
+              Geschatte kosten: <span className="text-white/45">{new Intl.NumberFormat('nl-NL').format(Math.ceil(estimatedMillicredits / 100))} credits</span>
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

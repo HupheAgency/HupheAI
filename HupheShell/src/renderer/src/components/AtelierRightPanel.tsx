@@ -8,6 +8,7 @@ import { IcoPlus, IcoSearch, IcoTrash, IcoPencil, IcoFile, IcoVideo } from './Ic
 import type { AtelierProjectFreshnessTarget, ProjectAssetRef } from '../lib/atelier-project-store'
 import type { AtelierCreationType } from './AtelierCreationModeButtons'
 import { checkAssetFreshness } from '../lib/asset-library'
+import type { AtelierVideoJob } from '../hooks/useAtelierMedia'
 
 export type AtelierSidebarPanelType = 'presentation' | 'banners' | 'print' | 'images' | 'video' | 'scene3d'
 
@@ -50,6 +51,8 @@ export default function AtelierRightPanel({
   forceShowChat = 0,
   convertContent,
   editTabLabelOverride,
+  videoJobs,
+  onCancelVideoJob,
 }: {
   children: ReactNode
   widthClass?: string
@@ -61,6 +64,8 @@ export default function AtelierRightPanel({
   forceShowChat?: number
   convertContent?: ReactNode
   editTabLabelOverride?: string
+  videoJobs?: AtelierVideoJob[]
+  onCancelVideoJob?: (jobId: string) => void
 }) {
   const [activeTab, setActiveTab] = useState<'projects' | 'edit' | 'copy' | 'chat' | 'convert'>(defaultTab)
   const chatScrollRef = useRef<HTMLDivElement>(null)
@@ -87,7 +92,13 @@ export default function AtelierRightPanel({
   if (projectsPanel.type === 'images' || projectsPanel.type === 'video' || projectsPanel.type === 'presentation') {
     return (
       <RightPanelShell widthClass={widthClass}>
-        <AtelierCleanProjectsPanel config={projectsPanel} bodyClassName={bodyClassName} editTabLabelOverride={editTabLabelOverride}>
+        <AtelierCleanProjectsPanel
+          config={projectsPanel}
+          bodyClassName={bodyClassName}
+          editTabLabelOverride={editTabLabelOverride}
+          videoJobs={projectsPanel.type === 'video' ? videoJobs : undefined}
+          onCancelVideoJob={onCancelVideoJob}
+        >
           {children}
         </AtelierCleanProjectsPanel>
       </RightPanelShell>
@@ -286,14 +297,16 @@ function AtelierProjectsPanelContent({ config }: { config: AtelierProjectsPanelC
 }
 
 function AtelierCleanProjectsPanel({
-  config, children, bodyClassName, editTabLabelOverride,
+  config, children, bodyClassName, editTabLabelOverride, videoJobs, onCancelVideoJob,
 }: {
   config: AtelierProjectsPanelConfig
   children: ReactNode
   bodyClassName: string
   editTabLabelOverride?: string
+  videoJobs?: AtelierVideoJob[]
+  onCancelVideoJob?: (jobId: string) => void
 }) {
-  const [view, setView] = useState<'projects' | 'edit'>('edit')
+  const [view, setView] = useState<'projects' | 'edit' | 'jobs'>('edit')
   const [searching, setSearching] = useState(false)
   const copy = ATELIER_PROJECT_COPY[config.type]
   const q = config.search.trim().toLowerCase()
@@ -303,10 +316,12 @@ function AtelierCleanProjectsPanel({
 
   const projectsTabLabel = config.type === 'presentation' ? 'Projecten' : copy.title
   const editTabLabel = editTabLabelOverride ?? getAtelierEditTabLabel(config.type, config.activeProjectId)
+  const hasJobsTab = !!videoJobs
 
   const tabs: RightPanelTab[] = [
     { id: 'edit', label: editTabLabel },
     { id: 'projects', label: projectsTabLabel },
+    ...(hasJobsTab ? [{ id: 'jobs', label: 'Job Queue' }] : []),
   ]
 
   const tabBarRight = view === 'projects' ? (
@@ -324,7 +339,7 @@ function AtelierCleanProjectsPanel({
       <PanelTabBar
         tabs={tabs}
         activeTab={view}
-        onTabChange={(id) => setView(id as 'projects' | 'edit')}
+        onTabChange={(id) => setView(id as 'projects' | 'edit' | 'jobs')}
         indent
         right={tabBarRight}
       />
@@ -342,6 +357,8 @@ function AtelierCleanProjectsPanel({
 
       {view === 'edit' ? (
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+      ) : view === 'jobs' ? (
+        <AtelierJobQueuePanel jobs={videoJobs ?? []} onCancel={onCancelVideoJob} />
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
           <button
@@ -374,6 +391,73 @@ function AtelierCleanProjectsPanel({
             </div>
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+function AtelierJobQueuePanel({ jobs, onCancel }: { jobs: AtelierVideoJob[]; onCancel?: (jobId: string) => void }) {
+  if (jobs.length === 0) {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
+        <p className="px-3 py-3 text-sm leading-relaxed text-white/30">Nog geen video-generaties. Zodra je een video genereert, zie je hier de status.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
+      <p className="mt-3 px-3 pb-1.5 text-[10px] font-medium uppercase tracking-widest text-white/25">Recent</p>
+      <div className="space-y-1.5">
+        {jobs.map((job) => (
+          <AtelierJobQueueRow key={job.id} job={job} onCancel={onCancel ? () => onCancel(job.id) : undefined} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AtelierJobQueueRow({ job, onCancel }: { job: AtelierVideoJob; onCancel?: () => void }) {
+  const statusLabel = job.status === 'in_progress'
+    ? job.progressLabel || 'Bezig...'
+    : job.status === 'completed'
+      ? 'Klaar'
+      : job.status === 'cancelled'
+        ? 'Geannuleerd'
+        : (job.error || 'Mislukt')
+  const statusColor = job.status === 'completed'
+    ? 'text-emerald-400/80'
+    : job.status === 'failed'
+      ? 'text-red-400/80'
+      : job.status === 'cancelled'
+        ? 'text-white/35'
+        : 'text-[#facc15]/80'
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl px-3 py-2.5">
+      <span className="flex h-11 w-14 flex-shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/[0.07] bg-black/30 text-white/35">
+        {job.thumbnailSrc ? (
+          <img src={job.thumbnailSrc} alt="" className="h-full w-full object-cover" />
+        ) : job.status === 'in_progress' ? (
+          <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+        ) : (
+          <IcoVideo />
+        )}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-white/85">{job.prompt || 'Video'}</span>
+        <span className={['mt-0.5 block truncate text-xs', statusColor].join(' ')}>
+          {statusLabel}{job.status === 'in_progress' && job.progressPct > 0 ? ` · ${job.progressPct}%` : ''}
+        </span>
+      </span>
+      {job.status === 'in_progress' && onCancel && (
+        <button
+          type="button"
+          onClick={onCancel}
+          className="flex-shrink-0 rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-xs font-medium text-white/50 transition-colors hover:border-red-400/30 hover:text-red-300"
+        >
+          Annuleren
+        </button>
       )}
     </div>
   )

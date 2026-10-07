@@ -1,3 +1,5 @@
+import { getCached, writeGenerationSetting, deleteGenerationSetting } from './generation-settings-cache'
+
 const KEY_PREFIX = 'huphe:atelier-module-prompt:'
 const MODEL_KEY_PREFIX = 'huphe:atelier-module-models:'
 const IMAGE_PIPELINE_KEY_PREFIX = 'huphe:atelier-image-pipeline:'
@@ -41,20 +43,25 @@ Instructie: {{prompt}}`,
 }
 
 export function loadImagePipelinePrompt(slot: ImagePipelineSlot): string {
+  const cached = getCached(`image-pipeline:${slot}`) as { prompt?: string } | undefined
+  if (cached?.prompt != null) return cached.prompt
   const stored = localStorage.getItem(`${IMAGE_PIPELINE_KEY_PREFIX}${slot}`)
   return stored ?? IMAGE_PIPELINE_DEFAULTS[slot]
 }
 
-export function saveImagePipelinePrompt(slot: ImagePipelineSlot, prompt: string) {
+export async function saveImagePipelinePrompt(slot: ImagePipelineSlot, prompt: string) {
   if (prompt.trim() === IMAGE_PIPELINE_DEFAULTS[slot].trim()) {
     localStorage.removeItem(`${IMAGE_PIPELINE_KEY_PREFIX}${slot}`)
+    await deleteGenerationSetting(`image-pipeline:${slot}`)
   } else {
     localStorage.setItem(`${IMAGE_PIPELINE_KEY_PREFIX}${slot}`, prompt)
+    await writeGenerationSetting(`image-pipeline:${slot}`, { prompt })
   }
 }
 
-export function resetImagePipelinePrompt(slot: ImagePipelineSlot) {
+export async function resetImagePipelinePrompt(slot: ImagePipelineSlot) {
   localStorage.removeItem(`${IMAGE_PIPELINE_KEY_PREFIX}${slot}`)
+  await deleteGenerationSetting(`image-pipeline:${slot}`)
 }
 
 export function getDefaultImagePipelinePrompt(slot: ImagePipelineSlot): string {
@@ -105,6 +112,7 @@ export const DEFAULT_MODULE_MODELS: Record<ModuleType, ModuleModelConfig[]> = {
   ],
   video: [
     { id: 'google/veo-3', label: 'Veo 3', model: 'google/veo-3', provider: 'openrouter', modality: 'video' },
+    { id: 'bytedance/seedance-2.5', label: 'Seedance 2.5', model: 'bytedance/seedance-2.5', provider: 'fal', modality: 'video' },
     { id: 'minimax/video-01', label: 'MiniMax Video-01', model: 'minimax/video-01', provider: 'openrouter', modality: 'video' },
     { id: 'luma/ray-2-720p', label: 'Luma Ray 2', model: 'luma/ray-2-720p', provider: 'openrouter', modality: 'video' },
     { id: 'wan-ai/wan-2.1-t2v-turbo', label: 'Wan 2.1 Turbo', model: 'wan-ai/wan-2.1-t2v-turbo', provider: 'openrouter', modality: 'video' },
@@ -170,20 +178,25 @@ Regels:
 }
 
 export function loadModulePrompt(type: string): string {
+  const cached = getCached(`module-prompt:${type}`) as { prompt?: string } | undefined
+  if (cached?.prompt != null) return cached.prompt
   const stored = localStorage.getItem(`${KEY_PREFIX}${type}`)
   return stored ?? DEFAULTS[type as ModuleType] ?? ''
 }
 
-export function saveModulePrompt(type: string, prompt: string) {
+export async function saveModulePrompt(type: string, prompt: string) {
   if (prompt.trim() === DEFAULTS[type as ModuleType]?.trim()) {
     localStorage.removeItem(`${KEY_PREFIX}${type}`)
+    await deleteGenerationSetting(`module-prompt:${type}`)
   } else {
     localStorage.setItem(`${KEY_PREFIX}${type}`, prompt)
+    await writeGenerationSetting(`module-prompt:${type}`, { prompt })
   }
 }
 
-export function resetModulePrompt(type: string) {
+export async function resetModulePrompt(type: string) {
   localStorage.removeItem(`${KEY_PREFIX}${type}`)
+  await deleteGenerationSetting(`module-prompt:${type}`)
 }
 
 export function getDefaultModulePrompt(type: string): string {
@@ -191,6 +204,8 @@ export function getDefaultModulePrompt(type: string): string {
 }
 
 export function loadModuleModels(type: string): ModuleModelConfig[] {
+  const cached = getCached(`module-models:${type}`)
+  if (Array.isArray(cached)) return cached as ModuleModelConfig[]
   try {
     const stored = localStorage.getItem(`${MODEL_KEY_PREFIX}${type}`)
     if (stored) {
@@ -203,14 +218,16 @@ export function loadModuleModels(type: string): ModuleModelConfig[] {
   return DEFAULT_MODULE_MODELS[type as ModuleType] ?? []
 }
 
-export function saveModuleModels(type: string, models: ModuleModelConfig[]) {
+export async function saveModuleModels(type: string, models: ModuleModelConfig[]) {
   localStorage.setItem(`${MODEL_KEY_PREFIX}${type}`, JSON.stringify(models))
   window.dispatchEvent(new CustomEvent('huphe:atelier-module-models-changed', { detail: { type } }))
+  await writeGenerationSetting(`module-models:${type}`, models)
 }
 
-export function resetModuleModels(type: string) {
+export async function resetModuleModels(type: string) {
   localStorage.removeItem(`${MODEL_KEY_PREFIX}${type}`)
   window.dispatchEvent(new CustomEvent('huphe:atelier-module-models-changed', { detail: { type } }))
+  await deleteGenerationSetting(`module-models:${type}`)
 }
 
 export function getDefaultModuleModels(type: string): ModuleModelConfig[] {

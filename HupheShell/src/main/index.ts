@@ -55,6 +55,13 @@ protocol.registerSchemesAsPrivileged([
 // Gebruikt door handlers die geen eigen accessToken in de payload krijgen.
 let cachedJwt: string | null = null
 
+// Houdt per lopende video-generatie (sleutel: het door de renderer meegegeven
+// requestId) de cancel_url/reservationId bij zodra die bekend zijn, plus een
+// cancelled-vlag. video:generate-ai zet een entry hier bij start en ruimt hem
+// op zodra de job klaar is; video:cancel-generation zet alleen het vlaggetje
+// en triggert de daadwerkelijke fal-cancel + credit-release.
+const activeVideoJobs = new Map<string, import('./lib/fal-video-job').FalVideoJobState>()
+
 function getJwtOrKey(): string | null {
   if (cachedJwt) return cachedJwt
   // Fallback voor BYOK-modus (testperiode)
@@ -301,6 +308,27 @@ function normalizeLocalFilePath(input: string): string {
 function toHupheFileUrl(input: string): string {
   const filePath = normalizeLocalFilePath(input)
   return `huphe://file/${encodeURIComponent(filePath)}`
+}
+
+// Normaliseert een referentie-/startbeeld-src (data-URI, http(s)-url, file://
+// of huphe://file/-pad) naar iets dat fal/OpenRouter direct kunnen gebruiken.
+// Gedeeld door referenceImageSrc en endImageSrc in video:generate-ai hieronder.
+function resolveImageSrcToUploadable(src: string): string | null {
+  if (src.startsWith('data:') || src.startsWith('http')) return src
+  let localPath: string | null = null
+  if (src.startsWith('file://')) {
+    localPath = src.slice('file://'.length)
+  } else if (src.startsWith('huphe://file/')) {
+    localPath = decodeURIComponent(src.slice('huphe://file/'.length))
+  }
+  if (!localPath) return null
+  try {
+    const buf = readFileSync(localPath)
+    const ext = localPath.endsWith('.png') ? 'png' : localPath.endsWith('.webp') ? 'webp' : 'jpeg'
+    return `data:image/${ext};base64,${buf.toString('base64')}`
+  } catch {
+    return null
+  }
 }
 
 // PNG iTXt chunk writer — stores UTF-8 prompt metadata inside the PNG file.
@@ -2671,105 +2699,252 @@ ipcMain.handle('scene3d:generate', async (_event, payload: { screenshotDataUrl: 
   }
 })
 
-ipcMain.handle('video:generate-ai', async (_event, payload: { prompt: string; model: string; systemPrompt?: string; accessToken?: string; referenceImageSrc?: string }) => {
+ipcMain.handle('video:get-capabilities', async (_event, payload: { accessToken?: string }) => {
+  payload = parseIpcPayload('video:get-capabilities', z.object({
+    accessToken: AccessTokenSchema,
+  }), payload)
+  const effectiveJwt = payload.accessToken ?? cachedJwt
+  if (!effectiveJwt) return { ok: false, error: 'Niet ingelogd.' }
+  try {
+    const { getVideoCapabilities, getFalVideoCapabilities } = await import('./lib/proxy')
+    const [openrouterResult, falResult] = await Promise.allSettled([
+      getVideoCapabilities(effectiveJwt),
+      getFalVideoCapabilities(effectiveJwt),
+    ])
+    const models = [
+      ...(openrouterResult.status === 'fulfilled' ? (openrouterResult.value.models ?? []) : []),
+      ...(falResult.status === 'fulfilled' ? (falResult.value.models ?? []) : []),
+    ]
+    return { ok: true, models }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('video:upload-reference', async (_event, payload: {
+  dataUrl: string
+  fileName: string
+  accessToken?: string
+}) => {
+  payload = parseIpcPayload('video:upload-reference', z.object({
+    dataUrl: z.string().min(1).max(280 * 1024 * 1024),
+    fileName: z.string().trim().min(1).max(255),
+    accessToken: AccessTokenSchema,
+  }), payload)
+  const { dataUrl, fileName, accessToken } = payload
+  const effectiveJwtUpload = accessToken ?? cachedJwt
+  if (!effectiveJwtUpload) return { ok: false, error: 'Niet ingelogd.' }
+
+  const dataUrlMatch = dataUrl.match(/^data:([^;,]+);base64,(.+)$/)
+  if (!dataUrlMatch) return { ok: false, error: 'Ongeldig bestandsformaat.' }
+  const [, contentType, base64Data] = dataUrlMatch
+  const buffer = Buffer.from(base64Data, 'base64')
+
+  try {
+    const { initiateFalUpload, uploadFileToFalCdn } = await import('./lib/proxy')
+    const { file_url, upload_url } = await initiateFalUpload({ contentType, fileName }, effectiveJwtUpload)
+    await uploadFileToFalCdn(upload_url, buffer, contentType)
+    return { ok: true, fileUrl: file_url }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('video:generate-ai', async (_event, payload: {
+  prompt: string
+  model: string
+  systemPrompt?: string
+  accessToken?: string
+  referenceImageSrc?: string
+  endImageSrc?: string
+  imageUrls?: string[]
+  videoUrls?: string[]
+  audioUrls?: string[]
+  duration?: number | 'auto'
+  resolution?: string
+  aspectRatio?: string
+  generateAudio?: boolean
+  bitrateMode?: string
+  codec?: string
+  seed?: number
+  task?: string
+  draft?: boolean
+  provider?: 'openrouter' | 'fal'
+  requestId?: string
+}) => {
   payload = parseIpcPayload('video:generate-ai', z.object({
     prompt: z.string().trim().min(1).max(12000),
     model: z.string().trim().min(1).max(200),
     systemPrompt: z.string().max(6000).optional(),
     accessToken: AccessTokenSchema,
     referenceImageSrc: z.string().max(20 * 1024 * 1024).optional(),
+    endImageSrc: z.string().max(20 * 1024 * 1024).optional(),
+    imageUrls: z.array(z.string()).max(30).optional(),
+    videoUrls: z.array(z.string()).max(10).optional(),
+    audioUrls: z.array(z.string()).max(10).optional(),
+    duration: z.union([z.number().int().min(1).max(60), z.literal('auto')]).optional(),
+    resolution: z.string().trim().min(1).max(20).optional(),
+    aspectRatio: z.string().trim().min(1).max(20).optional(),
+    generateAudio: z.boolean().optional(),
+    bitrateMode: z.string().trim().min(1).max(20).optional(),
+    codec: z.string().trim().min(1).max(20).optional(),
+    seed: z.number().int().optional(),
+    task: z.string().trim().min(1).max(20).optional(),
+    draft: z.boolean().optional(),
+    provider: z.enum(['openrouter', 'fal']).optional(),
+    requestId: z.string().trim().min(1).max(100).optional(),
   }), payload)
-  const { prompt, model, systemPrompt, accessToken, referenceImageSrc } = payload
+  const { prompt, model, systemPrompt, accessToken, referenceImageSrc, endImageSrc, imageUrls, videoUrls, audioUrls, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, provider, requestId } = payload
   const effectiveJwtVideo = accessToken ?? cachedJwt
   if (!effectiveJwtVideo) return { ok: false, error: 'Niet ingelogd.' }
-  const { callOpenRouter } = await import('./lib/proxy')
+  const { runOpenRouterVideoJob } = await import('./lib/video-job')
+  const { runFalVideoJob, VideoJobCancelledError } = await import('./lib/fal-video-job')
 
-  let referenceImage: string | null = null
-  if (referenceImageSrc) {
-    if (referenceImageSrc.startsWith('data:') || referenceImageSrc.startsWith('http')) {
-      referenceImage = referenceImageSrc
-    } else {
-      let localPath: string | null = null
-      if (referenceImageSrc.startsWith('file://')) {
-        localPath = referenceImageSrc.slice('file://'.length)
-      } else if (referenceImageSrc.startsWith('huphe://file/')) {
-        localPath = decodeURIComponent(referenceImageSrc.slice('huphe://file/'.length))
-      }
-      if (localPath) {
-        try {
-          const buf = readFileSync(localPath)
-          const ext = localPath.endsWith('.png') ? 'png' : localPath.endsWith('.webp') ? 'webp' : 'jpeg'
-          referenceImage = `data:image/${ext};base64,${buf.toString('base64')}`
-        } catch {
-          referenceImage = null
-        }
-      }
-    }
-  }
+  const jobState = requestId ? { cancelled: false } : undefined
+  if (requestId && jobState) activeVideoJobs.set(requestId, jobState)
 
-  async function performOpenRouterRequest(targetModalities: string[]) {
-    const finalPrompt = systemPrompt
-      ? `${systemPrompt}\n\nMaak een video op basis van ${referenceImage ? 'het bijgevoegde startbeeld en ' : ''}deze beschrijving. Geef geen tekstuele reactie; genereer uitsluitend de video.\n\nBeschrijving: ${prompt}`
-      : `Maak een video op basis van ${referenceImage ? 'het bijgevoegde startbeeld en ' : ''}deze beschrijving. Geef geen tekstuele reactie; genereer uitsluitend de video.\n\nBeschrijving: ${prompt}`
+  const referenceImage = referenceImageSrc ? resolveImageSrcToUploadable(referenceImageSrc) : null
+  const endImage = endImageSrc ? resolveImageSrcToUploadable(endImageSrc) : null
 
-    const contentParts: any[] = []
-    if (referenceImage) contentParts.push({ type: 'image_url', image_url: { url: referenceImage } })
-    contentParts.push({ type: 'text', text: finalPrompt })
+  const finalPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt
 
-    return callOpenRouter({
-      model,
-      modalities: targetModalities,
-      messages: [{ role: 'user', content: contentParts.length === 1 ? finalPrompt : contentParts }],
-      stream: false,
-    }, effectiveJwtVideo)
+  const sendProgress = (info: { step: string; progress: number }) => {
+    try { if (!_event.sender.isDestroyed()) _event.sender.send('video:generate-progress', info) } catch { /* renderer navigated away */ }
   }
 
   try {
-    let res = await performOpenRouterRequest(['video', 'text'])
-    let raw = await res.text()
-    if (res.status === 404 && raw.includes('output modalities: video, text')) {
-      res = await performOpenRouterRequest(['video'])
-      raw = await res.text()
+    let res: Response
+    let draftId: string | null = null
+    let resolvedDuration: number | undefined
+    if (provider === 'fal') {
+      const falResult = await runFalVideoJob({
+        model,
+        prompt: finalPrompt,
+        imageUrl: referenceImage ?? undefined,
+        imageUrls,
+        videoUrls,
+        audioUrls,
+        endImageUrl: endImage ?? undefined,
+        duration,
+        resolution,
+        aspectRatio,
+        generateAudio,
+        bitrateMode,
+        codec,
+        seed,
+        task,
+        draft,
+        jwt: effectiveJwtVideo,
+        onProgress: sendProgress,
+        jobState,
+      })
+      res = falResult.response
+      draftId = falResult.draftId
+      resolvedDuration = falResult.resolvedDuration
+    } else {
+      res = await runOpenRouterVideoJob({
+        model,
+        prompt: finalPrompt,
+        imageUrl: referenceImage ?? undefined,
+        // 'auto' is een fal-only concept (zie runFalVideoJob hierboven) -- OpenRouter
+        // kent alleen een numerieke duration, dus die waarde komt hier nooit vandaan.
+        duration: typeof duration === 'number' ? duration : undefined,
+        resolution,
+        aspectRatio,
+        generateAudio,
+        seed,
+        jwt: effectiveJwtVideo,
+        onProgress: sendProgress,
+      })
     }
-    if (!res.ok) return { ok: false, error: `OpenRouter fout ${res.status}: ${raw.slice(0, 200)}` }
 
-    let json: any
-    try { json = JSON.parse(raw) } catch {
-      return { ok: false, error: `Onverwacht antwoord (${res.status}): ${raw.slice(0, 200)}` }
-    }
-
-    const message = json?.choices?.[0]?.message
-    const videos: any[] = [
-      ...(Array.isArray(message?.videos) ? message.videos : []),
-      ...(Array.isArray(message?.content) ? message.content.filter((part: any) => part?.type === 'video_url' || part?.video_url || part?.url) : []),
-    ]
-
-    for (const video of videos) {
-      const value = typeof video === 'string'
-        ? video
-        : video?.video_url?.url ?? video?.url ?? video?.b64_json ?? ''
-      if (!value) continue
-      if (value.startsWith('http')) return { ok: true, videoUrl: value }
-
-      const match = value.match(/^data:video\/(\w+);base64,(.+)$/)
-      const ext = match?.[1] === 'quicktime' ? 'mov' : (match?.[1] ?? 'mp4')
-      const clean = match?.[2] ?? value.replace(/^data:video\/\w+;base64,/, '')
-      const filePath = join(tmpdir(), `huphe_generated_video_${Date.now()}.${ext}`)
-      writeFileSync(filePath, Buffer.from(clean, 'base64'))
-      return { ok: true, filePath }
-    }
-
-    const content = typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content ?? '')
-    const urlMatch = content.match(/https?:\/\/[^\s)\]'"]+/i)
-    if (urlMatch) return { ok: true, videoUrl: urlMatch[0] }
-
-    return { ok: false, error: 'Geen video ontvangen van OpenRouter. Controleer of het model videogeneratie ondersteunt.' }
+    const contentType = res.headers.get('content-type') ?? ''
+    const ext = contentType.includes('quicktime') ? 'mov' : contentType.includes('webm') ? 'webm' : 'mp4'
+    const buf = Buffer.from(await res.arrayBuffer())
+    const filePath = join(tmpdir(), `huphe_generated_video_${Date.now()}.${ext}`)
+    writeFileSync(filePath, buf)
+    return { ok: true, filePath: toHupheFileUrl(filePath), draftId, resolvedDuration }
   } catch (err: any) {
+    if (err instanceof VideoJobCancelledError) {
+      return { ok: false, error: err.message, cancelled: true }
+    }
     return { ok: false, error: err.message }
+  } finally {
+    if (requestId) activeVideoJobs.delete(requestId)
   }
 })
 
+ipcMain.handle('video:cancel-generation', async (_event, payload: { requestId: string; accessToken?: string }) => {
+  payload = parseIpcPayload('video:cancel-generation', z.object({
+    requestId: z.string().trim().min(1).max(100),
+    accessToken: AccessTokenSchema,
+  }), payload)
+  const { requestId, accessToken } = payload
+  const effectiveJwtCancel = accessToken ?? cachedJwt
+  if (!effectiveJwtCancel) return { ok: false, error: 'Niet ingelogd.' }
 
+  const jobState = activeVideoJobs.get(requestId)
+  if (!jobState) return { ok: false, error: 'Geen actieve generatie gevonden.' }
+  // De daadwerkelijke fal-cancel + credit-release gebeurt in runFalVideoJob zelf,
+  // zodra het dit vlaggetje ziet -- dat voorkomt een race met een reservationId
+  // dat hier mogelijk nog niet bekend is als submit nog niet is teruggekomen.
+  jobState.cancelled = true
+  return { ok: true }
+})
+
+ipcMain.handle('video:finalize-draft', async (_event, payload: {
+  model: string
+  draftId: string
+  duration: number
+  codec?: string
+  accessToken?: string
+  requestId?: string
+}) => {
+  payload = parseIpcPayload('video:finalize-draft', z.object({
+    model: z.string().trim().min(1).max(200),
+    draftId: z.string().trim().min(1).max(200),
+    duration: z.number().int().min(1).max(60),
+    codec: z.string().trim().min(1).max(20).optional(),
+    accessToken: AccessTokenSchema,
+    requestId: z.string().trim().min(1).max(100).optional(),
+  }), payload)
+  const { model, draftId, duration, codec, accessToken, requestId } = payload
+  const effectiveJwtFinalize = accessToken ?? cachedJwt
+  if (!effectiveJwtFinalize) return { ok: false, error: 'Niet ingelogd.' }
+  const { runFalDraftCompleteJob, VideoJobCancelledError } = await import('./lib/fal-video-job')
+
+  const jobState = requestId ? { cancelled: false } : undefined
+  if (requestId && jobState) activeVideoJobs.set(requestId, jobState)
+
+  const sendProgress = (info: { step: string; progress: number }) => {
+    try { if (!_event.sender.isDestroyed()) _event.sender.send('video:generate-progress', info) } catch { /* renderer navigated away */ }
+  }
+
+  try {
+    const res = await runFalDraftCompleteJob({
+      model,
+      draftId,
+      duration,
+      codec,
+      jwt: effectiveJwtFinalize,
+      onProgress: sendProgress,
+      jobState,
+    })
+    const contentType = res.headers.get('content-type') ?? ''
+    const ext = contentType.includes('quicktime') ? 'mov' : contentType.includes('webm') ? 'webm' : 'mp4'
+    const buf = Buffer.from(await res.arrayBuffer())
+    const filePath = join(tmpdir(), `huphe_generated_video_${Date.now()}.${ext}`)
+    writeFileSync(filePath, buf)
+    return { ok: true, filePath: toHupheFileUrl(filePath) }
+  } catch (err: any) {
+    if (err instanceof VideoJobCancelledError) {
+      return { ok: false, error: err.message, cancelled: true }
+    }
+    return { ok: false, error: err.message }
+  } finally {
+    if (requestId) activeVideoJobs.delete(requestId)
+  }
+})
 
 
 function findPngsRecursive(dir: string): string[] {

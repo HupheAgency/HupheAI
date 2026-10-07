@@ -26,6 +26,7 @@ import { useAnnotationState } from '../hooks/useAnnotationState'
 import { useRightPanelState } from '../hooks/useRightPanelState'
 import {
   useAtelierMediaProjects,
+  useAtelierVideoJobs,
   unmarkImageAsProject,
   loadAtelierMediaProjects,
   type AtelierMediaProject,
@@ -418,6 +419,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
   const [lastAtelierIntent, setLastAtelierIntent] = useState<AtelierIntent | null>(null)
   const [atelierCreationResetKey, setAtelierCreationResetKey] = useState(0)
   const [atelierMediaProjects, setAtelierMediaProjects] = useAtelierMediaProjects()
+  const [atelierVideoJobs, setAtelierVideoJobs] = useAtelierVideoJobs()
   const [activeAtelierProjectId, setActiveAtelierProjectId] = useState<string | null>(
     initialMediaProjectId ?? null
   )
@@ -5126,7 +5128,9 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
           type: mediaType as 'images' | 'video',
           name: p.title || 'Project',
           subtitle: p.modelLabel,
-          thumbnailSrc: p.src,
+          // Video-URL's kunnen niet in een <img> gerenderd worden -- gebruik de
+          // apart vastgelegde frame-thumbnail, met fallback naar het generieke icoon.
+          thumbnailSrc: mediaType === 'video' ? p.thumbnailSrc : p.src,
           createdAt: p.createdAt,
         }))
     })()
@@ -5332,6 +5336,8 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
             mediaAssets={mediaAssets}
             onSaveMediaAsset={handleSaveMediaAsset}
             onShellLevel={setShellLevel}
+            videoJobs={atelierVideoJobs}
+            setVideoJobs={setAtelierVideoJobs}
           />
         )}
         renderScene3D={() => (

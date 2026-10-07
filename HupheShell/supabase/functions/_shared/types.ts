@@ -13,6 +13,7 @@ export interface AiModel {
   input_cost_per_1k: number
   output_cost_per_1k: number
   image_cost: number
+  video_cost_estimate?: number | null
   markup_pct: number
   active: boolean
   price_version: number

@@ -1450,9 +1450,13 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                       <div className="flex items-center gap-2 justify-end">
                         <button
                           type="button"
-                          onClick={() => {
-                            resetImagePipelinePrompt(slot.id)
+                          onClick={async () => {
                             setPipelineDrafts((prev) => ({ ...prev, [slot.id]: getDefaultImagePipelinePrompt(slot.id) }))
+                            try {
+                              await resetImagePipelinePrompt(slot.id)
+                            } catch (err) {
+                              console.error('[AdminPage] resetImagePipelinePrompt mislukt:', err)
+                            }
                           }}
                           className="text-xs text-white/35 hover:text-white/60 transition-colors px-3 py-1.5 rounded-lg border border-white/[0.06] hover:border-white/[0.12]"
                         >
@@ -1460,10 +1464,14 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                         </button>
                         <button
                           type="button"
-                          onClick={() => {
-                            saveImagePipelinePrompt(slot.id, pipelineDrafts[slot.id] ?? '')
-                            setPipelineSaved((prev) => ({ ...prev, [slot.id]: true }))
-                            setTimeout(() => setPipelineSaved((prev) => ({ ...prev, [slot.id]: false })), 2000)
+                          onClick={async () => {
+                            try {
+                              await saveImagePipelinePrompt(slot.id, pipelineDrafts[slot.id] ?? '')
+                              setPipelineSaved((prev) => ({ ...prev, [slot.id]: true }))
+                              setTimeout(() => setPipelineSaved((prev) => ({ ...prev, [slot.id]: false })), 2000)
+                            } catch (err) {
+                              console.error('[AdminPage] saveImagePipelinePrompt mislukt:', err)
+                            }
                           }}
                           className="bg-[#facc15] hover:bg-[#fde047] text-black text-xs font-semibold rounded-lg px-4 py-1.5 transition-colors"
                         >
@@ -1485,9 +1493,13 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                   <div className="flex items-center gap-2 justify-end">
                     <button
                       type="button"
-                      onClick={() => {
-                        resetModulePrompt(type)
+                      onClick={async () => {
                         setModulePromptDrafts((prev) => ({ ...prev, [type]: getDefaultModulePrompt(type) }))
+                        try {
+                          await resetModulePrompt(type)
+                        } catch (err) {
+                          console.error('[AdminPage] resetModulePrompt mislukt:', err)
+                        }
                       }}
                       className="text-xs text-white/35 hover:text-white/60 transition-colors px-3 py-1.5 rounded-lg border border-white/[0.06] hover:border-white/[0.12]"
                     >
@@ -1495,10 +1507,14 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        saveModulePrompt(type, modulePromptDrafts[type] ?? '')
-                        setModuleSaved((prev) => ({ ...prev, [type]: true }))
-                        setTimeout(() => setModuleSaved((prev) => ({ ...prev, [type]: false })), 2000)
+                      onClick={async () => {
+                        try {
+                          await saveModulePrompt(type, modulePromptDrafts[type] ?? '')
+                          setModuleSaved((prev) => ({ ...prev, [type]: true }))
+                          setTimeout(() => setModuleSaved((prev) => ({ ...prev, [type]: false })), 2000)
+                        } catch (err) {
+                          console.error('[AdminPage] saveModulePrompt mislukt:', err)
+                        }
                       }}
                       className="bg-[#facc15] hover:bg-[#fde047] text-black text-xs font-semibold rounded-lg px-4 py-1.5 transition-colors"
                     >
@@ -1626,9 +1642,13 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                     <div className="flex items-center justify-end gap-2">
                       <button
                         type="button"
-                        onClick={() => {
-                          resetModuleModels(type)
+                        onClick={async () => {
                           setModuleModelDrafts((prev) => ({ ...prev, [type]: getDefaultModuleModels(type) }))
+                          try {
+                            await resetModuleModels(type)
+                          } catch (err) {
+                            console.error('[AdminPage] resetModuleModels mislukt:', err)
+                          }
                         }}
                         className="text-xs text-white/35 hover:text-white/60 transition-colors px-3 py-1.5 rounded-lg border border-white/[0.06] hover:border-white/[0.12]"
                       >
@@ -1636,10 +1656,14 @@ export default function AdminPage({ session, onBack, embedded, onAccessChanged }
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          saveModuleModels(type, draft)
-                          setModuleModelsSaved((prev) => ({ ...prev, [type]: true }))
-                          setTimeout(() => setModuleModelsSaved((prev) => ({ ...prev, [type]: false })), 2000)
+                        onClick={async () => {
+                          try {
+                            await saveModuleModels(type, draft)
+                            setModuleModelsSaved((prev) => ({ ...prev, [type]: true }))
+                            setTimeout(() => setModuleModelsSaved((prev) => ({ ...prev, [type]: false })), 2000)
+                          } catch (err) {
+                            console.error('[AdminPage] saveModuleModels mislukt:', err)
+                          }
                         }}
                         className="bg-[#facc15] hover:bg-[#fde047] text-black text-xs font-semibold rounded-lg px-4 py-1.5 transition-colors"
                       >
