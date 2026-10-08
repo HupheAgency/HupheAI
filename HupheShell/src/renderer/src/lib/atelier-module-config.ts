@@ -68,7 +68,7 @@ export function getDefaultImagePipelinePrompt(slot: ImagePipelineSlot): string {
   return IMAGE_PIPELINE_DEFAULTS[slot]
 }
 
-export const MODULE_TYPES = ['presentation', 'banners', 'print', 'images', 'video'] as const
+export const MODULE_TYPES = ['presentation', 'banners', 'print', 'images', 'video', 'audio'] as const
 export type ModuleType = typeof MODULE_TYPES[number]
 
 export const MODULE_LABELS: Record<ModuleType, string> = {
@@ -77,6 +77,7 @@ export const MODULE_LABELS: Record<ModuleType, string> = {
   print: 'Media / Print',
   images: 'Afbeeldingen',
   video: 'Video',
+  audio: 'Audio',
 }
 
 export type ModuleModelConfig = {
@@ -84,7 +85,7 @@ export type ModuleModelConfig = {
   label: string
   model: string
   provider?: 'openrouter' | 'fal' | 'ollama' | 'custom'
-  modality?: 'text' | 'image' | 'video'
+  modality?: 'text' | 'image' | 'video' | 'audio'
 }
 
 export const DEFAULT_MODULE_MODELS: Record<ModuleType, ModuleModelConfig[]> = {
@@ -116,6 +117,20 @@ export const DEFAULT_MODULE_MODELS: Record<ModuleType, ModuleModelConfig[]> = {
     { id: 'minimax/video-01', label: 'MiniMax Video-01', model: 'minimax/video-01', provider: 'openrouter', modality: 'video' },
     { id: 'luma/ray-2-720p', label: 'Luma Ray 2', model: 'luma/ray-2-720p', provider: 'openrouter', modality: 'video' },
     { id: 'wan-ai/wan-2.1-t2v-turbo', label: 'Wan 2.1 Turbo', model: 'wan-ai/wan-2.1-t2v-turbo', provider: 'openrouter', modality: 'video' },
+  ],
+  audio: [
+    { id: 'fal-ai/ace-step', label: 'ACE-Step', model: 'fal-ai/ace-step', provider: 'fal', modality: 'audio' },
+    { id: 'fal-ai/ace-step/audio-to-audio', label: 'ACE-Step Audio-to-Audio (remix)', model: 'fal-ai/ace-step/audio-to-audio', provider: 'fal', modality: 'audio' },
+    { id: 'fal-ai/ace-step/audio-outpaint', label: 'ACE-Step Audio Outpaint (verlengen)', model: 'fal-ai/ace-step/audio-outpaint', provider: 'fal', modality: 'audio' },
+    { id: 'fal-ai/stable-audio-3/medium/text-to-audio', label: 'Stable Audio 3', model: 'fal-ai/stable-audio-3/medium/text-to-audio', provider: 'fal', modality: 'audio' },
+    { id: 'fal-ai/stable-audio-3/medium/audio-to-audio', label: 'Stable Audio 3 Audio-to-Audio', model: 'fal-ai/stable-audio-3/medium/audio-to-audio', provider: 'fal', modality: 'audio' },
+    { id: 'fal-ai/stable-audio-3/medium/audio-outpainting', label: 'Stable Audio 3 Outpaint (verlengen)', model: 'fal-ai/stable-audio-3/medium/audio-outpainting', provider: 'fal', modality: 'audio' },
+    { id: 'fal-ai/stable-audio-3/medium/audio-inpainting', label: 'Stable Audio 3 Inpaint (segment bewerken)', model: 'fal-ai/stable-audio-3/medium/audio-inpainting', provider: 'fal', modality: 'audio' },
+    { id: 'fal-ai/stable-audio-3/small/sfx/text-to-audio', label: 'Stable Audio 3 Small SFX', model: 'fal-ai/stable-audio-3/small/sfx/text-to-audio', provider: 'fal', modality: 'audio' },
+    { id: 'sonilo/v1.1/text-to-music', label: 'Sonilo Muziek (tekst)', model: 'sonilo/v1.1/text-to-music', provider: 'fal', modality: 'audio' },
+    { id: 'sonilo/v1.1/video-to-music', label: 'Sonilo Muziek (video)', model: 'sonilo/v1.1/video-to-music', provider: 'fal', modality: 'audio' },
+    { id: 'sonilo/v1.1/text-to-sound-effects', label: 'Sonilo Geluidseffecten (tekst)', model: 'sonilo/v1.1/text-to-sound-effects', provider: 'fal', modality: 'audio' },
+    { id: 'sonilo/v1.1/video-to-sound-effects', label: 'Sonilo Geluidseffecten (video)', model: 'sonilo/v1.1/video-to-sound-effects', provider: 'fal', modality: 'audio' },
   ],
 }
 

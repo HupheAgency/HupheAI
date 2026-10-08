@@ -23,7 +23,7 @@ export default function AtelierCreationPlaceholder({
       ? renderPrint()
       : type === 'scene3d' && renderScene3D
         ? renderScene3D()
-        : type === 'images' || type === 'video'
+        : type === 'images' || type === 'video' || type === 'audio'
           ? renderMedia()
           : null
 

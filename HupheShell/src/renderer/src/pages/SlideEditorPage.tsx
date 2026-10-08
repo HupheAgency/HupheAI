@@ -1050,7 +1050,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
 
   const handleNewAtelierProject = useCallback(() => {
     setActiveAtelierProjectId(null)
-    if (atelierCreationType !== 'images' && atelierCreationType !== 'video') {
+    if (atelierCreationType !== 'images' && atelierCreationType !== 'video' && atelierCreationType !== 'audio') {
       setAtelierCreationType('images')
     }
   }, [atelierCreationType])
@@ -1059,7 +1059,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
     setAtelierMediaProjects((prev) => [project, ...prev.filter((item) => item.id !== project.id)].slice(0, 80))
     setActiveAtelierProjectId(project.id)
     if (atelierOwnerId) {
-      const type = project.type === 'video' ? 'media-video' : 'media-images'
+      const type = project.type === 'video' ? 'media-video' : project.type === 'audio' ? 'media-audio' : 'media-images'
       pushAtelierProjectToSupabase(project.id, type, project.title, project, atelierOwnerId, project.createdAt)
       liveAtelierSyncRef.current(project.id, project)
     }
@@ -1475,7 +1475,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
           return [p, ...prev]
         })
         setActiveAtelierProjectId(p.id)
-        setAtelierCreationType(remote.type === 'media-video' ? 'video' : 'images')
+        setAtelierCreationType(remote.type === 'media-video' ? 'video' : remote.type === 'media-audio' ? 'audio' : 'images')
       }
       liveAtelier.connectToExisting(joinAtelierProjectId)
     })
@@ -5120,17 +5120,18 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
           createdAt: p.createdAt,
         }))
       }
-      const mediaType = (atelierCreationType === 'images' || atelierCreationType === 'video') ? atelierCreationType : 'images'
+      const mediaType = (atelierCreationType === 'images' || atelierCreationType === 'video' || atelierCreationType === 'audio') ? atelierCreationType : 'images'
       return atelierMediaProjects
         .filter(p => p.type === mediaType)
         .map(p => ({
           id: p.id,
-          type: mediaType as 'images' | 'video',
+          type: mediaType as 'images' | 'video' | 'audio',
           name: p.title || 'Project',
           subtitle: p.modelLabel,
           // Video-URL's kunnen niet in een <img> gerenderd worden -- gebruik de
           // apart vastgelegde frame-thumbnail, met fallback naar het generieke icoon.
-          thumbnailSrc: mediaType === 'video' ? p.thumbnailSrc : p.src,
+          // Audio heeft geen visueel frame -- toon altijd het generieke icoon.
+          thumbnailSrc: mediaType === 'video' ? p.thumbnailSrc : mediaType === 'audio' ? undefined : p.src,
           createdAt: p.createdAt,
         }))
     })()

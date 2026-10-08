@@ -62,6 +62,9 @@ let cachedJwt: string | null = null
 // en triggert de daadwerkelijke fal-cancel + credit-release.
 const activeVideoJobs = new Map<string, import('./lib/fal-video-job').FalVideoJobState>()
 
+// Zelfde patroon als activeVideoJobs, voor fal.ai ACE-Step audiojobs.
+const activeAudioJobs = new Map<string, import('./lib/fal-audio-job').FalAudioJobState>()
+
 function getJwtOrKey(): string | null {
   if (cachedJwt) return cachedJwt
   // Fallback voor BYOK-modus (testperiode)
@@ -2872,6 +2875,167 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
   } finally {
     if (requestId) activeVideoJobs.delete(requestId)
   }
+})
+
+ipcMain.handle('audio:get-capabilities', async (_event, payload: { accessToken?: string }) => {
+  payload = parseIpcPayload('audio:get-capabilities', z.object({
+    accessToken: AccessTokenSchema,
+  }), payload)
+  const effectiveJwt = payload.accessToken ?? cachedJwt
+  if (!effectiveJwt) return { ok: false, error: 'Niet ingelogd.' }
+  try {
+    const { getFalAudioCapabilities } = await import('./lib/proxy')
+    const result = await getFalAudioCapabilities(effectiveJwt)
+    return { ok: true, models: result.models ?? [] }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('audio:upload-reference', async (_event, payload: {
+  dataUrl: string
+  fileName: string
+  accessToken?: string
+}) => {
+  payload = parseIpcPayload('audio:upload-reference', z.object({
+    dataUrl: z.string().min(1).max(280 * 1024 * 1024),
+    fileName: z.string().trim().min(1).max(255),
+    accessToken: AccessTokenSchema,
+  }), payload)
+  const { dataUrl, fileName, accessToken } = payload
+  const effectiveJwtUpload = accessToken ?? cachedJwt
+  if (!effectiveJwtUpload) return { ok: false, error: 'Niet ingelogd.' }
+
+  const dataUrlMatch = dataUrl.match(/^data:([^;,]+);base64,(.+)$/)
+  if (!dataUrlMatch) return { ok: false, error: 'Ongeldig bestandsformaat.' }
+  const [, contentType, base64Data] = dataUrlMatch
+  const buffer = Buffer.from(base64Data, 'base64')
+
+  try {
+    const { initiateFalAudioUpload, uploadFileToFalCdn } = await import('./lib/proxy')
+    const { file_url, upload_url } = await initiateFalAudioUpload({ contentType, fileName }, effectiveJwtUpload)
+    await uploadFileToFalCdn(upload_url, buffer, contentType)
+    return { ok: true, fileUrl: file_url }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('audio:generate-ai', async (_event, payload: {
+  model: string
+  tags?: string
+  lyrics?: string
+  duration?: number
+  audioUrl?: string
+  originalTags?: string
+  originalLyrics?: string
+  editMode?: string
+  extendBeforeDuration?: number
+  extendAfterDuration?: number
+  originalDuration?: number
+  negativePrompt?: string
+  maskStartSeconds?: number
+  maskEndSeconds?: number
+  videoUrl?: string
+  audioFormat?: string
+  keepSpeechVocal?: boolean
+  promptInfluence?: number
+  accessToken?: string
+  requestId?: string
+}) => {
+  payload = parseIpcPayload('audio:generate-ai', z.object({
+    model: z.string().trim().min(1).max(200),
+    tags: z.string().trim().max(2000).optional(),
+    lyrics: z.string().max(12000).optional(),
+    duration: z.number().min(0.5).max(600).optional(),
+    audioUrl: z.string().trim().min(1).max(2000).optional(),
+    originalTags: z.string().trim().max(2000).optional(),
+    originalLyrics: z.string().max(12000).optional(),
+    editMode: z.string().trim().min(1).max(20).optional(),
+    extendBeforeDuration: z.number().min(0).max(600).optional(),
+    extendAfterDuration: z.number().min(0).max(600).optional(),
+    originalDuration: z.number().min(0).max(600).optional(),
+    negativePrompt: z.string().trim().max(2000).optional(),
+    maskStartSeconds: z.number().min(0).max(600).optional(),
+    maskEndSeconds: z.number().min(0).max(600).optional(),
+    videoUrl: z.string().trim().min(1).max(2000).optional(),
+    audioFormat: z.string().trim().min(1).max(20).optional(),
+    keepSpeechVocal: z.boolean().optional(),
+    promptInfluence: z.number().min(0).max(1).optional(),
+    accessToken: AccessTokenSchema,
+    requestId: z.string().trim().min(1).max(100).optional(),
+  }), payload)
+  const {
+    model, tags, lyrics, duration, audioUrl, originalTags, originalLyrics,
+    editMode, extendBeforeDuration, extendAfterDuration, originalDuration,
+    negativePrompt, maskStartSeconds, maskEndSeconds,
+    videoUrl, audioFormat, keepSpeechVocal, promptInfluence,
+    accessToken, requestId,
+  } = payload
+  const effectiveJwtAudio = accessToken ?? cachedJwt
+  if (!effectiveJwtAudio) return { ok: false, error: 'Niet ingelogd.' }
+  const { runFalAudioJob, AudioJobCancelledError } = await import('./lib/fal-audio-job')
+
+  const jobState = requestId ? { cancelled: false } : undefined
+  if (requestId && jobState) activeAudioJobs.set(requestId, jobState)
+
+  const sendProgress = (info: { step: string; progress: number }) => {
+    try { if (!_event.sender.isDestroyed()) _event.sender.send('audio:generate-progress', info) } catch { /* renderer navigated away */ }
+  }
+
+  try {
+    const res = await runFalAudioJob({
+      model,
+      tags,
+      lyrics,
+      duration,
+      audioUrl,
+      originalTags,
+      originalLyrics,
+      editMode,
+      extendBeforeDuration,
+      extendAfterDuration,
+      originalDuration,
+      negativePrompt,
+      maskStartSeconds,
+      maskEndSeconds,
+      videoUrl,
+      audioFormat,
+      keepSpeechVocal,
+      promptInfluence,
+      jwt: effectiveJwtAudio,
+      onProgress: sendProgress,
+      jobState,
+    })
+    const contentType = res.headers.get('content-type') ?? ''
+    const ext = contentType.includes('mpeg') ? 'mp3' : contentType.includes('ogg') ? 'ogg' : 'wav'
+    const buf = Buffer.from(await res.arrayBuffer())
+    const filePath = join(tmpdir(), `huphe_generated_audio_${Date.now()}.${ext}`)
+    writeFileSync(filePath, buf)
+    return { ok: true, filePath: toHupheFileUrl(filePath) }
+  } catch (err: any) {
+    if (err instanceof AudioJobCancelledError) {
+      return { ok: false, error: err.message, cancelled: true }
+    }
+    return { ok: false, error: err.message }
+  } finally {
+    if (requestId) activeAudioJobs.delete(requestId)
+  }
+})
+
+ipcMain.handle('audio:cancel-generation', async (_event, payload: { requestId: string; accessToken?: string }) => {
+  payload = parseIpcPayload('audio:cancel-generation', z.object({
+    requestId: z.string().trim().min(1).max(100),
+    accessToken: AccessTokenSchema,
+  }), payload)
+  const { requestId, accessToken } = payload
+  const effectiveJwtCancel = accessToken ?? cachedJwt
+  if (!effectiveJwtCancel) return { ok: false, error: 'Niet ingelogd.' }
+
+  const jobState = activeAudioJobs.get(requestId)
+  if (!jobState) return { ok: false, error: 'Geen actieve generatie gevonden.' }
+  jobState.cancelled = true
+  return { ok: true }
 })
 
 ipcMain.handle('video:cancel-generation', async (_event, payload: { requestId: string; accessToken?: string }) => {

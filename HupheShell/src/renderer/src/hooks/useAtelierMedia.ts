@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase'
 import { notifyIfCreditsRequired } from '../lib/credits-required'
 import { loadModuleModels, loadImagePipelinePrompt, type ImagePipelineSlot } from '../lib/atelier-module-config'
 import { loadVideoGenerationSettings, saveVideoGenerationSettings, type VideoGenerationSettings } from '../lib/video-generation-settings'
+import { loadAudioGenerationSettings, saveAudioGenerationSettings, type AudioGenerationSettings } from '../lib/audio-generation-settings'
 
 export interface AtelierVideoCapability {
   model_id: string
@@ -27,6 +28,49 @@ export interface AtelierVideoCapability {
   draft_finalize_rate_per_second?: number
 }
 
+export interface AtelierAudioCapability {
+  model_id: string
+  provider?: string
+  markup_pct: number
+  audio_cost_estimate: number
+  family: 'ace_step' | 'stable_audio' | 'sonilo'
+  rate_per_second: number
+  requires_reference: boolean
+  requires_original_tags: boolean
+  supports_lyrics: boolean
+  supports_edit_mode: boolean
+  supports_duration: boolean
+  supports_extend: boolean
+  supports_negative_prompt: boolean
+  supports_inpaint: boolean
+  max_duration?: number
+  default_duration?: number
+  requires_video_reference?: boolean
+  supports_audio_format?: boolean
+  supports_keep_speech_vocal?: boolean
+  supports_prompt_influence?: boolean
+  prompt_optional?: boolean
+  min_duration?: number
+  min_billable_seconds?: number
+}
+
+export interface AudioReferenceSlot {
+  status: 'uploading' | 'ready' | 'error'
+  fileUrl?: string
+  fileName?: string
+  error?: string
+  // gemeten duur van de aangehangen referentie-audio (client-side via <audio>.duration),
+  // gebruikt als billing-basis voor remix/outpaint (zie proxy-fal-audio's kostenberekening).
+  durationSec?: number
+}
+
+/**
+ * Single-slot referentievideo voor Sonilo's video-to-music/video-to-sound-effects
+ * (Audio-modus). Zelfde vorm als AudioReferenceSlot, bewust los van de array-based
+ * VideoReferenceSlot hieronder — die is voor de ongerelateerde Video-modus-feature.
+ */
+export type VideoReferenceChipSlot = AudioReferenceSlot
+
 export type VideoTaskMode = 'reference' | 'editing' | 'extension'
 
 export type VideoReferenceKind = 'image' | 'video' | 'audio'
@@ -44,7 +88,7 @@ export interface VideoReferenceSlot {
   durationSec?: number
 }
 
-export type AtelierMediaProjectType = 'images' | 'video'
+export type AtelierMediaProjectType = 'images' | 'video' | 'audio'
 
 export interface AtelierMediaAsset {
   id: string
@@ -170,6 +214,10 @@ export function useAtelierMediaCreator({
   // requestId van de video-generatie die nu loopt (zo ja) -- cancelGeneration()
   // leest dit om te weten welke job hij moet annuleren.
   const currentVideoRequestIdRef = useRef<string | null>(null)
+  // requestId van de audio-generatie die nu loopt (zo ja) -- zelfde rol als
+  // currentVideoRequestIdRef, los gehouden omdat audio op een eigen activeAudioJobs-map
+  // in main/index.ts draait.
+  const currentAudioRequestIdRef = useRef<string | null>(null)
   const [prompt, setPrompt] = useState('')
   const [models, setModels] = useState<AtelierMediaModel[]>([])
   const [selectedModelId, setSelectedModelId] = useState('')
@@ -186,6 +234,20 @@ export function useAtelierMediaCreator({
   const [videoSettings, setVideoSettings] = useState<VideoGenerationSettings | null>(null)
   const [videoReferences, setVideoReferences] = useState<VideoReferenceSlot[]>([])
   const [videoTask, setVideoTask] = useState<VideoTaskMode>('reference')
+  const [audioCapabilities, setAudioCapabilities] = useState<AtelierAudioCapability[]>([])
+  const [audioSettings, setAudioSettings] = useState<AudioGenerationSettings | null>(null)
+  const [audioReference, setAudioReference] = useState<AudioReferenceSlot | null>(null)
+  // Referentievideo voor Sonilo's video-to-music/video-to-sound-effects — zelfde
+  // single-slot patroon als audioReference, bewust niet de videoReferences-array (Video-modus).
+  const [videoReference, setVideoReference] = useState<VideoReferenceChipSlot | null>(null)
+  // Lyrics/originele tags zijn inhoud (zoals `prompt`), niet sticky per-model-instellingen --
+  // horen dus niet in audio-generation-settings.ts.
+  const [audioLyrics, setAudioLyrics] = useState('')
+  const [audioOriginalTags, setAudioOriginalTags] = useState('')
+  const [audioOriginalLyrics, setAudioOriginalLyrics] = useState('')
+  const [audioNegativePrompt, setAudioNegativePrompt] = useState('')
+  const [audioMaskStart, setAudioMaskStart] = useState<number | undefined>(undefined)
+  const [audioMaskEnd, setAudioMaskEnd] = useState<number | undefined>(undefined)
 
   useEffect(() => {
     if (!mediaType) return
@@ -201,9 +263,11 @@ export function useAtelierMediaCreator({
 
     async function loadModels() {
       const api = (window as any).api
-      const wanted = mediaType === 'images' ? 'image' : 'video'
+      const wanted = mediaType === 'images' ? 'image' : mediaType === 'audio' ? 'audio' : 'video'
       const keywords = mediaType === 'images'
         ? ['image', 'imagen', 'flux', 'banana', 'seedream', 'recraft']
+        : mediaType === 'audio'
+        ? ['ace-step', 'audio']
         : ['video', 'veo', 'kling', 'runway', 'luma', 'pika']
 
       let nextModels: AtelierMediaModel[] = []
@@ -247,7 +311,7 @@ export function useAtelierMediaCreator({
         })
       if (nextModels.length === 0 && allowedModels.length > 0) {
         nextModels = allowedModels
-          .filter((model) => model.modality === (mediaType === 'images' ? 'image' : 'video'))
+          .filter((model) => model.modality === (mediaType === 'images' ? 'image' : mediaType === 'audio' ? 'audio' : 'video'))
           .map((model) => ({ id: model.id, label: model.label, model: model.model, modality: model.modality, provider: model.provider }))
       }
       const preferredModelId = activeProject?.modelId
@@ -280,6 +344,26 @@ export function useAtelierMediaCreator({
         const { data: { session } } = await supabase!.auth.getSession()
         const res = await api.getVideoCapabilities(session?.access_token ?? undefined)
         if (!cancelled && res?.ok) setVideoCapabilities(res.models ?? [])
+      } catch {
+        // Zonder live capabilities valt submit terug op vaste server-side defaults.
+      }
+    }
+    loadCapabilities()
+    return () => { cancelled = true }
+  }, [mediaType])
+
+  useEffect(() => {
+    if (mediaType !== 'audio') {
+      setAudioCapabilities([])
+      return
+    }
+    let cancelled = false
+    async function loadCapabilities() {
+      try {
+        const api = (window as any).api
+        const { data: { session } } = await supabase!.auth.getSession()
+        const res = await api.getAudioCapabilities(session?.access_token ?? undefined)
+        if (!cancelled && res?.ok) setAudioCapabilities(res.models ?? [])
       } catch {
         // Zonder live capabilities valt submit terug op vaste server-side defaults.
       }
@@ -339,11 +423,18 @@ export function useAtelierMediaCreator({
   const filteredModels = q
     ? models.filter((model) => `${model.label} ${model.model}`.toLowerCase().includes(q))
     : models
-  const canGenerate = !!mediaType && prompt.trim().length > 0 && !!selectedModel && !generating
-
   const selectedVideoCapability = selectedModel
     ? videoCapabilities.find((c) => c.model_id === selectedModel.model)
     : undefined
+
+  const selectedAudioCapability = selectedModel
+    ? audioCapabilities.find((c) => c.model_id === selectedModel.model)
+    : undefined
+
+  const canGenerate = !!mediaType && !!selectedModel && !generating && (
+    prompt.trim().length > 0
+    || (mediaType === 'audio' && !!selectedAudioCapability?.prompt_optional && videoReference?.status === 'ready')
+  )
 
   useEffect(() => {
     if (mediaType !== 'video' || !selectedModel) return
@@ -370,8 +461,38 @@ export function useAtelierMediaCreator({
   }, [mediaType, selectedModel?.model, videoCapabilities])
 
   useEffect(() => {
+    if (mediaType !== 'audio' || !selectedModel) return
+    const capability = audioCapabilities.find((c) => c.model_id === selectedModel.model)
+    if (!capability) return
+    const stored = loadAudioGenerationSettings(selectedModel.model)
+    setAudioSettings({
+      duration: capability.supports_duration
+        ? (typeof stored?.duration === 'number' ? stored.duration : capability.default_duration)
+        : undefined,
+      editMode: capability.supports_edit_mode
+        ? (stored?.editMode === 'lyrics' ? 'lyrics' : 'remix')
+        : undefined,
+      extendBeforeDuration: capability.supports_extend ? (stored?.extendBeforeDuration ?? 0) : undefined,
+      extendAfterDuration: capability.supports_extend ? (stored?.extendAfterDuration ?? 0) : undefined,
+      promptInfluence: capability.supports_prompt_influence ? (stored?.promptInfluence ?? 0.5) : undefined,
+      audioFormat: capability.supports_audio_format ? (stored?.audioFormat ?? 'aac') : undefined,
+      keepSpeechVocal: capability.supports_keep_speech_vocal ? (stored?.keepSpeechVocal ?? false) : undefined,
+    })
+  }, [mediaType, selectedModel?.model, audioCapabilities])
+
+  useEffect(() => {
     setVideoReferences([])
     setVideoTask('reference')
+  }, [mediaType, selectedModel?.model])
+
+  useEffect(() => {
+    setAudioReference(null)
+    setVideoReference(null)
+    setAudioOriginalTags('')
+    setAudioOriginalLyrics('')
+    setAudioNegativePrompt('')
+    setAudioMaskStart(undefined)
+    setAudioMaskEnd(undefined)
   }, [mediaType, selectedModel?.model])
 
   function updateVideoSettings(patch: Partial<VideoGenerationSettings>) {
@@ -379,6 +500,15 @@ export function useAtelierMediaCreator({
       if (!current || !selectedModel) return current
       const next = { ...current, ...patch }
       saveVideoGenerationSettings(selectedModel.model, next)
+      return next
+    })
+  }
+
+  function updateAudioSettings(patch: Partial<AudioGenerationSettings>) {
+    setAudioSettings((current) => {
+      if (!current || !selectedModel) return current
+      const next = { ...current, ...patch }
+      saveAudioGenerationSettings(selectedModel.model, next)
       return next
     })
   }
@@ -416,22 +546,26 @@ export function useAtelierMediaCreator({
       imagePipelineSystemPrompt = template.replace('{{prompt}}', promptText)
     }
 
-    const requestId = mediaType === 'video' ? createAtelierProjectId() : undefined
+    const requestId = mediaType === 'video' || mediaType === 'audio' ? createAtelierProjectId() : undefined
     if (requestId) {
-      currentVideoRequestIdRef.current = requestId
-      const newJob: AtelierVideoJob = {
-        id: requestId,
-        prompt: promptText,
-        modelLabel: selectedModel.label,
-        status: 'in_progress',
-        progressLabel: 'Video-aanvraag wordt verstuurd...',
-        progressPct: 0,
-        createdAt: new Date().toISOString(),
+      if (mediaType === 'audio') {
+        currentAudioRequestIdRef.current = requestId
+      } else {
+        currentVideoRequestIdRef.current = requestId
+        const newJob: AtelierVideoJob = {
+          id: requestId,
+          prompt: promptText,
+          modelLabel: selectedModel.label,
+          status: 'in_progress',
+          progressLabel: 'Video-aanvraag wordt verstuurd...',
+          progressPct: 0,
+          createdAt: new Date().toISOString(),
+        }
+        setVideoJobs?.((jobs) => [newJob, ...jobs].slice(0, 30))
       }
-      setVideoJobs?.((jobs) => [newJob, ...jobs].slice(0, 30))
     }
     const updateJob = (patch: Partial<AtelierVideoJob>) => {
-      if (!requestId) return
+      if (!requestId || mediaType === 'audio') return
       setVideoJobs?.((jobs) => jobs.map((j) => (j.id === requestId ? { ...j, ...patch } : j)))
     }
 
@@ -448,13 +582,39 @@ export function useAtelierMediaCreator({
           setGeneratingLabel(data.step)
           updateJob({ progressLabel: data.step, progressPct: data.progress })
         })
+      } else if (mediaType === 'audio') {
+        setGeneratingLabel('Audio-aanvraag wordt verstuurd...')
+        unsubscribeProgress = api.onAudioGenerateProgress((data: { step: string; progress: number }) => {
+          setGeneratingLabel(data.step)
+        })
       }
       const readyImageRefs = videoReferences.filter((r) => r.kind === 'image' && r.status === 'ready' && r.fileUrl).map((r) => r.fileUrl!)
       const readyVideoRefs = videoReferences.filter((r) => r.kind === 'video' && r.status === 'ready' && r.fileUrl).map((r) => r.fileUrl!)
       const readyAudioRefs = videoReferences.filter((r) => r.kind === 'audio' && r.status === 'ready' && r.fileUrl).map((r) => r.fileUrl!)
       const hasVideoReferences = readyImageRefs.length > 0 || readyVideoRefs.length > 0 || readyAudioRefs.length > 0
+      const audioReferenceUrl = audioReference?.status === 'ready' ? audioReference.fileUrl : undefined
+      const videoReferenceUrl = videoReference?.status === 'ready' ? videoReference.fileUrl : undefined
       const res = mediaType === 'images'
         ? await api.generateAtelierImage(promptText, selectedModel.model, imagePipelineSystemPrompt, referenceImageSrc, accessToken, selectedModel.label, maskDataUrl)
+        : mediaType === 'audio'
+        ? await api.generateAtelierAudio(promptText, selectedModel.model, accessToken, {
+          lyrics: audioLyrics.trim() || undefined,
+          duration: typeof audioSettings?.duration === 'number' ? audioSettings.duration : undefined,
+          audioUrl: audioReferenceUrl,
+          originalTags: audioOriginalTags.trim() || undefined,
+          originalLyrics: audioOriginalLyrics.trim() || undefined,
+          editMode: audioSettings?.editMode,
+          extendBeforeDuration: audioSettings?.extendBeforeDuration,
+          extendAfterDuration: audioSettings?.extendAfterDuration,
+          originalDuration: audioReference?.durationSec ?? videoReference?.durationSec,
+          negativePrompt: audioNegativePrompt.trim() || undefined,
+          maskStartSeconds: audioMaskStart,
+          maskEndSeconds: audioMaskEnd,
+          videoUrl: videoReferenceUrl,
+          audioFormat: audioSettings?.audioFormat,
+          keepSpeechVocal: audioSettings?.keepSpeechVocal,
+          promptInfluence: audioSettings?.promptInfluence,
+        }, requestId)
         : await api.generateAtelierVideo(promptText, selectedModel.model, undefined, accessToken, referenceImageSrc, videoSettings ?? undefined, selectedModel.provider as 'openrouter' | 'fal' | undefined, hasVideoReferences ? { imageUrls: readyImageRefs, videoUrls: readyVideoRefs, audioUrls: readyAudioRefs, task: videoTask } : undefined, requestId, endImageOverride)
       if (!res?.ok) {
         if (res?.cancelled) {
@@ -483,7 +643,7 @@ export function useAtelierMediaCreator({
       }
       console.log('[useAtelierMedia] res.filePath:', res.filePath, 'res.imageUrl:', res.imageUrl, '→ src:', src)
       if (!src) {
-        const errMsg = mediaType === 'images' ? 'Geen afbeelding ontvangen.' : 'Geen video ontvangen.'
+        const errMsg = mediaType === 'images' ? 'Geen afbeelding ontvangen.' : mediaType === 'audio' ? 'Geen audio ontvangen.' : 'Geen video ontvangen.'
         updateJob({ status: 'failed', error: errMsg, finishedAt: new Date().toISOString() })
         setError(errMsg)
         return
@@ -525,7 +685,7 @@ export function useAtelierMediaCreator({
         name: createAtelierProjectTitle(promptText, mediaType),
         src,
         thumbnailSrc,
-        type: mediaType === 'video' ? 'video' : 'generated',
+        type: mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'audio' : 'generated',
         prompt: promptText,
         modelId: selectedModel.id,
         createdAt,
@@ -535,6 +695,12 @@ export function useAtelierMediaCreator({
       setResultItems(nextAssets)
       setActiveResultIndex(nextAssets.length - 1)
       if (mediaType === 'video') setVideoReferences([])
+      if (mediaType === 'audio') {
+        setAudioReference(null)
+        setAudioLyrics('')
+        setAudioOriginalTags('')
+        setAudioOriginalLyrics('')
+      }
       onProjectGenerated?.({
         id: project?.id ?? createAtelierProjectId(),
         type: mediaType,
@@ -559,16 +725,23 @@ export function useAtelierMediaCreator({
       setGenerating(false)
       setGeneratingLabel('')
       if (requestId && currentVideoRequestIdRef.current === requestId) currentVideoRequestIdRef.current = null
+      if (requestId && currentAudioRequestIdRef.current === requestId) currentAudioRequestIdRef.current = null
     }
   }
 
   async function cancelGeneration() {
-    const requestId = currentVideoRequestIdRef.current
+    const videoRequestId = currentVideoRequestIdRef.current
+    const audioRequestId = currentAudioRequestIdRef.current
+    const requestId = videoRequestId ?? audioRequestId
     if (!requestId) return
     try {
       const api = (window as any).api
       const { data: { session } } = await supabase!.auth.getSession()
-      await api.cancelVideoGeneration(requestId, session?.access_token ?? undefined)
+      if (audioRequestId) {
+        await api.cancelAudioGeneration(requestId, session?.access_token ?? undefined)
+      } else {
+        await api.cancelVideoGeneration(requestId, session?.access_token ?? undefined)
+      }
     } catch (err) {
       console.warn('[useAtelierMedia] cancelGeneration mislukt:', err)
     }
@@ -747,6 +920,25 @@ export function useAtelierMediaCreator({
     setVideoReferences,
     videoTask,
     setVideoTask,
+    audioSettings,
+    updateAudioSettings,
+    selectedAudioCapability,
+    audioReference,
+    setAudioReference,
+    videoReference,
+    setVideoReference,
+    audioLyrics,
+    setAudioLyrics,
+    audioOriginalTags,
+    setAudioOriginalTags,
+    audioOriginalLyrics,
+    setAudioOriginalLyrics,
+    audioNegativePrompt,
+    setAudioNegativePrompt,
+    audioMaskStart,
+    setAudioMaskStart,
+    audioMaskEnd,
+    setAudioMaskEnd,
   }
 }
 
@@ -775,7 +967,7 @@ export function saveAtelierMediaProjects(projects: AtelierMediaProject[]) {
 function normalizeAtelierMediaProject(value: unknown): AtelierMediaProject | null {
   if (!value || typeof value !== 'object') return null
   const item = value as Partial<AtelierMediaProject>
-  if (item.type !== 'images' && item.type !== 'video') return null
+  if (item.type !== 'images' && item.type !== 'video' && item.type !== 'audio') return null
   if (!item.src) return null
   const fallbackAsset: AtelierMediaAsset = {
     id: `${item.id ?? createAtelierProjectId()}_asset`,
@@ -895,7 +1087,7 @@ export function createAtelierProjectId() {
 
 export function createAtelierProjectTitle(prompt: string, type: AtelierMediaProjectType) {
   const title = prompt.replace(/\s+/g, ' ').trim().split(' ').slice(0, 6).join(' ')
-  return title || (type === 'images' ? 'Nieuw beeld' : 'Nieuwe video')
+  return title || (type === 'images' ? 'Nieuw beeld' : type === 'audio' ? 'Nieuwe audio' : 'Nieuwe video')
 }
 
 function getAtelierModelOutputModalities(model: AtelierMediaModel): string[] {
@@ -906,7 +1098,7 @@ function getAtelierModelOutputModalities(model: AtelierMediaModel): string[] {
 }
 
 function isAtelierModelForMedia(model: AtelierMediaModel, mediaType: AtelierMediaProjectType) {
-  const wanted = mediaType === 'images' ? 'image' : 'video'
+  const wanted = mediaType === 'images' ? 'image' : mediaType === 'audio' ? 'audio' : 'video'
   const outputModalities = getAtelierModelOutputModalities(model)
 
   const id = String(model.model || model.id || '').toLowerCase()
@@ -918,6 +1110,11 @@ function isAtelierModelForMedia(model: AtelierMediaModel, mediaType: AtelierMedi
     const imageProviders = ['black-forest-labs', 'stability-ai', 'stabilityai', 'ideogram', 'ideogram-ai', 'recraft', 'recraft-ai', 'sourceful', 'bytedance-seed', 'fal-ai']
     const imageKeywords = ['image-preview', 'image-generation', 'nano-banana', 'banana', 'flux', 'stable-diffusion', 'sdxl', 'dall-e', 'imagen', 'midjourney', 'riverflow', 'seedream', 'recraft']
     return outputModalities.includes(wanted) || imageProviders.includes(provider) || imageKeywords.some((keyword) => value.includes(keyword))
+  }
+
+  if (wanted === 'audio') {
+    const audioKeywords = ['ace-step', 'audio-outpaint', 'audio-to-audio', 'text-to-audio']
+    return outputModalities.includes(wanted) || audioKeywords.some((keyword) => value.includes(keyword))
   }
 
   const videoProviders = ['runway', 'luma', 'pika', 'minimax', 'kling', 'wan']

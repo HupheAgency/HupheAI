@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { supabase } from '../lib/supabase'
 
-export type AtelierCreationType = 'presentation' | 'banners' | 'print' | 'images' | 'video' | 'scene3d'
+export type AtelierCreationType = 'presentation' | 'banners' | 'print' | 'images' | 'video' | 'audio' | 'scene3d'
 export type AtelierCreationSelection = AtelierCreationType | null
 
 export const ATELIER_CREATION_OPTIONS: Array<{
@@ -76,6 +76,19 @@ export const ATELIER_CREATION_OPTIONS: Array<{
     ),
   },
   {
+    id: 'audio',
+    label: 'Audio',
+    shortLabel: 'Au',
+    description: 'Muziek en spraak genereren of verlengen',
+    icon: (
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 18V5l12-2v13" />
+        <circle cx="6" cy="18" r="3" />
+        <circle cx="18" cy="16" r="3" />
+      </svg>
+    ),
+  },
+  {
     id: 'scene3d',
     label: '3D Scene',
     shortLabel: '3D',
@@ -97,10 +110,11 @@ const SLUG_TO_TYPE: Record<string, AtelierCreationType> = {
   atelier_print: 'print',
   atelier_images: 'images',
   atelier_video: 'video',
+  atelier_audio: 'audio',
   atelier_scene3d: 'scene3d',
 }
 
-const ALL_TYPES = new Set<AtelierCreationType>(['presentation', 'banners', 'print', 'images', 'video', 'scene3d'])
+const ALL_TYPES = new Set<AtelierCreationType>(['presentation', 'banners', 'print', 'images', 'video', 'audio', 'scene3d'])
 
 let _cache: Set<AtelierCreationType> | null = null
 let _pending: Promise<Set<AtelierCreationType>> | null = null

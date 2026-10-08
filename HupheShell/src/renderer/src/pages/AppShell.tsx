@@ -180,7 +180,7 @@ export default function AppShell({ session, allowedModuleSlugs, activeModuleSlug
   const [typewriterJoinDocId, setTypewriterJoinDocId] = useState<string | undefined>(undefined)
   const [atelierInitialImagePath, setAtelierInitialImagePath] = useState<string | null>(null)
   const [atelierInitialMediaProjectId, setAtelierInitialMediaProjectId] = useState<string | null>(null)
-  const [atelierInitialMediaProjectType, setAtelierInitialMediaProjectType] = useState<'images' | 'video' | 'print' | 'banners' | null>(null)
+  const [atelierInitialMediaProjectType, setAtelierInitialMediaProjectType] = useState<'images' | 'video' | 'audio' | 'print' | 'banners' | null>(null)
 const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' | 'editor'>('landing')
 
   // Reset atelierShellLevel when leaving Atelier so the nav pill reappears
@@ -450,7 +450,7 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
     safeNavigate('atelier')
   }
 
-  function handleOpenAtelierMediaProject(projectId: string, type: 'images' | 'video' | 'print' | 'banners') {
+  function handleOpenAtelierMediaProject(projectId: string, type: 'images' | 'video' | 'audio' | 'print' | 'banners') {
     setAtelierInitialImagePath(null)
     setAtelierInitialMediaProjectId(projectId)
     setAtelierInitialMediaProjectType(type)

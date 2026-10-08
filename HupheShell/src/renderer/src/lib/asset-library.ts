@@ -1,7 +1,7 @@
 import { loadAssets as loadLegacyMediaAssets, upsertAsset as upsertLegacyMediaAsset, type MediaAsset } from './media-asset-store'
 import type { AtelierProjectFreshnessTarget, ProjectAssetRef } from './atelier-project-store'
 
-export type HupheAssetType = 'image' | 'video' | 'generated' | 'uploaded'
+export type HupheAssetType = 'image' | 'video' | 'audio' | 'generated' | 'uploaded'
 
 export interface HupheAsset {
   id: string

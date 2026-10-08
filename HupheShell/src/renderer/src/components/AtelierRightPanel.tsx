@@ -10,7 +10,7 @@ import type { AtelierCreationType } from './AtelierCreationModeButtons'
 import { checkAssetFreshness } from '../lib/asset-library'
 import type { AtelierVideoJob } from '../hooks/useAtelierMedia'
 
-export type AtelierSidebarPanelType = 'presentation' | 'banners' | 'print' | 'images' | 'video' | 'scene3d'
+export type AtelierSidebarPanelType = 'presentation' | 'banners' | 'print' | 'images' | 'video' | 'audio' | 'scene3d'
 
 export interface SidebarProject {
   id: string
@@ -88,8 +88,8 @@ export default function AtelierRightPanel({
     )
   }
 
-  // ── Images / Video / Presentation: clean compact panel (its own tab logic) ──
-  if (projectsPanel.type === 'images' || projectsPanel.type === 'video' || projectsPanel.type === 'presentation') {
+  // ── Images / Video / Audio / Presentation: clean compact panel (its own tab logic) ──
+  if (projectsPanel.type === 'images' || projectsPanel.type === 'video' || projectsPanel.type === 'audio' || projectsPanel.type === 'presentation') {
     return (
       <RightPanelShell widthClass={widthClass}>
         <AtelierCleanProjectsPanel
@@ -234,11 +234,12 @@ const ATELIER_PROJECT_COPY: Record<AtelierSidebarPanelType, { title: string; new
   print: { title: 'Editor', newLabel: 'Nieuwe media', emptyLabel: 'Nog geen mediaprojecten.' },
   images: { title: 'Afbeeldingen', newLabel: 'Nieuwe afbeelding', emptyLabel: 'Nog geen afbeeldingen.' },
   video: { title: "Video's", newLabel: 'Nieuwe video', emptyLabel: "Nog geen video's." },
+  audio: { title: 'Audio', newLabel: 'Nieuwe audio', emptyLabel: 'Nog geen audiotracks.' },
   scene3d: { title: '3D Scenes', newLabel: 'Nieuwe scene', emptyLabel: 'Nog geen 3D scenes.' },
 }
 
 function getAtelierEditTabLabel(type: AtelierSidebarPanelType, activeProjectId: string | null): string {
-  return type === 'images' || type === 'video' || activeProjectId ? 'Editor' : 'Start'
+  return type === 'images' || type === 'video' || type === 'audio' || activeProjectId ? 'Editor' : 'Start'
 }
 
 function AtelierProjectsPanelContent({ config }: { config: AtelierProjectsPanelConfig }) {
@@ -602,6 +603,11 @@ function AtelierProjectTypeIcon({ type }: { type: AtelierSidebarPanelType }) {
     </svg>
   )
   if (type === 'video') return <IcoVideo />
+  if (type === 'audio') return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
+    </svg>
+  )
   if (type === 'scene3d') return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 3l9 5v8l-9 5-9-5V8z" /><path d="M12 13l9-5" /><path d="M12 13l-9-5" /><path d="M12 13v9" />

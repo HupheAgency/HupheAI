@@ -83,6 +83,10 @@ export default function AssetLibraryPanel({ projects = [] }: Props) {
                 <div className="aspect-[4/3] bg-black/35">
                   {asset.type === 'video' ? (
                     <video src={asset.src} className="h-full w-full object-cover" muted playsInline />
+                  ) : asset.type === 'audio' ? (
+                    <div className="flex h-full w-full items-center justify-center p-3">
+                      <audio src={asset.src} controls className="w-full" />
+                    </div>
                   ) : (
                     <img src={asset.thumbnailSrc ?? asset.src} alt="" className="h-full w-full object-cover" />
                   )}

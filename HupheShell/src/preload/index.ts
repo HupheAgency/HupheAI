@@ -190,6 +190,18 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('video:generate-progress', handler)
     return () => ipcRenderer.removeListener('video:generate-progress', handler)
   },
+  generateAtelierAudio: (tags: string, model: string, accessToken?: string, settings?: { lyrics?: string; duration?: number; audioUrl?: string; originalTags?: string; originalLyrics?: string; editMode?: string; extendBeforeDuration?: number; extendAfterDuration?: number; originalDuration?: number; negativePrompt?: string; maskStartSeconds?: number; maskEndSeconds?: number; videoUrl?: string; audioFormat?: string; keepSpeechVocal?: boolean; promptInfluence?: number }, requestId?: string) =>
+    ipcRenderer.invoke('audio:generate-ai', { tags, model, accessToken, ...settings, requestId }),
+  cancelAudioGeneration: (requestId: string, accessToken?: string) =>
+    ipcRenderer.invoke('audio:cancel-generation', { requestId, accessToken }),
+  uploadAudioReference: (dataUrl: string, fileName: string, accessToken?: string) =>
+    ipcRenderer.invoke('audio:upload-reference', { dataUrl, fileName, accessToken }),
+  getAudioCapabilities: (accessToken?: string) => ipcRenderer.invoke('audio:get-capabilities', { accessToken }),
+  onAudioGenerateProgress: (cb: (data: { step: string; progress: number }) => void) => {
+    const handler = (_: unknown, data: { step: string; progress: number }) => cb(data)
+    ipcRenderer.on('audio:generate-progress', handler)
+    return () => ipcRenderer.removeListener('audio:generate-progress', handler)
+  },
   generateScene3D: (screenshotDataUrl: string, prompt: string, referenceImageSrc?: string, accessToken?: string) => ipcRenderer.invoke('scene3d:generate', { screenshotDataUrl, prompt, referenceImageSrc, accessToken }),
   importPresentation: (fileName: string, buffer: ArrayBuffer) =>
     ipcRenderer.invoke('presentation:import', { fileName, buffer }),

@@ -12,8 +12,12 @@ import {
   type VideoReferenceSlot,
   type VideoReferenceKind,
   type VideoTaskMode,
+  type AtelierAudioCapability,
+  type AudioReferenceSlot,
+  type VideoReferenceChipSlot,
 } from '../hooks/useAtelierMedia'
 import type { VideoGenerationSettings } from '../lib/video-generation-settings'
+import type { AudioGenerationSettings } from '../lib/audio-generation-settings'
 import AtelierRightPanel, { type AtelierProjectsPanelConfig } from './AtelierRightPanel'
 import AtelierCreationModeButtons, { ATELIER_CREATION_OPTIONS } from './AtelierCreationModeButtons'
 import type { AtelierCreationType } from './AtelierCreationModeButtons'
@@ -51,7 +55,7 @@ export function AtelierMediaCreationPanel({
   setVideoJobs?: (updater: (jobs: AtelierVideoJob[]) => AtelierVideoJob[]) => void
 }) {
   const option = ATELIER_CREATION_OPTIONS.find((item) => item.id === type) ?? ATELIER_CREATION_OPTIONS[0]
-  const mediaType = type === 'images' || type === 'video' ? type : null
+  const mediaType = type === 'images' || type === 'video' || type === 'audio' ? type : null
   const tools = mediaType === 'images' ? IMAGE_EDIT_TOOLS : (mediaType === 'video' ? VIDEO_EDIT_TOOLS : [])
   const [activeToolId, setActiveToolId] = useState('select')
   const [inputFileSrc, setInputFileSrc] = useState<string | null>(null)
@@ -172,6 +176,25 @@ export function AtelierMediaCreationPanel({
     setVideoReferences,
     videoTask,
     setVideoTask,
+    audioSettings,
+    updateAudioSettings,
+    selectedAudioCapability,
+    audioReference,
+    setAudioReference,
+    videoReference,
+    setVideoReference,
+    audioLyrics,
+    setAudioLyrics,
+    audioOriginalTags,
+    setAudioOriginalTags,
+    audioOriginalLyrics,
+    setAudioOriginalLyrics,
+    audioNegativePrompt,
+    setAudioNegativePrompt,
+    audioMaskStart,
+    setAudioMaskStart,
+    audioMaskEnd,
+    setAudioMaskEnd,
   } = useAtelierMediaCreator({
     mediaType,
     project,
@@ -732,6 +755,13 @@ export function AtelierMediaCreationPanel({
                   draggable={false}
                   onError={(e) => console.error('[AtelierMedia] img load failed, src:', (e.target as HTMLImageElement).src)}
                 />
+              ) : mediaType === 'audio' ? (
+                <div className={['flex flex-col items-center gap-4 rounded-2xl border border-white/[0.08] bg-[#151515] p-8', generating ? 'opacity-30' : ''].join(' ')}>
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="text-[#facc15]">
+                    <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
+                  </svg>
+                  <audio src={activeItem.src} controls={!generating} style={{ width: 'min(420px, 70vw)' }} />
+                </div>
               ) : (
                 <video
                   src={activeItem.src}
@@ -838,6 +868,12 @@ export function AtelierMediaCreationPanel({
                 >
                   {mediaType === 'images' ? (
                     <img src={item.src} alt="" className="h-full w-full object-cover" draggable={false} />
+                  ) : mediaType === 'audio' ? (
+                    <div className="flex h-full w-full items-center justify-center bg-white/[0.04] text-white/40">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
+                      </svg>
+                    </div>
                   ) : (
                     <video src={item.src} className="h-full w-full object-cover" />
                   )}
@@ -961,21 +997,35 @@ export function AtelierMediaCreationPanel({
             ref={promptInputRef}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder={mediaType === 'images' ? 'Beschrijf je afbeelding…' : 'Beschrijf je video…'}
+            placeholder={
+              mediaType === 'images'
+                ? 'Beschrijf je afbeelding…'
+                : mediaType === 'audio'
+                ? selectedAudioCapability?.family === 'sonilo'
+                  ? selectedAudioCapability?.prompt_optional
+                    ? 'Beschrijf de gewenste stijl (optioneel — laat leeg voor automatisch passend bij de video)…'
+                    : 'Beschrijf de gewenste muziek of geluidseffecten…'
+                  : selectedAudioCapability?.family === 'stable_audio'
+                  ? 'Beschrijf het geluid, bijv. a calm piano melody with soft strings…'
+                  : 'Beschrijf de stijl en tags, bijv. upbeat pop, female vocals…'
+                : 'Beschrijf je video…'
+            }
             className="h-10 w-full min-w-0 border-none bg-transparent px-3 text-base text-white outline-none placeholder:text-white/40"
           />
 
           <div className="flex w-full items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-white/65 transition-colors hover:bg-white/[0.08] hover:text-white"
-                aria-label="Bestand toevoegen"
-                title="Bestand toevoegen"
-              >
-                <PlusTinyIcon />
-              </button>
+              {mediaType !== 'audio' && (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-white/65 transition-colors hover:bg-white/[0.08] hover:text-white"
+                  aria-label="Bestand toevoegen"
+                  title="Bestand toevoegen"
+                >
+                  <PlusTinyIcon />
+                </button>
+              )}
               {activeToolId === 'scene3d' && (
                 <>
                   <input
@@ -1166,6 +1216,25 @@ export function AtelierMediaCreationPanel({
         onVideoReferencesChange={setVideoReferences}
         videoTask={videoTask}
         onVideoTaskChange={setVideoTask}
+        audioSettings={audioSettings}
+        onAudioSettingsChange={updateAudioSettings}
+        audioCapability={selectedAudioCapability}
+        audioReference={audioReference}
+        onAudioReferenceChange={setAudioReference}
+        videoReference={videoReference}
+        onVideoReferenceChange={setVideoReference}
+        audioLyrics={audioLyrics}
+        onAudioLyricsChange={setAudioLyrics}
+        audioOriginalTags={audioOriginalTags}
+        onAudioOriginalTagsChange={setAudioOriginalTags}
+        audioOriginalLyrics={audioOriginalLyrics}
+        onAudioOriginalLyricsChange={setAudioOriginalLyrics}
+        audioNegativePrompt={audioNegativePrompt}
+        onAudioNegativePromptChange={setAudioNegativePrompt}
+        audioMaskStart={audioMaskStart}
+        onAudioMaskStartChange={setAudioMaskStart}
+        audioMaskEnd={audioMaskEnd}
+        onAudioMaskEndChange={setAudioMaskEnd}
         scene3dProjects={existingProjects}
         scene3dProjectsLoading={scene3dProjectsLoading}
         onSelectScene3DProject={handleSelectScene3DProject}
@@ -1358,6 +1427,25 @@ function AtelierMediaEditSidebar({
   onVideoReferencesChange,
   videoTask,
   onVideoTaskChange,
+  audioSettings,
+  onAudioSettingsChange,
+  audioCapability,
+  audioReference,
+  onAudioReferenceChange,
+  videoReference,
+  onVideoReferenceChange,
+  audioLyrics,
+  onAudioLyricsChange,
+  audioOriginalTags,
+  onAudioOriginalTagsChange,
+  audioOriginalLyrics,
+  onAudioOriginalLyricsChange,
+  audioNegativePrompt,
+  onAudioNegativePromptChange,
+  audioMaskStart,
+  onAudioMaskStartChange,
+  audioMaskEnd,
+  onAudioMaskEndChange,
   onScene3DResult,
   scene3dProjects,
   scene3dProjectsLoading,
@@ -1387,6 +1475,25 @@ function AtelierMediaEditSidebar({
   onVideoReferencesChange?: (updater: VideoReferenceSlot[] | ((prev: VideoReferenceSlot[]) => VideoReferenceSlot[])) => void
   videoTask?: VideoTaskMode
   onVideoTaskChange?: (task: VideoTaskMode) => void
+  audioSettings?: AudioGenerationSettings | null
+  onAudioSettingsChange?: (patch: Partial<AudioGenerationSettings>) => void
+  audioCapability?: AtelierAudioCapability
+  audioReference?: AudioReferenceSlot | null
+  onAudioReferenceChange?: (slot: AudioReferenceSlot | null) => void
+  videoReference?: VideoReferenceChipSlot | null
+  onVideoReferenceChange?: (slot: VideoReferenceChipSlot | null) => void
+  audioLyrics?: string
+  onAudioLyricsChange?: (value: string) => void
+  audioOriginalTags?: string
+  onAudioOriginalTagsChange?: (value: string) => void
+  audioOriginalLyrics?: string
+  onAudioOriginalLyricsChange?: (value: string) => void
+  audioNegativePrompt?: string
+  onAudioNegativePromptChange?: (value: string) => void
+  audioMaskStart?: number
+  onAudioMaskStartChange?: (value: number | undefined) => void
+  audioMaskEnd?: number
+  onAudioMaskEndChange?: (value: number | undefined) => void
   onScene3DResult?: (imageUrl: string) => void
   scene3dProjects?: any[]
   scene3dProjectsLoading?: boolean
@@ -1432,6 +1539,25 @@ function AtelierMediaEditSidebar({
           onVideoReferencesChange={onVideoReferencesChange}
           videoTask={videoTask}
           onVideoTaskChange={onVideoTaskChange}
+          audioSettings={audioSettings}
+          onAudioSettingsChange={onAudioSettingsChange}
+          audioCapability={audioCapability}
+          audioReference={audioReference}
+          onAudioReferenceChange={onAudioReferenceChange}
+          videoReference={videoReference}
+          onVideoReferenceChange={onVideoReferenceChange}
+          audioLyrics={audioLyrics}
+          onAudioLyricsChange={onAudioLyricsChange}
+          audioOriginalTags={audioOriginalTags}
+          onAudioOriginalTagsChange={onAudioOriginalTagsChange}
+          audioOriginalLyrics={audioOriginalLyrics}
+          onAudioOriginalLyricsChange={onAudioOriginalLyricsChange}
+          audioNegativePrompt={audioNegativePrompt}
+          onAudioNegativePromptChange={onAudioNegativePromptChange}
+          audioMaskStart={audioMaskStart}
+          onAudioMaskStartChange={onAudioMaskStartChange}
+          audioMaskEnd={audioMaskEnd}
+          onAudioMaskEndChange={onAudioMaskEndChange}
         />
       )}
     </AtelierRightPanel>
@@ -1800,6 +1926,25 @@ function AtelierToolDetailPanel({
   onVideoReferencesChange,
   videoTask,
   onVideoTaskChange,
+  audioSettings,
+  onAudioSettingsChange,
+  audioCapability,
+  audioReference,
+  onAudioReferenceChange,
+  videoReference,
+  onVideoReferenceChange,
+  audioLyrics,
+  onAudioLyricsChange,
+  audioOriginalTags,
+  onAudioOriginalTagsChange,
+  audioOriginalLyrics,
+  onAudioOriginalLyricsChange,
+  audioNegativePrompt,
+  onAudioNegativePromptChange,
+  audioMaskStart,
+  onAudioMaskStartChange,
+  audioMaskEnd,
+  onAudioMaskEndChange,
 }: {
   tool?: AtelierEditTool
   mediaType: AtelierMediaProjectType
@@ -1818,6 +1963,25 @@ function AtelierToolDetailPanel({
   onVideoReferencesChange?: (updater: VideoReferenceSlot[] | ((prev: VideoReferenceSlot[]) => VideoReferenceSlot[])) => void
   videoTask?: VideoTaskMode
   onVideoTaskChange?: (task: VideoTaskMode) => void
+  audioSettings?: AudioGenerationSettings | null
+  onAudioSettingsChange?: (patch: Partial<AudioGenerationSettings>) => void
+  audioCapability?: AtelierAudioCapability
+  audioReference?: AudioReferenceSlot | null
+  onAudioReferenceChange?: (slot: AudioReferenceSlot | null) => void
+  videoReference?: VideoReferenceChipSlot | null
+  onVideoReferenceChange?: (slot: VideoReferenceChipSlot | null) => void
+  audioLyrics?: string
+  onAudioLyricsChange?: (value: string) => void
+  audioOriginalTags?: string
+  onAudioOriginalTagsChange?: (value: string) => void
+  audioOriginalLyrics?: string
+  onAudioOriginalLyricsChange?: (value: string) => void
+  audioNegativePrompt?: string
+  onAudioNegativePromptChange?: (value: string) => void
+  audioMaskStart?: number
+  onAudioMaskStartChange?: (value: number | undefined) => void
+  audioMaskEnd?: number
+  onAudioMaskEndChange?: (value: number | undefined) => void
 }) {
   if (!tool) {
     if (mediaType === 'video') {
@@ -1837,6 +2001,31 @@ function AtelierToolDetailPanel({
             hasReferences={(videoReferences?.length ?? 0) > 0}
           />
         </>
+      )
+    }
+    if (mediaType === 'audio') {
+      return (
+        <AudioGenerationSettingsPanel
+          settings={audioSettings}
+          onChange={onAudioSettingsChange}
+          capability={audioCapability}
+          reference={audioReference}
+          onReferenceChange={onAudioReferenceChange ?? (() => {})}
+          videoReference={videoReference}
+          onVideoReferenceChange={onVideoReferenceChange ?? (() => {})}
+          lyrics={audioLyrics ?? ''}
+          onLyricsChange={onAudioLyricsChange ?? (() => {})}
+          originalTags={audioOriginalTags ?? ''}
+          onOriginalTagsChange={onAudioOriginalTagsChange ?? (() => {})}
+          originalLyrics={audioOriginalLyrics ?? ''}
+          onOriginalLyricsChange={onAudioOriginalLyricsChange ?? (() => {})}
+          negativePrompt={audioNegativePrompt ?? ''}
+          onNegativePromptChange={onAudioNegativePromptChange ?? (() => {})}
+          maskStart={audioMaskStart}
+          onMaskStartChange={onAudioMaskStartChange ?? (() => {})}
+          maskEnd={audioMaskEnd}
+          onMaskEndChange={onAudioMaskEndChange ?? (() => {})}
+        />
       )
     }
     return null
@@ -1933,7 +2122,7 @@ function AtelierToolDetailPanel({
         <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
           <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Status</p>
           <p className="mt-3 text-sm leading-relaxed text-white/42">
-            UI klaar. Deze optie wordt later gekoppeld aan de {mediaType === 'images' ? 'beeldbewerking' : 'videobewerking'}.
+            UI klaar. Deze optie wordt later gekoppeld aan de {mediaType === 'images' ? 'beeldbewerking' : mediaType === 'audio' ? 'audiobewerking' : 'videobewerking'}.
           </p>
         </div>
       )}
@@ -2365,6 +2554,488 @@ function VideoGenerationSettingsPanel({
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {estimatedMillicredits != null && (
+          <div className="rounded-2xl border border-white/[0.06] bg-[#0f0f0f] p-3">
+            <p className="text-[10px] leading-relaxed text-white/25">
+              Geschatte kosten: <span className="text-white/45">{new Intl.NumberFormat('nl-NL').format(Math.ceil(estimatedMillicredits / 100))} credits</span>
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function estimateAudioCreditsCost(
+  capability: AtelierAudioCapability,
+  settings: AudioGenerationSettings,
+  referenceDurationSec?: number,
+  videoReferenceDurationSec?: number,
+): number | null {
+  let billedSeconds = capability.supports_duration
+    ? (typeof settings.duration === 'number' ? settings.duration : (capability.default_duration ?? referenceDurationSec ?? videoReferenceDurationSec ?? 60))
+    : capability.supports_extend
+      ? (referenceDurationSec ?? 0) + (settings.extendBeforeDuration ?? 0) + (settings.extendAfterDuration ?? 0)
+      : (referenceDurationSec ?? videoReferenceDurationSec ?? 60)
+  if (capability.min_billable_seconds) {
+    billedSeconds = Math.max(billedSeconds, capability.min_billable_seconds)
+  }
+  return Math.ceil(capability.rate_per_second * billedSeconds * 100000 * (1 + capability.markup_pct / 100))
+}
+
+function AudioReferenceChip({
+  reference,
+  onChange,
+}: {
+  reference?: AudioReferenceSlot | null
+  onChange: (slot: AudioReferenceSlot | null) => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  function addFile(file: File) {
+    const objectUrl = URL.createObjectURL(file)
+    const audioEl = document.createElement('audio')
+    audioEl.preload = 'metadata'
+    audioEl.src = objectUrl
+
+    const startUpload = (durationSec?: number) => {
+      const reader = new FileReader()
+      reader.onload = async (ev) => {
+        const dataUrl = ev.target?.result as string
+        onChange({ status: 'uploading', fileName: file.name, durationSec })
+        try {
+          const api = (window as any).api
+          const { data: { session } } = await supabase!.auth.getSession()
+          const res = await api.uploadAudioReference(dataUrl, file.name, session?.access_token ?? undefined)
+          if (!res?.ok) throw new Error(res?.error ?? 'Upload mislukt.')
+          onChange({ status: 'ready', fileUrl: res.fileUrl, fileName: file.name, durationSec })
+        } catch (err: any) {
+          onChange({ status: 'error', fileName: file.name, error: err.message ?? 'Upload mislukt.' })
+        }
+      }
+      reader.readAsDataURL(file)
+    }
+
+    audioEl.onloadedmetadata = () => {
+      const dur = Number.isFinite(audioEl.duration) ? audioEl.duration : undefined
+      URL.revokeObjectURL(objectUrl)
+      startUpload(dur)
+    }
+    audioEl.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      startUpload(undefined)
+    }
+  }
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="audio/mpeg,audio/wav,audio/mp4,audio/ogg"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) addFile(file)
+          e.target.value = ''
+        }}
+      />
+      {reference ? (
+        <div className="flex items-center gap-2 rounded-full border border-white/[0.10] bg-white/[0.04] px-2.5 py-1.5">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-white/50">
+            <path d="M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm12-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+          </svg>
+          <span className="max-w-[160px] truncate text-xs text-white/60">
+            {reference.status === 'uploading' ? 'Uploaden...' : reference.status === 'error' ? (reference.error ?? 'Fout') : (reference.fileName ?? 'Referentie-audio')}
+          </span>
+          <button
+            type="button"
+            onClick={() => onChange(null)}
+            className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-white/40 hover:text-white"
+            aria-label="Referentie-audio verwijderen"
+          >
+            <CloseTinyIcon />
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          className="inline-flex h-8 items-center gap-1 rounded-full border border-dashed border-white/[0.15] px-3 text-xs font-medium text-white/50 transition-colors hover:border-white/30 hover:text-white/80"
+        >
+          Audio toevoegen <PlusTinyIcon />
+        </button>
+      )}
+    </>
+  )
+}
+
+function VideoReferenceChip({
+  reference,
+  onChange,
+}: {
+  reference?: VideoReferenceChipSlot | null
+  onChange: (slot: VideoReferenceChipSlot | null) => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  function addFile(file: File) {
+    const objectUrl = URL.createObjectURL(file)
+    const videoEl = document.createElement('video')
+    videoEl.preload = 'metadata'
+    videoEl.src = objectUrl
+
+    const startUpload = (durationSec?: number) => {
+      const reader = new FileReader()
+      reader.onload = async (ev) => {
+        const dataUrl = ev.target?.result as string
+        onChange({ status: 'uploading', fileName: file.name, durationSec })
+        try {
+          const api = (window as any).api
+          const { data: { session } } = await supabase!.auth.getSession()
+          const res = await api.uploadAudioReference(dataUrl, file.name, session?.access_token ?? undefined)
+          if (!res?.ok) throw new Error(res?.error ?? 'Upload mislukt.')
+          onChange({ status: 'ready', fileUrl: res.fileUrl, fileName: file.name, durationSec })
+        } catch (err: any) {
+          onChange({ status: 'error', fileName: file.name, error: err.message ?? 'Upload mislukt.' })
+        }
+      }
+      reader.readAsDataURL(file)
+    }
+
+    videoEl.onloadedmetadata = () => {
+      const dur = Number.isFinite(videoEl.duration) ? videoEl.duration : undefined
+      URL.revokeObjectURL(objectUrl)
+      startUpload(dur)
+    }
+    videoEl.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      startUpload(undefined)
+    }
+  }
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="video/mp4,video/quicktime,video/webm"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) addFile(file)
+          e.target.value = ''
+        }}
+      />
+      {reference ? (
+        <div className="flex items-center gap-2 rounded-full border border-white/[0.10] bg-white/[0.04] px-2.5 py-1.5">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-white/50">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          <span className="max-w-[160px] truncate text-xs text-white/60">
+            {reference.status === 'uploading' ? 'Uploaden...' : reference.status === 'error' ? (reference.error ?? 'Fout') : (reference.fileName ?? 'Referentievideo')}
+          </span>
+          <button
+            type="button"
+            onClick={() => onChange(null)}
+            className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-white/40 hover:text-white"
+            aria-label="Referentievideo verwijderen"
+          >
+            <CloseTinyIcon />
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          className="inline-flex h-8 items-center gap-1 rounded-full border border-dashed border-white/[0.15] px-3 text-xs font-medium text-white/50 transition-colors hover:border-white/30 hover:text-white/80"
+        >
+          Video toevoegen <PlusTinyIcon />
+        </button>
+      )}
+    </>
+  )
+}
+
+function AudioGenerationSettingsPanel({
+  settings,
+  onChange,
+  capability,
+  reference,
+  onReferenceChange,
+  videoReference,
+  onVideoReferenceChange,
+  lyrics,
+  onLyricsChange,
+  originalTags,
+  onOriginalTagsChange,
+  originalLyrics,
+  onOriginalLyricsChange,
+  negativePrompt,
+  onNegativePromptChange,
+  maskStart,
+  onMaskStartChange,
+  maskEnd,
+  onMaskEndChange,
+}: {
+  settings?: AudioGenerationSettings | null
+  onChange?: (patch: Partial<AudioGenerationSettings>) => void
+  capability?: AtelierAudioCapability
+  reference?: AudioReferenceSlot | null
+  onReferenceChange: (slot: AudioReferenceSlot | null) => void
+  videoReference?: VideoReferenceChipSlot | null
+  onVideoReferenceChange: (slot: VideoReferenceChipSlot | null) => void
+  lyrics: string
+  onLyricsChange: (value: string) => void
+  originalTags: string
+  onOriginalTagsChange: (value: string) => void
+  originalLyrics: string
+  onOriginalLyricsChange: (value: string) => void
+  negativePrompt: string
+  onNegativePromptChange: (value: string) => void
+  maskStart?: number
+  onMaskStartChange: (value: number | undefined) => void
+  maskEnd?: number
+  onMaskEndChange: (value: number | undefined) => void
+}) {
+  if (!capability || !settings) {
+    return (
+      <div className="px-5 py-5">
+        <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+          <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Audio-instellingen</p>
+          <p className="mt-3 text-sm leading-relaxed text-white/42">Instellingen laden...</p>
+        </div>
+      </div>
+    )
+  }
+
+  const estimatedMillicredits = estimateAudioCreditsCost(capability, settings, reference?.durationSec, videoReference?.durationSec)
+  const pillClass = (active: boolean) => [
+    'rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+    active ? 'bg-[#facc15] text-black' : 'bg-white/[0.06] text-white/50 hover:bg-white/[0.1]',
+  ].join(' ')
+  const durationFallback = capability.default_duration ?? reference?.durationSec ?? videoReference?.durationSec ?? 60
+  const durationMin = capability.min_duration ?? 5
+  const durationStep = durationMin < 1 ? 0.5 : 5
+
+  return (
+    <div className="px-5 py-5">
+      <div className="mb-4">
+        <h2 className="text-sm font-semibold text-white/90">Audio-instellingen</h2>
+        <p className="text-xs leading-relaxed text-white/35">Tags, lyrics en lengte voor deze generatie.</p>
+      </div>
+
+      <div className="space-y-3">
+        {capability.requires_reference && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Referentie-audio</p>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <AudioReferenceChip reference={reference} onChange={onReferenceChange} />
+            </div>
+            {reference?.durationSec != null && (
+              <p className="mt-2 text-[10px] text-white/30">Lengte: {reference.durationSec.toFixed(1)}s</p>
+            )}
+          </div>
+        )}
+
+        {capability.requires_video_reference && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Referentievideo</p>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <VideoReferenceChip reference={videoReference} onChange={onVideoReferenceChange} />
+            </div>
+            {videoReference?.durationSec != null && (
+              <p className="mt-2 text-[10px] text-white/30">Lengte: {videoReference.durationSec.toFixed(1)}s</p>
+            )}
+          </div>
+        )}
+
+        {capability.requires_original_tags && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">Oorspronkelijke tags</p>
+            <input
+              value={originalTags}
+              onChange={(e) => onOriginalTagsChange(e.target.value)}
+              placeholder="Tags van de aangehangen audio, bijv. acoustic, slow, piano"
+              className="w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+            />
+          </div>
+        )}
+
+        {capability.supports_edit_mode && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Modus</p>
+            <div className="flex flex-wrap gap-1.5">
+              <button type="button" onClick={() => onChange?.({ editMode: 'remix' })} className={pillClass((settings.editMode ?? 'remix') === 'remix')}>Remix (tags)</button>
+              <button type="button" onClick={() => onChange?.({ editMode: 'lyrics' })} className={pillClass(settings.editMode === 'lyrics')}>Lyrics herschrijven</button>
+            </div>
+          </div>
+        )}
+
+        {capability.supports_edit_mode && settings.editMode === 'lyrics' && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">Oorspronkelijke lyrics</p>
+            <textarea
+              value={originalLyrics}
+              onChange={(e) => onOriginalLyricsChange(e.target.value)}
+              placeholder="Lyrics van de aangehangen audio"
+              rows={3}
+              className="w-full resize-none rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+            />
+          </div>
+        )}
+
+        {capability.supports_lyrics && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">Lyrics (optioneel)</p>
+            <textarea
+              value={lyrics}
+              onChange={(e) => onLyricsChange(e.target.value)}
+              placeholder="Songtekst, gebruik [verse]/[chorus] als structuur-hints, of laat leeg voor instrumentaal ([inst])"
+              rows={4}
+              className="w-full resize-none rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+            />
+          </div>
+        )}
+
+        {capability.supports_duration && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Lengte</p>
+              <p className="text-xs font-medium text-white/70">{(settings.duration ?? durationFallback).toFixed(durationStep < 1 ? 1 : 0)}s</p>
+            </div>
+            <input
+              type="range"
+              min={durationMin}
+              max={capability.max_duration ?? 240}
+              step={durationStep}
+              value={settings.duration ?? durationFallback}
+              onChange={(e) => onChange?.({ duration: Number(e.target.value) })}
+              className="w-full accent-[#facc15]"
+            />
+            <div className="mt-1.5 flex justify-between text-[10px] text-white/30">
+              <span>{durationMin}s</span>
+              <span>{capability.max_duration ?? 240}s</span>
+            </div>
+          </div>
+        )}
+
+        {capability.supports_extend && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Verlengen</p>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-white/40">Vooraan (sec)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={settings.extendBeforeDuration ?? 0}
+                  onChange={(e) => onChange?.({ extendBeforeDuration: Math.max(0, Number(e.target.value) || 0) })}
+                  className="mt-2 w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-white/40">Achteraan (sec)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={settings.extendAfterDuration ?? 0}
+                  onChange={(e) => onChange?.({ extendAfterDuration: Math.max(0, Number(e.target.value) || 0) })}
+                  className="mt-2 w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {capability.supports_inpaint && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Segment om te bewerken</p>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-white/40">Start (sec)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={maskStart ?? ''}
+                  onChange={(e) => onMaskStartChange(e.target.value === '' ? undefined : Math.max(0, Number(e.target.value) || 0))}
+                  className="mt-2 w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-white/40">Eind (sec)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={maskEnd ?? ''}
+                  onChange={(e) => onMaskEndChange(e.target.value === '' ? undefined : Math.max(0, Number(e.target.value) || 0))}
+                  className="mt-2 w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {capability.supports_negative_prompt && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">Negative prompt (optioneel)</p>
+            <textarea
+              value={negativePrompt}
+              onChange={(e) => onNegativePromptChange(e.target.value)}
+              placeholder="Wat je NIET in het geluid wilt, bijv. vocals, distortion"
+              rows={2}
+              className="w-full resize-none rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+            />
+          </div>
+        )}
+
+        {capability.supports_audio_format && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Audioformaat</p>
+            <div className="flex flex-wrap gap-1.5">
+              {(['wav', 'mp3', 'aac', 'flac'] as const).map((format) => (
+                <button
+                  key={format}
+                  type="button"
+                  onClick={() => onChange?.({ audioFormat: format })}
+                  className={pillClass((settings.audioFormat ?? 'aac') === format)}
+                >
+                  {format.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {capability.supports_keep_speech_vocal && (
+          <div className="flex items-center justify-between rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Spraak/vocals behouden</p>
+            <Toggle checked={settings.keepSpeechVocal ?? false} onChange={(checked) => onChange?.({ keepSpeechVocal: checked })} />
+          </div>
+        )}
+
+        {capability.supports_prompt_influence && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Prompt-invloed</p>
+              <p className="text-xs font-medium text-white/70">{(settings.promptInfluence ?? 0.5).toFixed(2)}</p>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={settings.promptInfluence ?? 0.5}
+              onChange={(e) => onChange?.({ promptInfluence: Number(e.target.value) })}
+              className="w-full accent-[#facc15]"
+            />
+            <div className="mt-1.5 flex justify-between text-[10px] text-white/30">
+              <span>0 (video)</span>
+              <span>1 (prompt)</span>
+            </div>
           </div>
         )}
 

@@ -87,7 +87,7 @@ interface Props {
   embedded?: boolean
   onNavigateToTypewriter?: (docId?: string) => void
   onOpenInAtelier?: (imagePath: string) => void
-  onOpenAtelierMediaProject?: (projectId: string, type: 'images' | 'video' | 'print' | 'banners') => void
+  onOpenAtelierMediaProject?: (projectId: string, type: 'images' | 'video' | 'audio' | 'print' | 'banners') => void
 }
 
 export default function ProjectsPage({ onBack, onOpenProject, onJoinSession, embedded, onNavigateToTypewriter, onOpenInAtelier, onOpenAtelierMediaProject }: Props) {
@@ -567,6 +567,7 @@ export default function ProjectsPage({ onBack, onOpenProject, onJoinSession, emb
     const mediaProjectItems: AssetItem[] = loadAtelierMediaProjects().map((project) => {
       const id = `${project.type === 'video' ? 'video' : 'media'}:${project.id}`
       const isVideo = project.type === 'video'
+      const isAudio = project.type === 'audio'
       const mediaType: 'media-images' | 'media-video' = isVideo ? 'media-video' : 'media-images'
       const isLive = liveAtelierMap.has(project.id)
       const shareCode = liveAtelierMap.get(project.id) || undefined
@@ -580,23 +581,26 @@ export default function ProjectsPage({ onBack, onOpenProject, onJoinSession, emb
         id,
         title: project.title,
         type: 'project',
-        projectKind: isVideo ? 'Video' : 'Afbeelding',
+        projectKind: isVideo ? 'Video' : isAudio ? 'Audio' : 'Afbeelding',
         description: project.prompt,
-        thumbnail: project.src || undefined,
+        // Audio heeft geen visuele thumbnail -- val terug op de generieke projectweergave.
+        thumbnail: isAudio ? undefined : (project.src || undefined),
         tags: isVideo
           ? ['Video', ...(videoIsShared ? ['Linked'] : [])]
-          : ['Afbeelding', ...(isLive ? ['Live'] : [])],
+          : isAudio
+            ? ['Audio']
+            : ['Afbeelding', ...(isLive ? ['Live'] : [])],
         client: inferClientName(project.title),
         updatedAt: project.createdAt,
         createdAt: project.createdAt,
         updatedBy: 'Atelier',
         isFavorite: favoriteIds.has(id),
-        isLive: isVideo ? videoIsShared : isLive,
+        isLive: isVideo ? videoIsShared : isAudio ? false : isLive,
         isShared: isVideo ? videoIsShared : undefined,
-        shareCode: isVideo ? undefined : shareCode,
+        shareCode: isVideo || isAudio ? undefined : shareCode,
         assetId: isVideo ? sharedAssetId : project.id,
         onOpen: onOpenAtelierMediaProject
-          ? () => onOpenAtelierMediaProject(project.id, isVideo ? 'video' : 'images')
+          ? () => onOpenAtelierMediaProject(project.id, isVideo ? 'video' : isAudio ? 'audio' : 'images')
           : undefined,
         onRename: (newTitle) => {
           const all = loadAtelierMediaProjects()
@@ -604,11 +608,14 @@ export default function ProjectsPage({ onBack, onOpenProject, onJoinSession, emb
           saveAtelierMediaProjects(updated)
           setLibraryRefreshToken((t) => t + 1)
         },
+        // Live-samenwerken is (nog) niet gebouwd voor audio-projecten.
         onShare: isVideo
           ? () => handleShareVideoProject(project.src, project.title, project.createdAt)
-          : isLive
-            ? () => handleStopLiveAtelier(project.id)
-            : () => handleGoLiveAtelier(project.id, mediaType),
+          : isAudio
+            ? undefined
+            : isLive
+              ? () => handleStopLiveAtelier(project.id)
+              : () => handleGoLiveAtelier(project.id, mediaType),
       }
     })
 

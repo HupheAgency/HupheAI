@@ -413,4 +413,182 @@ export async function downloadFalVideoContent(
   return res
 }
 
+async function handleAudioProxyResponse(res: Response): Promise<any> {
+  if (res.status === 402) throw new InsufficientCreditsError()
+  if (res.status === 403) {
+    const data = await res.json().catch(() => ({})) as any
+    if (data.code === 'wallet_blocked') throw new WalletBlockedError()
+    throw new Error(data.error ?? `Proxy 403`)
+  }
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Audio proxy ${res.status}: ${text.slice(0, 200)}`)
+  }
+  return res.json()
+}
+
+/**
+ * Haalt de (hardcoded) capability-vlaggen + prijzen per fal-audiomodel op via
+ * proxy-fal-audio (actie 'capabilities'). Zelfde patroon als getFalVideoCapabilities.
+ */
+export async function getFalAudioCapabilities(jwt: string): Promise<any> {
+  const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/proxy-fal-audio`, {
+    method: 'POST',
+    headers: proxyHeaders(jwt),
+    body: JSON.stringify({ action: 'capabilities' }),
+  })
+  return handleAudioProxyResponse(res)
+}
+
+/**
+ * Dient een nieuwe fal.ai ACE-Step audio-generatiejob in via proxy-fal-audio.
+ * Geeft job_id/polling_url/content_url/reservation_id/max_reservation terug om te pollen.
+ */
+export async function submitFalAudioJob(
+  params: {
+    model: string
+    tags?: string
+    lyrics?: string
+    duration?: number
+    audioUrl?: string
+    originalTags?: string
+    originalLyrics?: string
+    editMode?: string
+    extendBeforeDuration?: number
+    extendAfterDuration?: number
+    originalDuration?: number
+    negativePrompt?: string
+    maskStartSeconds?: number
+    maskEndSeconds?: number
+    videoUrl?: string
+    audioFormat?: string
+    keepSpeechVocal?: boolean
+    promptInfluence?: number
+  },
+  jwt: string,
+): Promise<any> {
+  const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/proxy-fal-audio`, {
+    method: 'POST',
+    headers: proxyHeaders(jwt),
+    body: JSON.stringify({
+      action: 'submit',
+      model: params.model,
+      tags: params.tags,
+      lyrics: params.lyrics,
+      duration: params.duration,
+      audio_url: params.audioUrl,
+      original_tags: params.originalTags,
+      original_lyrics: params.originalLyrics,
+      edit_mode: params.editMode,
+      extend_before_duration: params.extendBeforeDuration,
+      extend_after_duration: params.extendAfterDuration,
+      original_duration: params.originalDuration,
+      negative_prompt: params.negativePrompt,
+      mask_start_seconds: params.maskStartSeconds,
+      mask_end_seconds: params.maskEndSeconds,
+      video_url: params.videoUrl,
+      audio_format: params.audioFormat,
+      keep_speech_vocal: params.keepSpeechVocal,
+      prompt_influence: params.promptInfluence,
+    }),
+  })
+  return handleAudioProxyResponse(res)
+}
+
+/**
+ * Vraagt fal een pre-signed upload-url + resulterende file-url op voor een
+ * referentie-audiobestand (actie 'upload-init'). Zelfde mechanisme als
+ * initiateFalUpload (video), maar via proxy-fal-audio zodat de FAL_API_KEY
+ * nooit buiten de fal-proxy's komt.
+ */
+export async function initiateFalAudioUpload(
+  params: { contentType: string; fileName: string },
+  jwt: string,
+): Promise<{ file_url: string; upload_url: string }> {
+  const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/proxy-fal-audio`, {
+    method: 'POST',
+    headers: proxyHeaders(jwt),
+    body: JSON.stringify({
+      action: 'upload-init',
+      content_type: params.contentType,
+      file_name: params.fileName,
+    }),
+  })
+  return handleAudioProxyResponse(res)
+}
+
+/**
+ * Annuleert een lopende fal-audiojob: roept fal's cancel_url aan (PUT) en
+ * releaset de reservering server-side als deze nog pending is.
+ */
+export async function cancelFalAudioJob(
+  params: { reservationId: string; cancelUrl?: string },
+  jwt: string,
+): Promise<any> {
+  const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/proxy-fal-audio`, {
+    method: 'POST',
+    headers: proxyHeaders(jwt),
+    body: JSON.stringify({
+      action: 'cancel',
+      reservation_id: params.reservationId,
+      cancel_url: params.cancelUrl,
+    }),
+  })
+  return handleAudioProxyResponse(res)
+}
+
+/**
+ * Peilt de status van een lopende fal-audiojob. Settlet/releaset de reservering
+ * server-side zodra de job klaar of mislukt is.
+ */
+export async function pollFalAudioJobStatus(
+  params: { jobId: string; pollingUrl?: string; reservationId: string; maxReservation: number; model: string },
+  jwt: string,
+): Promise<any> {
+  const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/proxy-fal-audio`, {
+    method: 'POST',
+    headers: proxyHeaders(jwt),
+    body: JSON.stringify({
+      action: 'status',
+      job_id: params.jobId,
+      polling_url: params.pollingUrl,
+      reservation_id: params.reservationId,
+      max_reservation: params.maxReservation,
+      model: params.model,
+    }),
+  })
+  return handleAudioProxyResponse(res)
+}
+
+/**
+ * Downloadt de voltooide fal-audio als binaire Response (alleen mogelijk nadat
+ * de status-poll 'completed' + settled heeft bevestigd).
+ */
+export async function downloadFalAudioContent(
+  params: { jobId: string; reservationId: string; contentUrl?: string },
+  jwt: string,
+): Promise<Response> {
+  const res = await fetch(`${SUPABASE_FUNCTIONS_URL}/proxy-fal-audio`, {
+    method: 'POST',
+    headers: proxyHeaders(jwt),
+    body: JSON.stringify({
+      action: 'content',
+      job_id: params.jobId,
+      reservation_id: params.reservationId,
+      content_url: params.contentUrl,
+    }),
+  })
+  if (res.status === 402) throw new InsufficientCreditsError()
+  if (res.status === 403) {
+    const data = await res.json().catch(() => ({})) as any
+    if (data.code === 'wallet_blocked') throw new WalletBlockedError()
+    throw new Error(data.error ?? `Proxy 403`)
+  }
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Audio download mislukt (${res.status}): ${text.slice(0, 200)}`)
+  }
+  return res
+}
+
 export { getJwt }
