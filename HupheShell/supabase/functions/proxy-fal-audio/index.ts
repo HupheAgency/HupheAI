@@ -27,7 +27,7 @@ const USD_TO_MILLICREDITS = 100000
 // geen aparte ENDPOINTS-mapping nodig, elk model heeft precies één endpoint.
 interface AudioModelCapability {
   model_id: string
-  family: 'ace_step' | 'stable_audio' | 'sonilo'
+  family: 'ace_step' | 'stable_audio' | 'sonilo' | 'sync_lipsync'
   rate_per_second: number
   requires_reference: boolean
   requires_original_tags: boolean
@@ -241,6 +241,26 @@ const CAPABILITIES: Record<string, AudioModelCapability> = {
     supports_keep_speech_vocal: true,
     prompt_optional: true,
   },
+  // Lip Sync -- leeft in de Audio-tab maar levert zelf VIDEO op (bevestigd via fal's
+  // schema: output is altijd { video: { url } }, nooit audio). requires_reference
+  // betekent hier (zoals overal) "vereist audio_url"; samen met requires_video_reference
+  // zijn dus zowel video_url als audio_url verplicht. Geen tags/prompt-veld in fal's
+  // schema -- prompt_optional true. $3/min (lipsync-2) = $0.05/s.
+  'fal-ai/sync-lipsync/v2': {
+    model_id: 'fal-ai/sync-lipsync/v2',
+    family: 'sync_lipsync',
+    rate_per_second: 0.05,
+    requires_reference: true,
+    requires_original_tags: false,
+    supports_lyrics: false,
+    supports_edit_mode: false,
+    supports_duration: false,
+    supports_extend: false,
+    supports_negative_prompt: false,
+    supports_inpaint: false,
+    requires_video_reference: true,
+    prompt_optional: true,
+  },
 }
 
 Deno.serve(async (req: Request) => {
@@ -361,6 +381,7 @@ Deno.serve(async (req: Request) => {
         edit_mode, extend_before_duration, extend_after_duration, original_duration,
         negative_prompt, mask_start_seconds, mask_end_seconds,
         video_url, audio_format, keep_speech_vocal, prompt_influence,
+        video_duration_seconds, audio_duration_seconds, sync_mode,
       } = body
       if (!model) return json({ error: 'model is verplicht' }, 400)
 
@@ -438,6 +459,18 @@ Deno.serve(async (req: Request) => {
         billableDuration = Math.max(billableDuration, capability.min_billable_seconds)
       }
 
+      // Lipsync heeft TWEE bronduraties (video + audio) i.p.v. één -- v1 gebruikt
+      // max(video, audio) als benadering van sync_mode 'cut_off' (default) se output-
+      // lengte; complexere sync_mode-afhankelijke lengte is uit scope (zie plan).
+      if (capability.family === 'sync_lipsync') {
+        const videoDur = Math.min(600, Math.max(0, Number(video_duration_seconds) || 0))
+        const audioDur = Math.min(600, Math.max(0, Number(audio_duration_seconds) || 0))
+        if (videoDur <= 0 || audioDur <= 0) {
+          return json({ error: `Model '${model}' vereist zowel video_duration_seconds als audio_duration_seconds`, code: 'invalid_params' }, 400)
+        }
+        billableDuration = Math.max(videoDur, audioDur)
+      }
+
       const baseCostUsd = capability.rate_per_second * billableDuration
       const costWithMarkup = Math.ceil(baseCostUsd * USD_TO_MILLICREDITS * (1 + aiModel.markup_pct / 100))
 
@@ -460,13 +493,14 @@ Deno.serve(async (req: Request) => {
       // andere veldnamen voor verlengen (extend_seconds_before/after i.p.v.
       // extend_before_duration/after_duration) -- vandaar de split op capability.family.
       const falBody: Record<string, unknown> = {}
-      if (capability.family === 'stable_audio' || capability.family === 'sonilo') {
+      if (capability.family === 'stable_audio' || capability.family === 'sonilo' || capability.family === 'sync_lipsync') {
         if (tags) falBody.prompt = tags
         if (capability.family === 'stable_audio' && negative_prompt) falBody.negative_prompt = negative_prompt
       } else {
         falBody.tags = tags
         if (lyrics) falBody.lyrics = lyrics
       }
+      if (capability.family === 'sync_lipsync' && sync_mode) falBody.sync_mode = sync_mode
       if (capability.supports_duration) falBody.duration = resolvedDuration
       if (capability.requires_reference) falBody.audio_url = audio_url
       if (capability.requires_video_reference) falBody.video_url = video_url
@@ -618,7 +652,7 @@ Deno.serve(async (req: Request) => {
 
     // ── Download de voltooide audio (binaire passthrough) ────────────────────
     if (action === 'content') {
-      const { reservation_id, content_url } = body
+      const { reservation_id, content_url, model } = body
       if (!reservation_id || !content_url) return json({ error: 'reservation_id en content_url zijn verplicht' }, 400)
 
       const { data: reservation } = await serviceClient
@@ -639,20 +673,23 @@ Deno.serve(async (req: Request) => {
         return json({ error: `Audio ophalen mislukt (${resultRes.status}): ${text.slice(0, 200)}` }, 502)
       }
       const resultData = await resultRes.json() as any
-      const downloadUrl: string | undefined = resultData.audio?.url
+      // Lipsync levert { video: { url } } op, geen { audio: { url } } -- alle andere
+      // families (ace_step/stable_audio/sonilo) blijven ongewijzigd op .audio?.url.
+      const isLipsync = model ? CAPABILITIES[model]?.family === 'sync_lipsync' : false
+      const downloadUrl: string | undefined = isLipsync ? resultData.video?.url : resultData.audio?.url
       if (!downloadUrl) {
         return json({ error: 'Audio-url ontbreekt in resultaat' }, 502)
       }
 
-      const audioRes = await fetch(downloadUrl)
-      if (!audioRes.ok || !audioRes.body) {
-        return json({ error: `Audio download mislukt (${audioRes.status})` }, 502)
+      const resultFileRes = await fetch(downloadUrl)
+      if (!resultFileRes.ok || !resultFileRes.body) {
+        return json({ error: `Audio download mislukt (${resultFileRes.status})` }, 502)
       }
 
-      return new Response(audioRes.body, {
+      return new Response(resultFileRes.body, {
         status: 200,
         headers: {
-          'Content-Type': audioRes.headers.get('content-type') ?? 'audio/wav',
+          'Content-Type': resultFileRes.headers.get('content-type') ?? (isLipsync ? 'video/mp4' : 'audio/wav'),
           ...CORS_HEADERS,
         },
       })

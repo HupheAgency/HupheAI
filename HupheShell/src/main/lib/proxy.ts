@@ -213,7 +213,7 @@ export async function getFalVideoCapabilities(jwt: string): Promise<any> {
 export async function submitFalVideoJob(
   params: {
     model: string
-    prompt: string
+    prompt?: string
     imageUrl?: string
     imageUrls?: string[]
     videoUrls?: string[]
@@ -228,6 +228,10 @@ export async function submitFalVideoJob(
     seed?: number
     task?: string
     draft?: boolean
+    extraParams?: Record<string, unknown>
+    sourceDurationSeconds?: number
+    sourceWidth?: number
+    sourceHeight?: number
   },
   jwt: string,
 ): Promise<any> {
@@ -252,6 +256,10 @@ export async function submitFalVideoJob(
       seed: params.seed,
       task: params.task,
       draft: params.draft,
+      extra_params: params.extraParams,
+      source_duration_seconds: params.sourceDurationSeconds,
+      source_width: params.sourceWidth,
+      source_height: params.sourceHeight,
     }),
   })
   return handleVideoProxyResponse(res)
@@ -464,6 +472,9 @@ export async function submitFalAudioJob(
     audioFormat?: string
     keepSpeechVocal?: boolean
     promptInfluence?: number
+    videoDurationSeconds?: number
+    audioDurationSeconds?: number
+    syncMode?: string
   },
   jwt: string,
 ): Promise<any> {
@@ -490,6 +501,9 @@ export async function submitFalAudioJob(
       audio_format: params.audioFormat,
       keep_speech_vocal: params.keepSpeechVocal,
       prompt_influence: params.promptInfluence,
+      video_duration_seconds: params.videoDurationSeconds,
+      audio_duration_seconds: params.audioDurationSeconds,
+      sync_mode: params.syncMode,
     }),
   })
   return handleAudioProxyResponse(res)

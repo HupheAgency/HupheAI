@@ -65,7 +65,7 @@ export interface FalVideoJobResult {
 
 export async function runFalVideoJob(options: {
   model: string
-  prompt: string
+  prompt?: string
   imageUrl?: string
   imageUrls?: string[]
   videoUrls?: string[]
@@ -80,14 +80,18 @@ export async function runFalVideoJob(options: {
   seed?: number
   task?: string
   draft?: boolean
+  extraParams?: Record<string, unknown>
+  sourceDurationSeconds?: number
+  sourceWidth?: number
+  sourceHeight?: number
   jwt: string
   onProgress?: (p: VideoJobProgress) => void
   jobState?: FalVideoJobState
 }): Promise<FalVideoJobResult> {
-  const { model, prompt, imageUrl, imageUrls, videoUrls, audioUrls, endImageUrl, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, jwt, onProgress = () => {}, jobState } = options
+  const { model, prompt, imageUrl, imageUrls, videoUrls, audioUrls, endImageUrl, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, extraParams, sourceDurationSeconds, sourceWidth, sourceHeight, jwt, onProgress = () => {}, jobState } = options
 
   onProgress({ step: 'Video-aanvraag wordt verstuurd...', progress: 0 })
-  const job = await submitFalVideoJob({ model, prompt, imageUrl, imageUrls, videoUrls, audioUrls, endImageUrl, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft }, jwt)
+  const job = await submitFalVideoJob({ model, prompt, imageUrl, imageUrls, videoUrls, audioUrls, endImageUrl, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, extraParams, sourceDurationSeconds, sourceWidth, sourceHeight }, jwt)
   const jobId: string = job.job_id
   const pollingUrl: string | undefined = job.polling_url
   const contentUrl: string | undefined = job.content_url

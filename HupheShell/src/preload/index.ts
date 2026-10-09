@@ -176,7 +176,7 @@ contextBridge.exposeInMainWorld('api', {
   generateImage: (prompt: string, provider: string) => ipcRenderer.invoke('image:generate', prompt, provider),
   generateAtelierImage: (prompt: string, model: string, systemPrompt?: string, referenceImageSrc?: string, accessToken?: string, modelLabel?: string, maskImageSrc?: string) => ipcRenderer.invoke('image:generate-ai', { prompt, model, modelLabel, systemPrompt, referenceImageSrc, maskImageSrc, accessToken }),
   deleteLocalFile: (filePath: string) => ipcRenderer.invoke('image:delete-file', filePath),
-  generateAtelierVideo: (prompt: string, model: string, systemPrompt?: string, accessToken?: string, referenceImageSrc?: string, settings?: { duration?: number | 'auto'; resolution?: string; aspectRatio?: string; generateAudio?: boolean; seed?: number; bitrateMode?: string; codec?: string; draft?: boolean }, provider?: 'openrouter' | 'fal', references?: { imageUrls?: string[]; videoUrls?: string[]; audioUrls?: string[]; task?: string }, requestId?: string, endImageSrc?: string) =>
+  generateAtelierVideo: (prompt: string | undefined, model: string, systemPrompt?: string, accessToken?: string, referenceImageSrc?: string, settings?: { duration?: number | 'auto'; resolution?: string; aspectRatio?: string; generateAudio?: boolean; seed?: number; bitrateMode?: string; codec?: string; draft?: boolean; extraParams?: Record<string, unknown>; sourceDurationSeconds?: number; sourceWidth?: number; sourceHeight?: number }, provider?: 'openrouter' | 'fal', references?: { imageUrls?: string[]; videoUrls?: string[]; audioUrls?: string[]; task?: string }, requestId?: string, endImageSrc?: string) =>
     ipcRenderer.invoke('video:generate-ai', { prompt, model, systemPrompt, accessToken, referenceImageSrc, ...settings, provider, ...references, requestId, endImageSrc }),
   cancelVideoGeneration: (requestId: string, accessToken?: string) =>
     ipcRenderer.invoke('video:cancel-generation', { requestId, accessToken }),
@@ -190,7 +190,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('video:generate-progress', handler)
     return () => ipcRenderer.removeListener('video:generate-progress', handler)
   },
-  generateAtelierAudio: (tags: string, model: string, accessToken?: string, settings?: { lyrics?: string; duration?: number; audioUrl?: string; originalTags?: string; originalLyrics?: string; editMode?: string; extendBeforeDuration?: number; extendAfterDuration?: number; originalDuration?: number; negativePrompt?: string; maskStartSeconds?: number; maskEndSeconds?: number; videoUrl?: string; audioFormat?: string; keepSpeechVocal?: boolean; promptInfluence?: number }, requestId?: string) =>
+  generateAtelierAudio: (tags: string, model: string, accessToken?: string, settings?: { lyrics?: string; duration?: number; audioUrl?: string; originalTags?: string; originalLyrics?: string; editMode?: string; extendBeforeDuration?: number; extendAfterDuration?: number; originalDuration?: number; negativePrompt?: string; maskStartSeconds?: number; maskEndSeconds?: number; videoUrl?: string; audioFormat?: string; keepSpeechVocal?: boolean; promptInfluence?: number; videoDurationSeconds?: number; audioDurationSeconds?: number; syncMode?: string }, requestId?: string) =>
     ipcRenderer.invoke('audio:generate-ai', { tags, model, accessToken, ...settings, requestId }),
   cancelAudioGeneration: (requestId: string, accessToken?: string) =>
     ipcRenderer.invoke('audio:cancel-generation', { requestId, accessToken }),

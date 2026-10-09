@@ -58,6 +58,38 @@ interface VideoModelCapability {
   supports_draft?: boolean
   draft_rate_per_second?: number
   draft_finalize_rate_per_second?: number
+  // Resolutie-gekeyed pricing_skus hierboven is zonder audio -- deze vermenigvuldiger
+  // past op het resultaat van resolveRatePerSecond wanneer generate_audio=true en er
+  // geen eigen "_with_audio"-sku bestaat (Veo3.1/Kling-v3-pro rekenen audio als toeslag
+  // op het basistarief, niet als los tarief).
+  audio_rate_multiplier?: number
+  // Taakfamilie voor de 5 "bewerk-bestaande-video"-tools (Remove/Edit Object, Restyle,
+  // Enhance, Interpolate). Ontbreekt (undefined) = bestaand Generate-Video/Seedance-pad
+  // (text/image/reference-to-video, user-gekozen duration) -- ongewijzigd gedrag.
+  family?: 'remove_object' | 'edit_object' | 'restyle' | 'enhance' | 'interpolate'
+  // Prijsmodel voor family-modellen: 'flat_per_video' slaat resolveRatePerSecond over
+  // (VOID), 'per_second' (default wanneer family gezet is) gebruikt output_duration_source.
+  pricing_model?: 'per_second' | 'flat_per_video'
+  flat_rate_usd?: number
+  // Of de billing-duur van de gemeten BRONvideo komt (client-side duration-probe) i.p.v.
+  // een door de gebruiker gekozen duration -- alle family-modellen gebruiken 'source_video'.
+  output_duration_source?: 'source_video' | 'user_choice'
+  // Output-resolutie-afhankelijke prijstrappen (Topaz Upscale/Interpolate). max_height is
+  // de bovengrens van de trap in pixels, na eventuele upscale_factor-toepassing.
+  resolution_tiers?: { max_height: number; rate_per_second: number }[]
+  // Topaz heeft geen promptveld in zijn fal-schema -- bypass op alle 3 lagen (edge
+  // function hier, plus main/index.ts-zod-schema en useAtelierMedia's canGenerate later).
+  prompt_optional?: boolean
+  // Modelspecifieke velden die de renderer generiek rendert (zie ExtraFieldsPanel, stap 6)
+  // en die hier als enige laag gevalideerd worden via resolveExtraParams.
+  extra_fields?: Record<string, {
+    type: 'select' | 'boolean' | 'number' | 'text'
+    label: string
+    options?: string[]
+    default?: unknown
+    min?: number
+    max?: number
+  }>
 }
 
 const SUPPORTED_DURATIONS = Array.from({ length: 27 }, (_, i) => i + 4) // 4..30
@@ -96,6 +128,177 @@ const CAPABILITIES: Record<string, VideoModelCapability> = {
     draft_rate_per_second: 0.207741,
     draft_finalize_rate_per_second: 1.149696,
   },
+
+  // ── Generate Video: 3 nieuwe fal-modellen naast Seedance 2.5 (geen references/draft) ──
+  'fal-ai/veo3.1': {
+    model_id: 'fal-ai/veo3.1',
+    supported_durations: [4, 6, 8],
+    supported_resolutions: ['720p', '1080p'],
+    supported_aspect_ratios: ['16:9', '9:16', '1:1'],
+    generate_audio: true,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: {
+      duration_seconds_720p: '0.20',
+      duration_seconds_1080p: '0.20',
+    },
+    // Bevestigd in fal's pricing-tekst: met audio ~2x het stille tarief op 720p/1080p.
+    audio_rate_multiplier: 2,
+  },
+  'fal-ai/kling-video/v3/pro': {
+    model_id: 'fal-ai/kling-video/v3/pro',
+    supported_durations: [5, 10],
+    supported_resolutions: ['1080p'],
+    supported_aspect_ratios: ['16:9', '9:16', '1:1'],
+    generate_audio: true,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    // Enige van de 3 nieuwe Generate Video-modellen met end_image_url (alleen i2v).
+    supports_end_image: true,
+    pricing_skus: {
+      duration_seconds: '0.224',
+    },
+    audio_rate_multiplier: 1.5,
+  },
+  'fal-ai/wan-25-preview': {
+    model_id: 'fal-ai/wan-25-preview',
+    supported_durations: [5, 10],
+    supported_resolutions: ['480p', '720p', '1080p'],
+    supported_aspect_ratios: ['16:9', '9:16', '1:1'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: {
+      duration_seconds: '0.15',
+    },
+  },
+
+  // ── Vijf "bewerk-bestaande-video"-tools: eigen family/pricing_model, geen van de
+  // bovenstaande Generate-Video-velden (supported_durations/resolutions/aspect_ratios/
+  // generate_audio/seed/bitrate_mode/codec/supports_end_image) is hier functioneel --
+  // ze blijven alleen gezet omdat het interface ze verplicht maakt, en worden nooit
+  // gelezen buiten de submit-tak voor capability.family (zie Deno.serve hieronder). ──
+  'fal-ai/void-video-inpainting': {
+    model_id: 'fal-ai/void-video-inpainting',
+    supported_durations: [],
+    supported_resolutions: ['original'],
+    supported_aspect_ratios: ['original'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: {},
+    family: 'remove_object',
+    pricing_model: 'flat_per_video',
+    flat_rate_usd: 0.05,
+    output_duration_source: 'source_video',
+    extra_fields: {
+      mask_prompt: { type: 'text', label: 'Object-omschrijving (optioneel, anders auto-mask)' },
+      enable_pass2_refinement: { type: 'boolean', label: 'Extra verfijningspas', default: false },
+    },
+  },
+  'fal-ai/kling-video/o1/video-to-video/edit': {
+    model_id: 'fal-ai/kling-video/o1/video-to-video/edit',
+    supported_durations: [],
+    supported_resolutions: ['original'],
+    supported_aspect_ratios: ['original'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: { duration_seconds: '0.168' },
+    family: 'edit_object',
+    pricing_model: 'per_second',
+    output_duration_source: 'source_video',
+    extra_fields: {
+      keep_audio: { type: 'boolean', label: 'Originele audio behouden', default: true },
+    },
+  },
+  'fal-ai/luma-dream-machine/ray-2/modify': {
+    model_id: 'fal-ai/luma-dream-machine/ray-2/modify',
+    supported_durations: [],
+    supported_resolutions: ['original'],
+    supported_aspect_ratios: ['original'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: { duration_seconds: '0.35' },
+    family: 'restyle',
+    pricing_model: 'per_second',
+    output_duration_source: 'source_video',
+    extra_fields: {
+      mode: {
+        type: 'select',
+        label: 'Modus',
+        options: ['adhere_1', 'adhere_2', 'adhere_3', 'flex_1', 'flex_2', 'flex_3', 'reimagine_1', 'reimagine_2', 'reimagine_3'],
+        default: 'flex_1',
+      },
+    },
+  },
+  'fal-ai/topaz/upscale/video': {
+    model_id: 'fal-ai/topaz/upscale/video',
+    supported_durations: [],
+    supported_resolutions: ['original'],
+    supported_aspect_ratios: ['original'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: {},
+    family: 'enhance',
+    pricing_model: 'per_second',
+    output_duration_source: 'source_video',
+    // Output-resolutie = bron-resolutie x upscale_factor (zie resolveFamilyBaseCostUsd).
+    resolution_tiers: [
+      { max_height: 720, rate_per_second: 0.01 },
+      { max_height: 1080, rate_per_second: 0.02 },
+      { max_height: Infinity, rate_per_second: 0.08 },
+    ],
+    prompt_optional: true,
+    extra_fields: {
+      model: { type: 'select', label: 'Upscale-model', options: ['Proteus', 'Artemis-HQ', 'Gaia-2'], default: 'Proteus' },
+      upscale_factor: { type: 'number', label: 'Schaalfactor', min: 1, max: 4, default: 2 },
+      target_fps: { type: 'number', label: 'Doel-fps (optioneel)', min: 16, max: 120 },
+    },
+  },
+  'topaz/interpolate/video': {
+    model_id: 'topaz/interpolate/video',
+    supported_durations: [],
+    supported_resolutions: ['original'],
+    supported_aspect_ratios: ['original'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: {},
+    family: 'interpolate',
+    pricing_model: 'per_second',
+    output_duration_source: 'source_video',
+    // Interpolatie verandert alleen fps, niet de resolutie -- output-resolutie = bron
+    // ongewijzigd. Aion-cijfers zijn approximatief (zie plan); hoogste trap gebruikt
+    // als conservatieve schatting tot een eerste echte job dit bevestigt.
+    resolution_tiers: [
+      { max_height: 1080, rate_per_second: 0.03 },
+      { max_height: Infinity, rate_per_second: 0.06 },
+    ],
+    prompt_optional: true,
+    extra_fields: {
+      model: { type: 'select', label: 'Interpolatie-model', options: ['Apollo', 'Chronos', 'Aion'], default: 'Apollo' },
+      target_fps: { type: 'number', label: 'Doel-fps', min: 16, max: 120, default: 60 },
+      slowdown_factor: { type: 'number', label: 'Vertragingsfactor', min: 1, max: 8, default: 1 },
+    },
+  },
 }
 
 // Endpoints per model_id: text-to-video (alleen prompt), image-to-video (prompt +
@@ -108,9 +311,12 @@ const CAPABILITIES: Record<string, VideoModelCapability> = {
 // het "draft: boolean" inputveld + de draft/complete-endpoint kent (bevestigd: de
 // /us/-variant van draft/complete bestaat niet, geeft 404). Verder identieke schema's.
 const ENDPOINTS: Record<string, {
-  textToVideo: string; imageToVideo: string; referenceToVideo: string
+  textToVideo?: string; imageToVideo?: string; referenceToVideo?: string
   textToVideoDraft?: string; imageToVideoDraft?: string
   draftComplete?: string
+  // Enkelvoudig endpoint voor de 5 "bewerk-bestaande-video"-family-modellen (geen
+  // text/image/reference-varianten -- zie capability.family in de submit-actie).
+  edit?: string
 }> = {
   'bytedance/seedance-2.5': {
     textToVideo: 'bytedance/seedance-2.5/us/text-to-video',
@@ -119,6 +325,33 @@ const ENDPOINTS: Record<string, {
     textToVideoDraft: 'bytedance/seedance-2.5/text-to-video',
     imageToVideoDraft: 'bytedance/seedance-2.5/image-to-video',
     draftComplete: 'bytedance/seedance-2.5/draft/complete',
+  },
+  'fal-ai/veo3.1': {
+    textToVideo: 'fal-ai/veo3.1',
+    imageToVideo: 'fal-ai/veo3.1/image-to-video',
+  },
+  'fal-ai/kling-video/v3/pro': {
+    textToVideo: 'fal-ai/kling-video/v3/pro/text-to-video',
+    imageToVideo: 'fal-ai/kling-video/v3/pro/image-to-video',
+  },
+  'fal-ai/wan-25-preview': {
+    textToVideo: 'fal-ai/wan-25-preview/text-to-video',
+    imageToVideo: 'fal-ai/wan-25-preview/image-to-video',
+  },
+  'fal-ai/void-video-inpainting': {
+    edit: 'fal-ai/void-video-inpainting',
+  },
+  'fal-ai/kling-video/o1/video-to-video/edit': {
+    edit: 'fal-ai/kling-video/o1/video-to-video/edit',
+  },
+  'fal-ai/luma-dream-machine/ray-2/modify': {
+    edit: 'fal-ai/luma-dream-machine/ray-2/modify',
+  },
+  'fal-ai/topaz/upscale/video': {
+    edit: 'fal-ai/topaz/upscale/video',
+  },
+  'topaz/interpolate/video': {
+    edit: 'topaz/interpolate/video',
   },
 }
 
@@ -144,6 +377,113 @@ function resolveRatePerSecond(pricingSkus: Record<string, string>, resolution: s
     if (Number.isFinite(parsed)) return parsed
   }
   return null
+}
+
+// Valideert + vult defaults in voor capability.extra_fields -- de enige laag die dit
+// doet (zie plan-correctie 6: extra_params reist ongetypeerd door de overige lagen).
+function resolveExtraParams(
+  capability: VideoModelCapability,
+  raw: unknown
+): { value: Record<string, unknown> } | { error: string } {
+  const fields = capability.extra_fields ?? {}
+  const input = (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {}
+
+  for (const key of Object.keys(input)) {
+    if (!(key in fields)) return { error: `extra_params.${key} wordt niet ondersteund door dit model` }
+  }
+
+  const result: Record<string, unknown> = {}
+  for (const [key, field] of Object.entries(fields)) {
+    const value = input[key] ?? field.default
+    if (value == null) continue
+    if (field.type === 'boolean' && typeof value !== 'boolean') {
+      return { error: `extra_params.${key} moet een boolean zijn` }
+    }
+    if (field.type === 'number') {
+      if (typeof value !== 'number') return { error: `extra_params.${key} moet een getal zijn` }
+      if (field.min != null && value < field.min) return { error: `extra_params.${key} moet >= ${field.min} zijn` }
+      if (field.max != null && value > field.max) return { error: `extra_params.${key} moet <= ${field.max} zijn` }
+    }
+    if (field.type === 'text' && typeof value !== 'string') {
+      return { error: `extra_params.${key} moet tekst zijn` }
+    }
+    if (field.type === 'select' && field.options && !field.options.includes(String(value))) {
+      return { error: `extra_params.${key} moet een van: ${field.options.join(', ')} zijn` }
+    }
+    result[key] = value
+  }
+  return { value: result }
+}
+
+// Bouwt het model-specifieke fal-request-body voor de 5 family-modellen -- elk heeft
+// een eigen, incompatibel input-schema (zie plan Sectie B), vandaar de switch op family
+// in plaats van één gedeelde vorm zoals bij de Generate-Video-modellen hierboven.
+function buildFamilyFalBody(
+  capability: VideoModelCapability,
+  input: { prompt?: string; sourceVideoUrl: string; imageUrls: string[]; extraParams: Record<string, unknown> }
+): Record<string, unknown> {
+  const { prompt, sourceVideoUrl, imageUrls, extraParams } = input
+  const body: Record<string, unknown> = { video_url: sourceVideoUrl }
+  if (prompt) body.prompt = prompt
+
+  switch (capability.family) {
+    case 'remove_object':
+      if (extraParams.mask_prompt) body.mask_prompt = extraParams.mask_prompt
+      if (extraParams.enable_pass2_refinement != null) body.enable_pass2_refinement = extraParams.enable_pass2_refinement
+      break
+    case 'edit_object':
+      if (imageUrls.length) body.image_urls = imageUrls
+      if (extraParams.keep_audio != null) body.keep_audio = extraParams.keep_audio
+      break
+    case 'restyle':
+      if (imageUrls[0]) body.image_url = imageUrls[0]
+      if (extraParams.mode) body.mode = extraParams.mode
+      break
+    case 'enhance':
+      if (extraParams.model) body.model = extraParams.model
+      if (extraParams.upscale_factor != null) body.upscale_factor = extraParams.upscale_factor
+      if (extraParams.target_fps != null) body.target_fps = extraParams.target_fps
+      break
+    case 'interpolate':
+      if (extraParams.model) body.model = extraParams.model
+      if (extraParams.target_fps != null) body.target_fps = extraParams.target_fps
+      if (extraParams.slowdown_factor != null) body.slowdown_factor = extraParams.slowdown_factor
+      break
+  }
+  return body
+}
+
+// Deterministische prijsberekening (vóór reservering) voor de 5 family-modellen --
+// géén post-hoc reconciliatie tegen fal's werkelijke kosten, zie USD_TO_MILLICREDITS-
+// commentaar elders in dit bestand.
+function resolveFamilyBaseCostUsd(
+  capability: VideoModelCapability,
+  input: { sourceDurationSeconds: number; sourceHeight: number | undefined; extraParams: Record<string, unknown> }
+): number {
+  const { sourceDurationSeconds, sourceHeight, extraParams } = input
+
+  if (capability.pricing_model === 'flat_per_video') {
+    let flat = capability.flat_rate_usd ?? 0
+    if (extraParams.enable_pass2_refinement === true) flat += 0.05
+    if (!extraParams.mask_prompt) flat += 0.05 // SAM3 auto-mask zonder mask_prompt
+    return flat
+  }
+
+  if (capability.resolution_tiers) {
+    const upscaleFactor = capability.family === 'enhance' && typeof extraParams.upscale_factor === 'number'
+      ? extraParams.upscale_factor
+      : 1
+    const outputHeight = (sourceHeight ?? 1080) * upscaleFactor
+    const tier = capability.resolution_tiers.find((t) => outputHeight <= t.max_height)
+      ?? capability.resolution_tiers[capability.resolution_tiers.length - 1]
+    let rate = tier.rate_per_second
+    const targetFps = typeof extraParams.target_fps === 'number' ? extraParams.target_fps : undefined
+    if (capability.family === 'enhance' && targetFps != null && targetFps >= 50) rate *= 2
+    return rate * sourceDurationSeconds
+  }
+
+  const rate = resolveRatePerSecond(capability.pricing_skus, undefined, false) ?? 0
+  return rate * sourceDurationSeconds
 }
 
 Deno.serve(async (req: Request) => {
@@ -198,6 +538,14 @@ Deno.serve(async (req: Request) => {
           supports_draft: capability.supports_draft ?? false,
           draft_rate_per_second: capability.draft_rate_per_second ?? null,
           draft_finalize_rate_per_second: capability.draft_finalize_rate_per_second ?? null,
+          family: capability.family ?? null,
+          prompt_optional: capability.prompt_optional ?? false,
+          extra_fields: capability.extra_fields ?? null,
+          pricing_model: capability.pricing_model ?? 'per_second',
+          flat_rate_usd: capability.flat_rate_usd ?? null,
+          output_duration_source: capability.output_duration_source ?? 'user_choice',
+          resolution_tiers: capability.resolution_tiers ?? null,
+          audio_rate_multiplier: capability.audio_rate_multiplier ?? null,
         }]
       })
 
@@ -257,9 +605,8 @@ Deno.serve(async (req: Request) => {
         return json({ error: 'Te veel verzoeken. Wacht even en probeer opnieuw.', code: 'rate_limited' }, 429)
       }
 
-      const { model, prompt, image_url, image_urls, video_urls, audio_urls, end_image_url, duration, resolution, aspect_ratio, generate_audio, bitrate_mode, codec, seed, task, draft } = body
+      const { model, prompt, image_url, image_urls, video_urls, audio_urls, end_image_url, duration, resolution, aspect_ratio, generate_audio, bitrate_mode, codec, seed, task, draft, extra_params, source_duration_seconds, source_height } = body
       if (!model) return json({ error: 'model is verplicht' }, 400)
-      if (!prompt) return json({ error: 'prompt is verplicht' }, 400)
 
       const { data: modelRow, error: modelError } = await serviceClient
         .from('ai_models')
@@ -280,6 +627,95 @@ Deno.serve(async (req: Request) => {
         return json({ error: `Model '${model}' niet geconfigureerd voor fal-video`, code: 'model_not_found' }, 403)
       }
 
+      if (!prompt && !capability.prompt_optional) {
+        return json({ error: 'prompt is verplicht' }, 400)
+      }
+
+      // ── Family-modellen (Remove/Edit Object, Restyle, Enhance, Interpolate): werken op
+      // een BESTAANDE video, hebben elk hun eigen fal-schema en prijsmodel -- apart pad,
+      // los van het Generate-Video/Seedance-pad hieronder (zie plan-correcties 4/6/7/8). ──
+      if (capability.family) {
+        const familyVideoUrls: string[] = Array.isArray(video_urls) ? video_urls.filter(Boolean) : []
+        const sourceVideoUrl = familyVideoUrls[0]
+        if (!sourceVideoUrl) {
+          return json({ error: 'video_urls[0] (bronvideo) is verplicht', code: 'invalid_params' }, 400)
+        }
+        const familyImageUrls: string[] = Array.isArray(image_urls) ? image_urls.filter(Boolean) : []
+
+        const extraParamsResult = resolveExtraParams(capability, extra_params)
+        if ('error' in extraParamsResult) {
+          return json({ error: extraParamsResult.error, code: 'invalid_params' }, 400)
+        }
+        const resolvedExtraParams = extraParamsResult.value
+
+        const resolvedSourceDuration: number = typeof source_duration_seconds === 'number' && source_duration_seconds > 0
+          ? source_duration_seconds
+          : 5
+        const resolvedSourceHeight: number | undefined = typeof source_height === 'number' ? source_height : undefined
+
+        const baseCostUsd = resolveFamilyBaseCostUsd(capability, {
+          sourceDurationSeconds: resolvedSourceDuration,
+          sourceHeight: resolvedSourceHeight,
+          extraParams: resolvedExtraParams,
+        })
+        const costWithMarkup = Math.ceil(baseCostUsd * USD_TO_MILLICREDITS * (1 + aiModel.markup_pct / 100))
+
+        const { data: reservationRows, error: reserveError } = await serviceClient.rpc('reserve_credits_for_user', {
+          p_user_id: userId,
+          p_amount: costWithMarkup,
+          p_expires_minutes: 15,
+        })
+        reservationId = reservationRows?.[0]?.reservation_id
+
+        if (reserveError?.message?.includes('insufficient_balance')) {
+          return json({
+            error: 'Onvoldoende credits. Waardeer je wallet op om verder te gaan.',
+            code: 'insufficient_balance',
+          }, 402)
+        }
+        if (reserveError) throw reserveError
+
+        const falBody = buildFamilyFalBody(capability, {
+          prompt,
+          sourceVideoUrl,
+          imageUrls: familyImageUrls,
+          extraParams: resolvedExtraParams,
+        })
+
+        let submitRes: Response
+        try {
+          submitRes = await fetch(`https://queue.fal.run/${endpoints.edit!}`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Key ${FAL_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(falBody),
+          })
+        } catch (submitErr: any) {
+          await releaseReservation(reservationId!)
+          return json({ error: `Video-aanvraag mislukt: ${submitErr.message}`, code: 'upstream_error' }, 502)
+        }
+
+        if (!submitRes.ok) {
+          await releaseReservation(reservationId!)
+          const text = await submitRes.text()
+          console.error('[proxy-fal-video/submit] fal.ai error:', submitRes.status, text.slice(0, 300))
+          return json({ error: `Video-aanvraag mislukt (${submitRes.status}): ${text.slice(0, 200)}`, code: 'upstream_error' }, 502)
+        }
+
+        const data = await submitRes.json() as any
+        return json({
+          job_id: data.request_id,
+          polling_url: data.status_url,
+          content_url: data.response_url,
+          cancel_url: data.cancel_url,
+          status: data.status,
+          reservation_id: reservationId,
+          max_reservation: costWithMarkup,
+        })
+      }
+
       // duration mag ook letterlijk "auto" zijn (fal bepaalt de lengte zelf o.b.v. de
       // prompt) -- los van forceAuto hieronder, dat is de gedwongen variant bij task
       // editing/extension. resolvedDuration blijft hoe dan ook een getal, want onze
@@ -291,7 +727,10 @@ Deno.serve(async (req: Request) => {
       const resolvedDuration: number = isAutoDuration ? 5 : (duration ?? 5)
       let resolvedResolution: string = resolution ?? capability.supported_resolutions[0]
       let resolvedAspectRatio: string = aspect_ratio ?? capability.supported_aspect_ratios[0]
-      const resolvedGenerateAudio: boolean = generate_audio ?? true
+      // Modellen zonder generate_audio-ondersteuning negeren de client-waarde volledig --
+      // anders zou de prijsberekening hieronder nog een niet-bestaande audio-toeslag
+      // kunnen toepassen.
+      const resolvedGenerateAudio: boolean = capability.generate_audio ? (generate_audio ?? true) : false
 
       const resolvedImageUrls: string[] = Array.isArray(image_urls) ? image_urls.filter(Boolean) : []
       const resolvedVideoUrls: string[] = Array.isArray(video_urls) ? video_urls.filter(Boolean) : []
@@ -369,7 +808,12 @@ Deno.serve(async (req: Request) => {
         resolvedAspectRatio = 'auto'
       }
 
-      const ratePerSecond = resolveRatePerSecond(capability.pricing_skus, resolvedResolution, resolvedGenerateAudio)
+      let ratePerSecond = resolveRatePerSecond(capability.pricing_skus, resolvedResolution, resolvedGenerateAudio)
+      // Audio-toeslag als losse vermenigvuldiger (Veo3.1/Kling-v3-pro) -- alleen van
+      // toepassing wanneer pricing_skus geen eigen "_with_audio"-sku heeft geleverd.
+      if (ratePerSecond != null && resolvedGenerateAudio && capability.audio_rate_multiplier) {
+        ratePerSecond *= capability.audio_rate_multiplier
+      }
       // fal's reference-to-video rekent 0.6x bij videoreferenties (bevestigd in fal's
       // pricing-tekst: "$0.34056/s @ 720p met video inputs" = 0.5676 * 0.6).
       const videoRefDiscount = resolvedVideoUrls.length > 0 ? 0.6 : 1
@@ -407,10 +851,13 @@ Deno.serve(async (req: Request) => {
         // anders het getal dat de gebruiker koos) gebaseerd, zie baseCostUsd hierboven.
         duration: (forceAuto || isAutoDuration) ? 'auto' : String(resolvedDuration),
         aspect_ratio: resolvedAspectRatio,
-        generate_audio: resolvedGenerateAudio,
-        bitrate_mode: resolvedBitrateMode,
-        codec: resolvedCodec,
       }
+      // Alleen zetten wanneer het model het veld daadwerkelijk kent -- anders stuurt fal
+      // soms een validatiefout terug op een onbekend veld (bevestigde bug, zie plan-
+      // correctie 3; end_image_url/seed waren hier al wel correct op gated).
+      if (capability.generate_audio) falBody.generate_audio = resolvedGenerateAudio
+      if (capability.bitrate_mode) falBody.bitrate_mode = resolvedBitrateMode
+      if (capability.codec) falBody.codec = resolvedCodec
       if (resolvedDraft) falBody.draft = true
       if (hasReferences) {
         falBody.task = resolvedTask

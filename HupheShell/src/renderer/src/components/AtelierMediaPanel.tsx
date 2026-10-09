@@ -58,6 +58,8 @@ export function AtelierMediaCreationPanel({
   const mediaType = type === 'images' || type === 'video' || type === 'audio' ? type : null
   const tools = mediaType === 'images' ? IMAGE_EDIT_TOOLS : (mediaType === 'video' ? VIDEO_EDIT_TOOLS : [])
   const [activeToolId, setActiveToolId] = useState('select')
+  const activeVideoTool = mediaType === 'video' ? VIDEO_EDIT_TOOLS.find((t) => t.id === activeToolId) : undefined
+  const forcedModelId = activeVideoTool?.modelId
   const [inputFileSrc, setInputFileSrc] = useState<string | null>(null)
   const [inputFileName, setInputFileName] = useState<string | null>(null)
   const [endFrameSrc, setEndFrameSrc] = useState<string | null>(null)
@@ -195,12 +197,17 @@ export function AtelierMediaCreationPanel({
     setAudioMaskStart,
     audioMaskEnd,
     setAudioMaskEnd,
+    audioSyncMode,
+    setAudioSyncMode,
+    videoExtraParams,
+    updateVideoExtraParam,
   } = useAtelierMediaCreator({
     mediaType,
     project,
     onProjectGenerated,
     initialImageSrc,
     setVideoJobs,
+    forcedModelId,
   })
   const [canvasScale, setCanvasScale] = useState(1)
   const [canvasOffset, setCanvasOffset] = useState({ x: 0, y: 0 })
@@ -755,7 +762,7 @@ export function AtelierMediaCreationPanel({
                   draggable={false}
                   onError={(e) => console.error('[AtelierMedia] img load failed, src:', (e.target as HTMLImageElement).src)}
                 />
-              ) : mediaType === 'audio' ? (
+              ) : mediaType === 'audio' && activeItem.assetKind !== 'video' ? (
                 <div className={['flex flex-col items-center gap-4 rounded-2xl border border-white/[0.08] bg-[#151515] p-8', generating ? 'opacity-30' : ''].join(' ')}>
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="text-[#facc15]">
                     <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
@@ -868,7 +875,7 @@ export function AtelierMediaCreationPanel({
                 >
                   {mediaType === 'images' ? (
                     <img src={item.src} alt="" className="h-full w-full object-cover" draggable={false} />
-                  ) : mediaType === 'audio' ? (
+                  ) : mediaType === 'audio' && item.assetKind !== 'video' ? (
                     <div className="flex h-full w-full items-center justify-center bg-white/[0.04] text-white/40">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
@@ -1097,9 +1104,9 @@ export function AtelierMediaCreationPanel({
                 <button
                   type="button"
                   onClick={() => setModelMenuOpen((open) => !open)}
-                  disabled={modelsLoading}
+                  disabled={modelsLoading || !!forcedModelId}
                   className="flex h-8 items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.03] px-2 text-white/60 transition-colors hover:border-white/[0.12] hover:bg-white/[0.06] hover:text-white disabled:opacity-40"
-                  title={selectedModel?.label ?? 'Model kiezen'}
+                  title={forcedModelId ? `Model vastgezet door "${activeVideoTool?.label}"` : (selectedModel?.label ?? 'Model kiezen')}
                   aria-label={selectedModel ? `Model kiezen, huidig model ${selectedModel.label}` : 'Model kiezen'}
                 >
                   {modelsLoading ? (
@@ -1128,9 +1135,9 @@ export function AtelierMediaCreationPanel({
                         />
                       </div>
                       <div className="flex-1 overflow-y-auto p-1.5">
-                        {filteredModels.length === 0 ? (
+                        {(() => { const visibleModels = mediaType === 'video' ? filteredModels.filter((m) => !VIDEO_TOOL_MODEL_IDS.has(m.model) && !VIDEO_TOOL_MODEL_IDS.has(m.id)) : filteredModels; return visibleModels.length === 0 ? (
                           <p className="px-3 py-2 text-xs text-white/25">Geen modellen gevonden</p>
-                        ) : filteredModels.map((model) => {
+                        ) : visibleModels.map((model) => {
                           const selected = model.id === selectedModel?.id
                           return (
                             <button
@@ -1153,7 +1160,8 @@ export function AtelierMediaCreationPanel({
                               )}
                             </button>
                           )
-                        })}
+                        })
+                      })()}
                       </div>
                     </div>
                   </div>
@@ -1235,6 +1243,10 @@ export function AtelierMediaCreationPanel({
         onAudioMaskStartChange={setAudioMaskStart}
         audioMaskEnd={audioMaskEnd}
         onAudioMaskEndChange={setAudioMaskEnd}
+        videoExtraParams={videoExtraParams}
+        onVideoExtraParamChange={updateVideoExtraParam}
+        audioSyncMode={audioSyncMode}
+        onAudioSyncModeChange={setAudioSyncMode}
         scene3dProjects={existingProjects}
         scene3dProjectsLoading={scene3dProjectsLoading}
         onSelectScene3DProject={handleSelectScene3DProject}
@@ -1373,6 +1385,8 @@ interface AtelierEditTool {
   label: string
   description: string
   icon: AtelierEditIcon
+  modelId?: string
+  imageLimit?: number
 }
 
 const IMAGE_EDIT_TOOLS: AtelierEditTool[] = [
@@ -1395,14 +1409,18 @@ const VIDEO_EDIT_TOOLS: AtelierEditTool[] = [
   { id: 'motion', label: 'Camerabeweging', description: 'Push, pan, zoom of handheld.', icon: 'motion' },
   { id: 'subject', label: 'Onderwerp volgen', description: 'Tracking op persoon of object.', icon: 'subject' },
   { id: 'mask', label: 'Masker tekenen', description: 'Gebied kiezen voor lokale edits.', icon: 'mask' },
-  { id: 'extend', label: 'Clip verlengen', description: 'Extra seconden genereren.', icon: 'extend' },
+  { id: 'remove_object', label: 'Object verwijderen', description: 'Verwijder een storend object uit een video (VOID).', icon: 'remove', modelId: 'fal-ai/void-video-inpainting' },
+  { id: 'edit_object', label: 'Object bewerken', description: 'Wijzig een object in een video via prompt (Kling O1 Edit).', icon: 'subject', modelId: 'fal-ai/kling-video/o1/video-to-video/edit', imageLimit: 4 },
+  { id: 'restyle', label: 'Stijl wijzigen', description: 'Herstijl een clip met Luma Ray 2 Modify.', icon: 'light', modelId: 'fal-ai/luma-dream-machine/ray-2/modify', imageLimit: 1 },
   { id: 'stabilize', label: 'Stabiliseren', description: 'Rustiger beeld en minder jitter.', icon: 'stabilize' },
-  { id: 'upscale', label: 'Vergroten naar 4K', description: 'Resolutie opschalen voor export.', icon: 'upscale' },
+  { id: 'enhance', label: 'Verbeteren', description: 'Scherpte en resolutie opschalen (Topaz Upscale).', icon: 'upscale', modelId: 'fal-ai/topaz/upscale/video' },
   { id: 'cut', label: 'Uitsnede', description: 'Formaat, crop en focusgebied.', icon: 'cut' },
   { id: 'captions', label: 'Ondertitels', description: 'Captions of tekstlagen toevoegen.', icon: 'captions' },
   { id: 'audio', label: 'Audio', description: 'Voice-over, muziek of stilte.', icon: 'audio' },
-  { id: 'loop', label: 'Loop maken', description: 'Naadloze herhaling voorbereiden.', icon: 'loop' },
+  { id: 'smooth_slowmo', label: 'Smooth / Slowmo', description: 'Beweging gladstrijken of vertragen (Topaz Interpolate).', icon: 'loop', modelId: 'topaz/interpolate/video' },
 ]
+
+const VIDEO_TOOL_MODEL_IDS = new Set(VIDEO_EDIT_TOOLS.map((tool) => tool.modelId).filter((id): id is string => !!id))
 
 function AtelierMediaEditSidebar({
   mediaType,
@@ -1446,6 +1464,10 @@ function AtelierMediaEditSidebar({
   onAudioMaskStartChange,
   audioMaskEnd,
   onAudioMaskEndChange,
+  videoExtraParams,
+  onVideoExtraParamChange,
+  audioSyncMode,
+  onAudioSyncModeChange,
   onScene3DResult,
   scene3dProjects,
   scene3dProjectsLoading,
@@ -1494,6 +1516,10 @@ function AtelierMediaEditSidebar({
   onAudioMaskStartChange?: (value: number | undefined) => void
   audioMaskEnd?: number
   onAudioMaskEndChange?: (value: number | undefined) => void
+  videoExtraParams?: Record<string, unknown>
+  onVideoExtraParamChange?: (key: string, value: unknown) => void
+  audioSyncMode?: string
+  onAudioSyncModeChange?: (value: string) => void
   onScene3DResult?: (imageUrl: string) => void
   scene3dProjects?: any[]
   scene3dProjectsLoading?: boolean
@@ -1558,6 +1584,10 @@ function AtelierMediaEditSidebar({
           onAudioMaskStartChange={onAudioMaskStartChange}
           audioMaskEnd={audioMaskEnd}
           onAudioMaskEndChange={onAudioMaskEndChange}
+          videoExtraParams={videoExtraParams}
+          onVideoExtraParamChange={onVideoExtraParamChange}
+          audioSyncMode={audioSyncMode}
+          onAudioSyncModeChange={onAudioSyncModeChange}
         />
       )}
     </AtelierRightPanel>
@@ -1945,6 +1975,10 @@ function AtelierToolDetailPanel({
   onAudioMaskStartChange,
   audioMaskEnd,
   onAudioMaskEndChange,
+  videoExtraParams,
+  onVideoExtraParamChange,
+  audioSyncMode,
+  onAudioSyncModeChange,
 }: {
   tool?: AtelierEditTool
   mediaType: AtelierMediaProjectType
@@ -1982,6 +2016,10 @@ function AtelierToolDetailPanel({
   onAudioMaskStartChange?: (value: number | undefined) => void
   audioMaskEnd?: number
   onAudioMaskEndChange?: (value: number | undefined) => void
+  videoExtraParams?: Record<string, unknown>
+  onVideoExtraParamChange?: (key: string, value: unknown) => void
+  audioSyncMode?: string
+  onAudioSyncModeChange?: (value: string) => void
 }) {
   if (!tool) {
     if (mediaType === 'video') {
@@ -2025,6 +2063,8 @@ function AtelierToolDetailPanel({
           onMaskStartChange={onAudioMaskStartChange ?? (() => {})}
           maskEnd={audioMaskEnd}
           onMaskEndChange={onAudioMaskEndChange ?? (() => {})}
+          syncMode={audioSyncMode ?? 'cut_off'}
+          onSyncModeChange={onAudioSyncModeChange ?? (() => {})}
         />
       )
     }
@@ -2118,6 +2158,15 @@ function AtelierToolDetailPanel({
             </p>
           </div>
         </div>
+      ) : tool.modelId ? (
+        <ToolVideoInputPanel
+          tool={tool}
+          capability={videoCapability}
+          references={videoReferences ?? []}
+          onReferencesChange={onVideoReferencesChange ?? (() => {})}
+          extraParams={videoExtraParams ?? {}}
+          onExtraParamChange={onVideoExtraParamChange ?? (() => {})}
+        />
       ) : (
         <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
           <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Status</p>
@@ -2257,7 +2306,7 @@ function VideoReferenceKindRow({
       return
     }
 
-    const startUpload = (durationSec?: number) => {
+    const startUpload = (durationSec?: number, width?: number, height?: number) => {
       const reader = new FileReader()
       reader.onload = async (ev) => {
         const dataUrl = ev.target?.result as string
@@ -2265,7 +2314,7 @@ function VideoReferenceKindRow({
           onChange((prev) => [...prev, { id, kind, status: 'ready', previewSrc: dataUrl, fileUrl: dataUrl, fileName: file.name }])
           return
         }
-        onChange((prev) => [...prev, { id, kind, status: 'uploading', fileName: file.name, durationSec }])
+        onChange((prev) => [...prev, { id, kind, status: 'uploading', fileName: file.name, durationSec, width, height }])
         try {
           const api = (window as any).api
           const { data: { session } } = await supabase!.auth.getSession()
@@ -2292,10 +2341,14 @@ function VideoReferenceKindRow({
     mediaEl.src = objectUrl
     mediaEl.onloadedmetadata = () => {
       const dur = mediaEl.duration
+      // Alleen video heeft videoWidth/videoHeight -- Topaz Upscale/Interpolate gebruiken
+      // dit om vóór reservering de output-resolutie-prijstrap te bepalen.
+      const width = kind === 'video' ? (mediaEl as HTMLVideoElement).videoWidth || undefined : undefined
+      const height = kind === 'video' ? (mediaEl as HTMLVideoElement).videoHeight || undefined : undefined
       URL.revokeObjectURL(objectUrl)
       if (!Number.isFinite(dur)) {
         // Kon de duur niet meten (bv. ongebruikelijke codec) -- laat fal zelf valideren.
-        startUpload()
+        startUpload(undefined, width, height)
         return
       }
       if (dur < REFERENCE_MIN_DURATION_SEC || dur > REFERENCE_MAX_DURATION_SEC) {
@@ -2313,7 +2366,7 @@ function VideoReferenceKindRow({
         }])
         return
       }
-      startUpload(dur)
+      startUpload(dur, width, height)
     }
     mediaEl.onerror = () => {
       URL.revokeObjectURL(objectUrl)
@@ -2370,6 +2423,112 @@ function VideoReferenceKindRow({
         </button>
       )}
     </>
+  )
+}
+
+// Generieke renderer voor capability.extra_fields (VOID/Kling O1 Edit/Ray 2 Modify/
+// Topaz) -- vermijdt 5 losse handgeschreven settings-panelen, zie plan Sectie B/6.
+function ExtraFieldsPanel({
+  fields,
+  values,
+  onChange,
+}: {
+  fields: Record<string, { type: 'select' | 'boolean' | 'number'; label: string; options?: string[]; default?: unknown; min?: number; max?: number }>
+  values: Record<string, unknown>
+  onChange: (key: string, value: unknown) => void
+}) {
+  const entries = Object.entries(fields)
+  if (entries.length === 0) return null
+
+  return (
+    <>
+      {entries.map(([key, field]) => {
+        const value = values[key] ?? field.default
+        if (field.type === 'boolean') {
+          return (
+            <div key={key} className="flex items-center justify-between rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+              <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">{field.label}</p>
+              <Toggle checked={!!value} onChange={(checked) => onChange(key, checked)} />
+            </div>
+          )
+        }
+        if (field.type === 'select') {
+          return (
+            <div key={key} className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+              <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">{field.label}</p>
+              <select
+                value={(value as string) ?? field.options?.[0] ?? ''}
+                onChange={(e) => onChange(key, e.target.value)}
+                className="w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+              >
+                {(field.options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+              </select>
+            </div>
+          )
+        }
+        return (
+          <div key={key} className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">{field.label}</p>
+            <input
+              type="number"
+              min={field.min}
+              max={field.max}
+              value={value == null ? '' : (value as number)}
+              onChange={(e) => onChange(key, e.target.value === '' ? undefined : Number(e.target.value))}
+              className="w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+            />
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+// Dunne wrapper rond de kale VideoReferenceKindRow voor de 5 tool-gebonden
+// videomodellen (VOID/Kling O1 Edit/Ray 2 Modify/Topaz Upscale/Interpolate) --
+// bewust niet VideoReferencesPanel, die blijft Seedance-specifiek (Modus-pills).
+function ToolVideoInputPanel({
+  tool,
+  capability,
+  references,
+  onReferencesChange,
+  extraParams,
+  onExtraParamChange,
+}: {
+  tool: AtelierEditTool
+  capability?: AtelierVideoCapability
+  references: VideoReferenceSlot[]
+  onReferencesChange: (updater: VideoReferenceSlot[] | ((prev: VideoReferenceSlot[]) => VideoReferenceSlot[])) => void
+  extraParams: Record<string, unknown>
+  onExtraParamChange: (key: string, value: unknown) => void
+}) {
+  const videoSlot = references.find((r) => r.kind === 'video')
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+        <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Bronvideo</p>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <VideoReferenceKindRow kind="video" label="Video" limit={1} accept="video/mp4,video/webm,video/quicktime" references={references} onChange={onReferencesChange} />
+        </div>
+        {videoSlot?.durationSec != null && (
+          <p className="mt-2 text-[10px] text-white/30">Lengte: {videoSlot.durationSec.toFixed(1)}s</p>
+        )}
+      </div>
+
+      {!!tool.imageLimit && (
+        <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+          <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Referentiebeelden (optioneel)</p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <VideoReferenceKindRow kind="image" label="Image" limit={tool.imageLimit} accept="image/png,image/jpeg,image/webp,image/gif" references={references} onChange={onReferencesChange} />
+          </div>
+        </div>
+      )}
+
+      {capability?.extra_fields && Object.keys(capability.extra_fields).length > 0 && (
+        <ExtraFieldsPanel fields={capability.extra_fields} values={extraParams} onChange={onExtraParamChange} />
+      )}
+    </div>
   )
 }
 
@@ -2780,6 +2939,8 @@ function AudioGenerationSettingsPanel({
   onMaskStartChange,
   maskEnd,
   onMaskEndChange,
+  syncMode,
+  onSyncModeChange,
 }: {
   settings?: AudioGenerationSettings | null
   onChange?: (patch: Partial<AudioGenerationSettings>) => void
@@ -2800,6 +2961,8 @@ function AudioGenerationSettingsPanel({
   onMaskStartChange: (value: number | undefined) => void
   maskEnd?: number
   onMaskEndChange: (value: number | undefined) => void
+  syncMode?: string
+  onSyncModeChange?: (value: string) => void
 }) {
   if (!capability || !settings) {
     return (
@@ -2850,6 +3013,23 @@ function AudioGenerationSettingsPanel({
             {videoReference?.durationSec != null && (
               <p className="mt-2 text-[10px] text-white/30">Lengte: {videoReference.durationSec.toFixed(1)}s</p>
             )}
+          </div>
+        )}
+
+        {capability.family === 'sync_lipsync' && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">Sync-modus</p>
+            <select
+              value={syncMode ?? 'cut_off'}
+              onChange={(e) => onSyncModeChange?.(e.target.value)}
+              className="w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
+            >
+              <option value="cut_off">Cut off (korste van beide afknippen)</option>
+              <option value="loop">Loop (kortste herhalen)</option>
+              <option value="bounce">Bounce (kortste heen-en-weer afspelen)</option>
+              <option value="silence">Silence (stilte/freeze toevoegen)</option>
+              <option value="remap">Remap (tijd herverdelen)</option>
+            </select>
           </div>
         )}
 

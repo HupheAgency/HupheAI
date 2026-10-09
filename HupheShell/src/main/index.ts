@@ -2754,7 +2754,7 @@ ipcMain.handle('video:upload-reference', async (_event, payload: {
 })
 
 ipcMain.handle('video:generate-ai', async (_event, payload: {
-  prompt: string
+  prompt?: string
   model: string
   systemPrompt?: string
   accessToken?: string
@@ -2772,11 +2772,15 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
   seed?: number
   task?: string
   draft?: boolean
+  extraParams?: Record<string, unknown>
+  sourceDurationSeconds?: number
+  sourceWidth?: number
+  sourceHeight?: number
   provider?: 'openrouter' | 'fal'
   requestId?: string
 }) => {
   payload = parseIpcPayload('video:generate-ai', z.object({
-    prompt: z.string().trim().min(1).max(12000),
+    prompt: z.string().trim().max(12000).optional(),
     model: z.string().trim().min(1).max(200),
     systemPrompt: z.string().max(6000).optional(),
     accessToken: AccessTokenSchema,
@@ -2794,10 +2798,14 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
     seed: z.number().int().optional(),
     task: z.string().trim().min(1).max(20).optional(),
     draft: z.boolean().optional(),
+    extraParams: z.record(z.string(), z.unknown()).optional(),
+    sourceDurationSeconds: z.number().min(0).max(3600).optional(),
+    sourceWidth: z.number().int().min(1).max(16000).optional(),
+    sourceHeight: z.number().int().min(1).max(16000).optional(),
     provider: z.enum(['openrouter', 'fal']).optional(),
     requestId: z.string().trim().min(1).max(100).optional(),
   }), payload)
-  const { prompt, model, systemPrompt, accessToken, referenceImageSrc, endImageSrc, imageUrls, videoUrls, audioUrls, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, provider, requestId } = payload
+  const { prompt, model, systemPrompt, accessToken, referenceImageSrc, endImageSrc, imageUrls, videoUrls, audioUrls, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, extraParams, sourceDurationSeconds, sourceWidth, sourceHeight, provider, requestId } = payload
   const effectiveJwtVideo = accessToken ?? cachedJwt
   if (!effectiveJwtVideo) return { ok: false, error: 'Niet ingelogd.' }
   const { runOpenRouterVideoJob } = await import('./lib/video-job')
@@ -2809,7 +2817,7 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
   const referenceImage = referenceImageSrc ? resolveImageSrcToUploadable(referenceImageSrc) : null
   const endImage = endImageSrc ? resolveImageSrcToUploadable(endImageSrc) : null
 
-  const finalPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt
+  const finalPrompt = systemPrompt && prompt ? `${systemPrompt}\n\n${prompt}` : (prompt || systemPrompt)
 
   const sendProgress = (info: { step: string; progress: number }) => {
     try { if (!_event.sender.isDestroyed()) _event.sender.send('video:generate-progress', info) } catch { /* renderer navigated away */ }
@@ -2837,6 +2845,10 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
         seed,
         task,
         draft,
+        extraParams,
+        sourceDurationSeconds,
+        sourceWidth,
+        sourceHeight,
         jwt: effectiveJwtVideo,
         onProgress: sendProgress,
         jobState,
@@ -2847,7 +2859,7 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
     } else {
       res = await runOpenRouterVideoJob({
         model,
-        prompt: finalPrompt,
+        prompt: finalPrompt ?? '',
         imageUrl: referenceImage ?? undefined,
         // 'auto' is een fal-only concept (zie runFalVideoJob hierboven) -- OpenRouter
         // kent alleen een numerieke duration, dus die waarde komt hier nooit vandaan.
@@ -2940,6 +2952,9 @@ ipcMain.handle('audio:generate-ai', async (_event, payload: {
   audioFormat?: string
   keepSpeechVocal?: boolean
   promptInfluence?: number
+  videoDurationSeconds?: number
+  audioDurationSeconds?: number
+  syncMode?: string
   accessToken?: string
   requestId?: string
 }) => {
@@ -2962,6 +2977,9 @@ ipcMain.handle('audio:generate-ai', async (_event, payload: {
     audioFormat: z.string().trim().min(1).max(20).optional(),
     keepSpeechVocal: z.boolean().optional(),
     promptInfluence: z.number().min(0).max(1).optional(),
+    videoDurationSeconds: z.number().min(0).max(600).optional(),
+    audioDurationSeconds: z.number().min(0).max(600).optional(),
+    syncMode: z.string().trim().min(1).max(20).optional(),
     accessToken: AccessTokenSchema,
     requestId: z.string().trim().min(1).max(100).optional(),
   }), payload)
@@ -2970,6 +2988,7 @@ ipcMain.handle('audio:generate-ai', async (_event, payload: {
     editMode, extendBeforeDuration, extendAfterDuration, originalDuration,
     negativePrompt, maskStartSeconds, maskEndSeconds,
     videoUrl, audioFormat, keepSpeechVocal, promptInfluence,
+    videoDurationSeconds, audioDurationSeconds, syncMode,
     accessToken, requestId,
   } = payload
   const effectiveJwtAudio = accessToken ?? cachedJwt
@@ -3003,12 +3022,20 @@ ipcMain.handle('audio:generate-ai', async (_event, payload: {
       audioFormat,
       keepSpeechVocal,
       promptInfluence,
+      videoDurationSeconds,
+      audioDurationSeconds,
+      syncMode,
       jwt: effectiveJwtAudio,
       onProgress: sendProgress,
       jobState,
     })
     const contentType = res.headers.get('content-type') ?? ''
-    const ext = contentType.includes('mpeg') ? 'mp3' : contentType.includes('ogg') ? 'ogg' : 'wav'
+    const ext = contentType.includes('mpeg') ? 'mp3'
+      : contentType.includes('ogg') ? 'ogg'
+      : contentType.includes('quicktime') ? 'mov'
+      : contentType.includes('webm') ? 'webm'
+      : contentType.includes('mp4') ? 'mp4'
+      : 'wav'
     const buf = Buffer.from(await res.arrayBuffer())
     const filePath = join(tmpdir(), `huphe_generated_audio_${Date.now()}.${ext}`)
     writeFileSync(filePath, buf)

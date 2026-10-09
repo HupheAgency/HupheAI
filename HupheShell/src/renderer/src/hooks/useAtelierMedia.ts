@@ -26,6 +26,20 @@ export interface AtelierVideoCapability {
   supports_draft?: boolean
   draft_rate_per_second?: number
   draft_finalize_rate_per_second?: number
+  // Metadata voor de generieke, tool-gebonden modellen (VOID/Kling O1 Edit/Ray 2
+  // Modify/Topaz) -- renderer bouwt hieruit automatisch de juiste extra-velden-UI,
+  // de edge function valideert/whitelist dezelfde set server-side.
+  extra_fields?: Record<string, { type: 'select' | 'boolean' | 'number'; label: string; options?: string[]; default?: unknown; min?: number; max?: number }>
+  // Topaz Upscale/Interpolate hebben geen promptveld in hun fal-schema.
+  prompt_optional?: boolean
+  // 'flat_per_video' (VOID) negeert resolveRatePerSecond en gebruikt flat_rate_usd
+  // + extra_params-modifiers i.p.v. duration x rate; default/ongezet = 'per_second'.
+  pricing_model?: 'per_second' | 'flat_per_video'
+  // 'source_video' (Kling O1 Edit/Ray 2/Topaz) billt op de gemeten bronvideo-lengte
+  // i.p.v. een door de gebruiker gekozen duration ('user_choice', het bestaande gedrag).
+  output_duration_source?: 'user_choice' | 'source_video'
+  // Prijsvermenigvuldiger wanneer generate_audio aan staat (Veo3.1/Kling-v3-pro).
+  audio_rate_multiplier?: number
 }
 
 export interface AtelierAudioCapability {
@@ -33,7 +47,7 @@ export interface AtelierAudioCapability {
   provider?: string
   markup_pct: number
   audio_cost_estimate: number
-  family: 'ace_step' | 'stable_audio' | 'sonilo'
+  family: 'ace_step' | 'stable_audio' | 'sonilo' | 'sync_lipsync'
   rate_per_second: number
   requires_reference: boolean
   requires_original_tags: boolean
@@ -46,6 +60,7 @@ export interface AtelierAudioCapability {
   max_duration?: number
   default_duration?: number
   requires_video_reference?: boolean
+  requires_audio_reference?: boolean
   supports_audio_format?: boolean
   supports_keep_speech_vocal?: boolean
   supports_prompt_influence?: boolean
@@ -86,6 +101,10 @@ export interface VideoReferenceSlot {
   // gemeten duur (video/audio), gebruikt om fal's combinatie-limiet (max 30.2s totaal
   // per modaliteit) client-side te controleren vóór upload.
   durationSec?: number
+  // alleen voor kind 'video' -- gemeten bronresolutie, gebruikt door Topaz
+  // Upscale/Interpolate om vóór reservering de juiste prijstrap te bepalen.
+  width?: number
+  height?: number
 }
 
 export type AtelierMediaProjectType = 'images' | 'video' | 'audio'
@@ -105,6 +124,11 @@ export interface AtelierMediaAsset {
   isDraft?: boolean
   draftId?: string
   draftDuration?: number
+  // Alleen gezet wanneer het resultaat afwijkt van het paneel-mediaType -- bv. Sync
+  // Lipsync v2 draait in Audio-modus maar levert een video op; de preview/thumbnail-
+  // strip rendert dan op assetKind i.p.v. het paneel-brede mediaType.
+  assetKind?: AtelierMediaProjectType
+  mimeType?: string
 }
 
 export interface AtelierMediaProject {
@@ -203,12 +227,17 @@ export function useAtelierMediaCreator({
   onProjectGenerated,
   initialImageSrc,
   setVideoJobs,
+  forcedModelId,
 }: {
   mediaType: AtelierMediaProjectType | null
   project?: AtelierMediaProject | null
   onProjectGenerated?: (project: AtelierMediaProject) => void
   initialImageSrc?: string | null
   setVideoJobs?: (updater: (jobs: AtelierVideoJob[]) => AtelierVideoJob[]) => void
+  // Zet door een actieve video-sidebar-tool (VOID/Kling O1 Edit/Ray 2/Topaz) om het
+  // model vast te zetten zonder selectedModelId te overschrijven -- zo herstelt de
+  // generieke dropdown bij terugkeer naar 'select' gewoon de vorige keuze.
+  forcedModelId?: string
 }) {
   const initialImageSrcRef = useRef(initialImageSrc)
   // requestId van de video-generatie die nu loopt (zo ja) -- cancelGeneration()
@@ -248,6 +277,12 @@ export function useAtelierMediaCreator({
   const [audioNegativePrompt, setAudioNegativePrompt] = useState('')
   const [audioMaskStart, setAudioMaskStart] = useState<number | undefined>(undefined)
   const [audioMaskEnd, setAudioMaskEnd] = useState<number | undefined>(undefined)
+  // Sync Lipsync v2's output-lengte-modus (cut_off/loop/bounce/silence/remap).
+  const [audioSyncMode, setAudioSyncMode] = useState<string>('cut_off')
+  // Ongetypeerde parameter-bag voor de tool-gebonden videomodellen (VOID's mask_prompt,
+  // Ray 2's mode, Topaz' model/target_fps/slowdown_factor, ...) -- gevuld vanuit
+  // capability.extra_fields, alleen server-side gevalideerd (zie plan Sectie B/6).
+  const [videoExtraParams, setVideoExtraParams] = useState<Record<string, unknown>>({})
 
   useEffect(() => {
     if (!mediaType) return
@@ -309,6 +344,38 @@ export function useAtelierMediaCreator({
           const allowedMatch = allowedModels.find((a) => a.id === model.id || a.model === model.model)
           return allowedMatch?.provider ? { ...model, provider: allowedMatch.provider } : model
         })
+
+      // fal-only modellen (bv. fal-ai/veo3.1) staan niet in OpenRouter's catalogus en
+      // kunnen dus nooit via de zoekactie hierboven in nextModels terechtkomen, hoe
+      // goed de server-side fal-config ook is. De capabilities-endpoints zijn de
+      // echte DB/edge-function-bron -- voeg elk geconfigureerd allowedModel dat daar
+      // als werkend model voorkomt en nog niet in nextModels staat alsnog toe.
+      if (mediaType === 'video' || mediaType === 'audio') {
+        try {
+          const { data: { session } } = await supabase!.auth.getSession()
+          const capRes = mediaType === 'video'
+            ? await api.getVideoCapabilities(session?.access_token ?? undefined)
+            : await api.getAudioCapabilities(session?.access_token ?? undefined)
+          if (!cancelled && capRes?.ok) {
+            const existingIds = new Set(nextModels.map((model) => model.model))
+            for (const cap of capRes.models ?? []) {
+              const allowedMatch = allowedModels.find((a) => a.model === cap.model_id || a.id === cap.model_id)
+              if (!allowedMatch || existingIds.has(cap.model_id)) continue
+              nextModels.push({
+                id: allowedMatch.id,
+                label: allowedMatch.label,
+                model: cap.model_id,
+                modality: allowedMatch.modality,
+                provider: allowedMatch.provider ?? 'fal',
+              })
+              existingIds.add(cap.model_id)
+            }
+          }
+        } catch {
+          // Zonder live fal-capabilities blijft de lijst beperkt tot het OpenRouter-resultaat.
+        }
+      }
+
       if (nextModels.length === 0 && allowedModels.length > 0) {
         nextModels = allowedModels
           .filter((model) => model.modality === (mediaType === 'images' ? 'image' : mediaType === 'audio' ? 'audio' : 'video'))
@@ -416,7 +483,7 @@ export function useAtelierMediaCreator({
     setError('')
   }, [mediaType, project?.id, project?.assets?.length, project?.src])
 
-  const selectedModel = models.find((model) => model.id === selectedModelId)
+  const selectedModel = models.find((model) => model.id === (forcedModelId || selectedModelId))
     ?? models.find((model) => project?.model && model.model === project.model)
     ?? models[0]
   const q = modelQuery.trim().toLowerCase()
@@ -434,6 +501,7 @@ export function useAtelierMediaCreator({
   const canGenerate = !!mediaType && !!selectedModel && !generating && (
     prompt.trim().length > 0
     || (mediaType === 'audio' && !!selectedAudioCapability?.prompt_optional && videoReference?.status === 'ready')
+    || (mediaType === 'video' && !!selectedVideoCapability?.prompt_optional && videoReferences.some((r) => r.kind === 'video' && r.status === 'ready'))
   )
 
   useEffect(() => {
@@ -486,6 +554,18 @@ export function useAtelierMediaCreator({
   }, [mediaType, selectedModel?.model])
 
   useEffect(() => {
+    if (mediaType !== 'video' || !selectedModel) { setVideoExtraParams({}); return }
+    const capability = videoCapabilities.find((c) => c.model_id === selectedModel.model)
+    const fields = capability?.extra_fields
+    if (!fields) { setVideoExtraParams({}); return }
+    const defaults: Record<string, unknown> = {}
+    for (const [key, field] of Object.entries(fields)) {
+      if (field.default !== undefined) defaults[key] = field.default
+    }
+    setVideoExtraParams(defaults)
+  }, [mediaType, selectedModel?.model, videoCapabilities])
+
+  useEffect(() => {
     setAudioReference(null)
     setVideoReference(null)
     setAudioOriginalTags('')
@@ -493,6 +573,7 @@ export function useAtelierMediaCreator({
     setAudioNegativePrompt('')
     setAudioMaskStart(undefined)
     setAudioMaskEnd(undefined)
+    setAudioSyncMode('cut_off')
   }, [mediaType, selectedModel?.model])
 
   function updateVideoSettings(patch: Partial<VideoGenerationSettings>) {
@@ -502,6 +583,10 @@ export function useAtelierMediaCreator({
       saveVideoGenerationSettings(selectedModel.model, next)
       return next
     })
+  }
+
+  function updateVideoExtraParam(key: string, value: unknown) {
+    setVideoExtraParams((current) => ({ ...current, [key]: value }))
   }
 
   function updateAudioSettings(patch: Partial<AudioGenerationSettings>) {
@@ -592,8 +677,19 @@ export function useAtelierMediaCreator({
       const readyVideoRefs = videoReferences.filter((r) => r.kind === 'video' && r.status === 'ready' && r.fileUrl).map((r) => r.fileUrl!)
       const readyAudioRefs = videoReferences.filter((r) => r.kind === 'audio' && r.status === 'ready' && r.fileUrl).map((r) => r.fileUrl!)
       const hasVideoReferences = readyImageRefs.length > 0 || readyVideoRefs.length > 0 || readyAudioRefs.length > 0
+      const readyVideoRefSlot = videoReferences.find((r) => r.kind === 'video' && r.status === 'ready')
       const audioReferenceUrl = audioReference?.status === 'ready' ? audioReference.fileUrl : undefined
       const videoReferenceUrl = videoReference?.status === 'ready' ? videoReference.fileUrl : undefined
+      const isLipsync = selectedAudioCapability?.family === 'sync_lipsync'
+      const videoSettingsPayload = videoSettings
+        ? {
+          ...videoSettings,
+          extraParams: Object.keys(videoExtraParams).length > 0 ? videoExtraParams : undefined,
+          sourceDurationSeconds: readyVideoRefSlot?.durationSec,
+          sourceWidth: readyVideoRefSlot?.width,
+          sourceHeight: readyVideoRefSlot?.height,
+        }
+        : undefined
       const res = mediaType === 'images'
         ? await api.generateAtelierImage(promptText, selectedModel.model, imagePipelineSystemPrompt, referenceImageSrc, accessToken, selectedModel.label, maskDataUrl)
         : mediaType === 'audio'
@@ -614,8 +710,11 @@ export function useAtelierMediaCreator({
           audioFormat: audioSettings?.audioFormat,
           keepSpeechVocal: audioSettings?.keepSpeechVocal,
           promptInfluence: audioSettings?.promptInfluence,
+          videoDurationSeconds: isLipsync ? videoReference?.durationSec : undefined,
+          audioDurationSeconds: isLipsync ? audioReference?.durationSec : undefined,
+          syncMode: isLipsync ? audioSyncMode : undefined,
         }, requestId)
-        : await api.generateAtelierVideo(promptText, selectedModel.model, undefined, accessToken, referenceImageSrc, videoSettings ?? undefined, selectedModel.provider as 'openrouter' | 'fal' | undefined, hasVideoReferences ? { imageUrls: readyImageRefs, videoUrls: readyVideoRefs, audioUrls: readyAudioRefs, task: videoTask } : undefined, requestId, endImageOverride)
+        : await api.generateAtelierVideo(promptText, selectedModel.model, undefined, accessToken, referenceImageSrc, videoSettingsPayload, selectedModel.provider as 'openrouter' | 'fal' | undefined, hasVideoReferences ? { imageUrls: readyImageRefs, videoUrls: readyVideoRefs, audioUrls: readyAudioRefs, task: videoTask } : undefined, requestId, endImageOverride)
       if (!res?.ok) {
         if (res?.cancelled) {
           updateJob({ status: 'cancelled', progressLabel: 'Geannuleerd', finishedAt: new Date().toISOString() })
@@ -648,7 +747,7 @@ export function useAtelierMediaCreator({
         setError(errMsg)
         return
       }
-      const thumbnailSrc = mediaType === 'video' ? await captureVideoThumbnail(src) : undefined
+      const thumbnailSrc = (mediaType === 'video' || isLipsync) ? await captureVideoThumbnail(src) : undefined
       const createdAt = new Date().toISOString()
       const asset: AtelierMediaAsset = {
         id: createAtelierProjectId(),
@@ -662,6 +761,8 @@ export function useAtelierMediaCreator({
         isDraft: res.draftId != null,
         draftId: res.draftId ?? undefined,
         draftDuration: res.draftId != null ? res.resolvedDuration : undefined,
+        assetKind: isLipsync ? 'video' : undefined,
+        mimeType: isLipsync ? 'video/mp4' : undefined,
       }
       updateJob({ status: 'completed', resultSrc: src, thumbnailSrc, finishedAt: createdAt })
       // Log to Supabase when logged in — always with is_live=false; updated when published
@@ -685,7 +786,8 @@ export function useAtelierMediaCreator({
         name: createAtelierProjectTitle(promptText, mediaType),
         src,
         thumbnailSrc,
-        type: mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'audio' : 'generated',
+        type: (mediaType === 'video' || isLipsync) ? 'video' : mediaType === 'audio' ? 'audio' : 'generated',
+        mimeType: isLipsync ? 'video/mp4' : undefined,
         prompt: promptText,
         modelId: selectedModel.id,
         createdAt,
@@ -939,6 +1041,10 @@ export function useAtelierMediaCreator({
     setAudioMaskStart,
     audioMaskEnd,
     setAudioMaskEnd,
+    audioSyncMode,
+    setAudioSyncMode,
+    videoExtraParams,
+    updateVideoExtraParam,
   }
 }
 

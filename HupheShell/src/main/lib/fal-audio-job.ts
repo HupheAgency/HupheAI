@@ -61,6 +61,9 @@ export async function runFalAudioJob(options: {
   audioFormat?: string
   keepSpeechVocal?: boolean
   promptInfluence?: number
+  videoDurationSeconds?: number
+  audioDurationSeconds?: number
+  syncMode?: string
   jwt: string
   onProgress?: (p: AudioJobProgress) => void
   jobState?: FalAudioJobState
@@ -70,6 +73,7 @@ export async function runFalAudioJob(options: {
     editMode, extendBeforeDuration, extendAfterDuration, originalDuration,
     negativePrompt, maskStartSeconds, maskEndSeconds,
     videoUrl, audioFormat, keepSpeechVocal, promptInfluence,
+    videoDurationSeconds, audioDurationSeconds, syncMode,
     jwt, onProgress = () => {}, jobState,
   } = options
 
@@ -79,6 +83,7 @@ export async function runFalAudioJob(options: {
     editMode, extendBeforeDuration, extendAfterDuration, originalDuration,
     negativePrompt, maskStartSeconds, maskEndSeconds,
     videoUrl, audioFormat, keepSpeechVocal, promptInfluence,
+    videoDurationSeconds, audioDurationSeconds, syncMode,
   }, jwt)
   const jobId: string = job.job_id
   const pollingUrl: string | undefined = job.polling_url

@@ -112,11 +112,19 @@ export const DEFAULT_MODULE_MODELS: Record<ModuleType, ModuleModelConfig[]> = {
     { id: 'ideogram-ai/ideogram-v2', label: 'Ideogram v2', model: 'ideogram-ai/ideogram-v2', provider: 'openrouter', modality: 'image' },
   ],
   video: [
-    { id: 'google/veo-3', label: 'Veo 3', model: 'google/veo-3', provider: 'openrouter', modality: 'video' },
     { id: 'bytedance/seedance-2.5', label: 'Seedance 2.5', model: 'bytedance/seedance-2.5', provider: 'fal', modality: 'video' },
-    { id: 'minimax/video-01', label: 'MiniMax Video-01', model: 'minimax/video-01', provider: 'openrouter', modality: 'video' },
-    { id: 'luma/ray-2-720p', label: 'Luma Ray 2', model: 'luma/ray-2-720p', provider: 'openrouter', modality: 'video' },
-    { id: 'wan-ai/wan-2.1-t2v-turbo', label: 'Wan 2.1 Turbo', model: 'wan-ai/wan-2.1-t2v-turbo', provider: 'openrouter', modality: 'video' },
+    { id: 'fal-ai/veo3.1', label: 'Veo 3.1', model: 'fal-ai/veo3.1', provider: 'fal', modality: 'video' },
+    { id: 'fal-ai/kling-video/v3/pro', label: 'Kling v3 Pro', model: 'fal-ai/kling-video/v3/pro', provider: 'fal', modality: 'video' },
+    { id: 'fal-ai/wan-25-preview', label: 'Wan 2.5 Preview', model: 'fal-ai/wan-25-preview', provider: 'fal', modality: 'video' },
+    // De volgende 5 zijn tool-gebonden (sidebar-tool forceert het model, zie
+    // VIDEO_EDIT_TOOLS/forcedModelId in AtelierMediaPanel.tsx) en worden daarom uit de
+    // generieke Generate Video-dropdown gefilterd (VIDEO_TOOL_MODEL_IDS), maar moeten hier
+    // wel geregistreerd staan zodat loadModels() ze als werkend model kan opnemen.
+    { id: 'fal-ai/void-video-inpainting', label: 'VOID (object verwijderen)', model: 'fal-ai/void-video-inpainting', provider: 'fal', modality: 'video' },
+    { id: 'fal-ai/kling-video/o1/video-to-video/edit', label: 'Kling O1 Edit (object bewerken)', model: 'fal-ai/kling-video/o1/video-to-video/edit', provider: 'fal', modality: 'video' },
+    { id: 'fal-ai/luma-dream-machine/ray-2/modify', label: 'Luma Ray 2 Modify (stijl wijzigen)', model: 'fal-ai/luma-dream-machine/ray-2/modify', provider: 'fal', modality: 'video' },
+    { id: 'fal-ai/topaz/upscale/video', label: 'Topaz Upscale (verbeteren)', model: 'fal-ai/topaz/upscale/video', provider: 'fal', modality: 'video' },
+    { id: 'topaz/interpolate/video', label: 'Topaz Interpolate (smooth/slowmo)', model: 'topaz/interpolate/video', provider: 'fal', modality: 'video' },
   ],
   audio: [
     { id: 'fal-ai/ace-step', label: 'ACE-Step', model: 'fal-ai/ace-step', provider: 'fal', modality: 'audio' },
@@ -131,6 +139,7 @@ export const DEFAULT_MODULE_MODELS: Record<ModuleType, ModuleModelConfig[]> = {
     { id: 'sonilo/v1.1/video-to-music', label: 'Sonilo Muziek (video)', model: 'sonilo/v1.1/video-to-music', provider: 'fal', modality: 'audio' },
     { id: 'sonilo/v1.1/text-to-sound-effects', label: 'Sonilo Geluidseffecten (tekst)', model: 'sonilo/v1.1/text-to-sound-effects', provider: 'fal', modality: 'audio' },
     { id: 'sonilo/v1.1/video-to-sound-effects', label: 'Sonilo Geluidseffecten (video)', model: 'sonilo/v1.1/video-to-sound-effects', provider: 'fal', modality: 'audio' },
+    { id: 'fal-ai/sync-lipsync/v2', label: 'Lip Sync (Sync v2)', model: 'fal-ai/sync-lipsync/v2', provider: 'fal', modality: 'audio' },
   ],
 }
 
