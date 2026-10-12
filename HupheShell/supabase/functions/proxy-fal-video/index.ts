@@ -40,6 +40,11 @@ interface VideoModelCapability {
   bitrate_mode: boolean
   codec: boolean
   supports_end_image: boolean
+  // Het veld waarin het startbeeld voor image-to-video wordt gestuurd. Standaard
+  // "image_url" (bevestigd voor Seedance/Veo3.1/Wan-25 via fal's OpenAPI-schema's) --
+  // Kling-v3-pro's image-to-video-endpoint wijkt hiervan af en vereist "start_image_url"
+  // (bevestigd via fal's eigen schema: KlingVideoV3ProImageToVideoInput).
+  image_url_field?: string
   pricing_skus: Record<string, string>
   supports_references?: boolean
   reference_limits?: { image: number; video: number; audio: number }
@@ -158,8 +163,15 @@ const CAPABILITIES: Record<string, VideoModelCapability> = {
     codec: false,
     // Enige van de 3 nieuwe Generate Video-modellen met end_image_url (alleen i2v).
     supports_end_image: true,
+    image_url_field: 'start_image_url',
+    // Bevestigd via fal's eigen pricing-tekst: $0.112/s zonder audio, $0.168/s met
+    // audio (1.5x), $0.196/s met audio+voice-control (die laatste tier is v1 niet
+    // geïmplementeerd -- geen voice-control-param op dit model). Geen resolutie- of
+    // duration-afhankelijke staffel; de echte API kent zelfs geen resolution-veld
+    // (alleen aspect_ratio) -- supported_resolutions: ['1080p'] hierboven is puur
+    // een UI-label, geen echte fal-parameter.
     pricing_skus: {
-      duration_seconds: '0.224',
+      duration_seconds: '0.112',
     },
     audio_rate_multiplier: 1.5,
   },
@@ -867,7 +879,7 @@ Deno.serve(async (req: Request) => {
         // seed wordt door fal alleen op deze endpoint geaccepteerd.
         if (capability.seed && seed != null) falBody.seed = seed
       } else if (image_url) {
-        falBody.image_url = image_url
+        falBody[capability.image_url_field ?? 'image_url'] = image_url
         if (capability.supports_end_image && end_image_url) falBody.end_image_url = end_image_url
       }
 
