@@ -2621,19 +2621,21 @@ function VideoGenerationSettingsPanel({
           </div>
         )}
 
-        <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Resolutie</p>
-            {settings.draft && <p className="text-[10px] text-white/30">Draft levert altijd 480p</p>}
+        {capability.supported_resolutions.length > 1 && (
+          <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Resolutie</p>
+              {settings.draft && <p className="text-[10px] text-white/30">Draft levert altijd 480p</p>}
+            </div>
+            <div className={['flex flex-wrap gap-1.5', settings.draft ? 'pointer-events-none opacity-30' : ''].join(' ')}>
+              {capability.supported_resolutions.map((r) => (
+                <button key={r} type="button" onClick={() => onChange?.({ resolution: r })} className={pillClass(settings.resolution === r)}>
+                  {r}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className={['flex flex-wrap gap-1.5', settings.draft ? 'pointer-events-none opacity-30' : ''].join(' ')}>
-            {capability.supported_resolutions.map((r) => (
-              <button key={r} type="button" onClick={() => onChange?.({ resolution: r })} className={pillClass(settings.resolution === r)}>
-                {r}
-              </button>
-            ))}
-          </div>
-        </div>
+        )}
 
         <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
           <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Beeldverhouding</p>
