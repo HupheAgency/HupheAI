@@ -46,6 +46,8 @@ interface AudioModelCapability {
   prompt_optional?: boolean
   min_duration?: number
   min_billable_seconds?: number
+  // Alleen Sync Lipsync kent sync_mode; Veed Lipsync v2 heeft alleen video_url + audio_url.
+  supports_sync_mode?: boolean
 }
 
 const CAPABILITIES: Record<string, AudioModelCapability> = {
@@ -260,6 +262,27 @@ const CAPABILITIES: Record<string, AudioModelCapability> = {
     supports_inpaint: false,
     requires_video_reference: true,
     prompt_optional: true,
+    supports_sync_mode: true,
+  },
+  // VEED Lipsync v2 -- zelfde vorm als Sync Lipsync (video_url + audio_url in, { video: { url } }
+  // uit, bevestigd via fal's schema), maar zonder sync_mode of prompt. $0.07 per seconde
+  // OUTPUT-video (fal-modelpagina); output-lengte volgt de video, v1 benadert met max(video, audio)
+  // net als Sync.
+  'veed/lipsync/v2': {
+    model_id: 'veed/lipsync/v2',
+    family: 'sync_lipsync',
+    rate_per_second: 0.07,
+    requires_reference: true,
+    requires_original_tags: false,
+    supports_lyrics: false,
+    supports_edit_mode: false,
+    supports_duration: false,
+    supports_extend: false,
+    supports_negative_prompt: false,
+    supports_inpaint: false,
+    requires_video_reference: true,
+    prompt_optional: true,
+    supports_sync_mode: false,
   },
 }
 
@@ -319,6 +342,7 @@ Deno.serve(async (req: Request) => {
           prompt_optional: capability.prompt_optional,
           min_duration: capability.min_duration,
           min_billable_seconds: capability.min_billable_seconds,
+          supports_sync_mode: capability.supports_sync_mode,
         }]
       })
 
@@ -494,13 +518,13 @@ Deno.serve(async (req: Request) => {
       // extend_before_duration/after_duration) -- vandaar de split op capability.family.
       const falBody: Record<string, unknown> = {}
       if (capability.family === 'stable_audio' || capability.family === 'sonilo' || capability.family === 'sync_lipsync') {
-        if (tags) falBody.prompt = tags
+        if (tags && capability.model_id !== 'veed/lipsync/v2') falBody.prompt = tags
         if (capability.family === 'stable_audio' && negative_prompt) falBody.negative_prompt = negative_prompt
       } else {
         falBody.tags = tags
         if (lyrics) falBody.lyrics = lyrics
       }
-      if (capability.family === 'sync_lipsync' && sync_mode) falBody.sync_mode = sync_mode
+      if (capability.supports_sync_mode && sync_mode) falBody.sync_mode = sync_mode
       if (capability.supports_duration) falBody.duration = resolvedDuration
       if (capability.requires_reference) falBody.audio_url = audio_url
       if (capability.requires_video_reference) falBody.video_url = video_url
@@ -673,11 +697,15 @@ Deno.serve(async (req: Request) => {
         return json({ error: `Audio ophalen mislukt (${resultRes.status}): ${text.slice(0, 200)}` }, 502)
       }
       const resultData = await resultRes.json() as any
-      // Lipsync levert { video: { url } } op, geen { audio: { url } } -- alle andere
-      // families (ace_step/stable_audio/sonilo) blijven ongewijzigd op .audio?.url.
-      const isLipsync = model ? CAPABILITIES[model]?.family === 'sync_lipsync' : false
-      const downloadUrl: string | undefined = isLipsync ? resultData.video?.url : resultData.audio?.url
+      // Lipsync levert { video: { url } } op, geen { audio: { url } }. De client stuurt bij
+      // 'content' geen model mee, dus detecteren we op de vorm van het resultaat i.p.v. op
+      // CAPABILITIES[model].
+      const audioUrl: string | undefined = resultData.audio?.url
+      const videoUrl: string | undefined = resultData.video?.url
+      const isLipsync = !audioUrl && !!videoUrl
+      const downloadUrl: string | undefined = audioUrl ?? videoUrl
       if (!downloadUrl) {
+        console.error('[proxy-fal-audio/content] geen url in resultaat, model:', model, 'keys:', Object.keys(resultData ?? {}), JSON.stringify(resultData).slice(0, 500))
         return json({ error: 'Audio-url ontbreekt in resultaat' }, 502)
       }
 
@@ -689,7 +717,11 @@ Deno.serve(async (req: Request) => {
       return new Response(resultFileRes.body, {
         status: 200,
         headers: {
-          'Content-Type': resultFileRes.headers.get('content-type') ?? (isLipsync ? 'video/mp4' : 'audio/wav'),
+          // fal's CDN meldt video's als application/octet-stream; voor lipsync forceren we dus mp4
+          // (de client leidt de bestandsextensie af uit dit type).
+          'Content-Type': isLipsync
+            ? (resultData.video?.content_type?.startsWith('video/') ? resultData.video.content_type : 'video/mp4')
+            : (resultFileRes.headers.get('content-type') ?? 'audio/wav'),
           ...CORS_HEADERS,
         },
       })

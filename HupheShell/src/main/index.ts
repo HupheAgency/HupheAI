@@ -3030,13 +3030,18 @@ ipcMain.handle('audio:generate-ai', async (_event, payload: {
       jobState,
     })
     const contentType = res.headers.get('content-type') ?? ''
-    const ext = contentType.includes('mpeg') ? 'mp3'
+    const buf = Buffer.from(await res.arrayBuffer())
+    // Vangnet: herken een mp4/mov aan de 'ftyp'-marker op byte 4, ook als het type onbekend is
+    // (bijv. application/octet-stream) -- anders valt het hieronder terug op 'wav'.
+    const typeUnknown = contentType === '' || contentType.includes('octet-stream')
+    const looksLikeMp4 = typeUnknown && buf.length > 12 && buf.subarray(4, 8).toString('latin1') === 'ftyp'
+    const ext = looksLikeMp4 ? 'mp4'
+      : contentType.includes('mpeg') ? 'mp3'
       : contentType.includes('ogg') ? 'ogg'
       : contentType.includes('quicktime') ? 'mov'
       : contentType.includes('webm') ? 'webm'
       : contentType.includes('mp4') ? 'mp4'
       : 'wav'
-    const buf = Buffer.from(await res.arrayBuffer())
     const filePath = join(tmpdir(), `huphe_generated_audio_${Date.now()}.${ext}`)
     writeFileSync(filePath, buf)
     return { ok: true, filePath: toHupheFileUrl(filePath) }

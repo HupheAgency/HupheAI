@@ -140,6 +140,7 @@ export const DEFAULT_MODULE_MODELS: Record<ModuleType, ModuleModelConfig[]> = {
     { id: 'sonilo/v1.1/text-to-sound-effects', label: 'Sonilo Geluidseffecten (tekst)', model: 'sonilo/v1.1/text-to-sound-effects', provider: 'fal', modality: 'audio' },
     { id: 'sonilo/v1.1/video-to-sound-effects', label: 'Sonilo Geluidseffecten (video)', model: 'sonilo/v1.1/video-to-sound-effects', provider: 'fal', modality: 'audio' },
     { id: 'fal-ai/sync-lipsync/v2', label: 'Lip Sync (Sync v2)', model: 'fal-ai/sync-lipsync/v2', provider: 'fal', modality: 'audio' },
+    { id: 'veed/lipsync/v2', label: 'Lip Sync (VEED v2)', model: 'veed/lipsync/v2', provider: 'fal', modality: 'audio' },
   ],
 }
 

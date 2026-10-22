@@ -67,6 +67,7 @@ export interface AtelierAudioCapability {
   prompt_optional?: boolean
   min_duration?: number
   min_billable_seconds?: number
+  supports_sync_mode?: boolean
 }
 
 export interface AudioReferenceSlot {
@@ -798,7 +799,9 @@ export function useAtelierMediaCreator({
       setActiveResultIndex(nextAssets.length - 1)
       if (mediaType === 'video') setVideoReferences([])
       if (mediaType === 'audio') {
-        setAudioReference(null)
+        // Lipsync houdt zijn audio- en videoreferentie na een render, zodat je meteen opnieuw
+        // kunt genereren (andere sync-modus/model) zonder het geluidsfragment opnieuw te kiezen.
+        if (!isLipsync) setAudioReference(null)
         setAudioLyrics('')
         setAudioOriginalTags('')
         setAudioOriginalLyrics('')

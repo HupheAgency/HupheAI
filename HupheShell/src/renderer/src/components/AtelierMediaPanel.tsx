@@ -3018,7 +3018,7 @@ function AudioGenerationSettingsPanel({
           </div>
         )}
 
-        {capability.family === 'sync_lipsync' && (
+        {capability.supports_sync_mode && (
           <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
             <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">Sync-modus</p>
             <select
