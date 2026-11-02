@@ -4,11 +4,13 @@ import * as Sentry from '@sentry/electron/renderer'
 import App from './App'
 import CalibrationApp from './CalibrationApp'
 import { SplatViewer } from './components/SplatViewer'
+import VideoTimelinePage from './pages/VideoTimelinePage'
 import './index.css'
 
 const hashBase = window.location.hash.replace('#', '').split('?')[0]
 const isCalibrationMode = hashBase === 'calibration'
 const isSplatViewerMode = hashBase === 'splat-viewer'
+const isTimelineMode = import.meta.env.DEV && hashBase === 'video-timeline'
 
 if (import.meta.env.PROD) {
   Sentry.init({
@@ -35,6 +37,6 @@ function SplatViewerApp() {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    {isSplatViewerMode ? <SplatViewerApp /> : isCalibrationMode ? <CalibrationApp /> : <App />}
+    {isTimelineMode ? <VideoTimelinePage /> : isSplatViewerMode ? <SplatViewerApp /> : isCalibrationMode ? <CalibrationApp /> : <App />}
   </React.StrictMode>
 )

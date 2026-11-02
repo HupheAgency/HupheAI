@@ -4074,7 +4074,8 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
     }
 
     function onKey(e: KeyboardEvent) {
-      if (presenting) return
+      // Media editors own their controls, including the nested video timeline.
+      if (presenting || atelierCreationType === 'images' || atelierCreationType === 'video' || atelierCreationType === 'audio') return
       const mod = e.metaKey || e.ctrlKey
       const key = e.key.toLowerCase()
 
@@ -4112,7 +4113,7 @@ export default function SlideEditorPage({ onBack, onModuleSelect, allowedModuleS
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [presenting, blocks, activeIdx, templateClientId, projectName, projectPath, mdText, overrides]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [presenting, atelierCreationType, blocks, activeIdx, templateClientId, projectName, projectPath, mdText, overrides]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const htmlTemplateName = htmlTemplateOptions.find((template) => template.clientId === templateClientId)?.name ?? ''
   const clientName = clients.find((c) => c.id === templateClientId)?.name ?? htmlTemplateName

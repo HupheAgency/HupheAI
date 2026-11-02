@@ -28,6 +28,7 @@ import { supabase } from '../lib/supabase'
 import { Toggle } from './Toggle'
 import ProductStudioBoundary from './ProductStudioBoundary'
 import ProductStudioShell from './ProductStudioShell'
+import VideoTimelinePage from '../pages/VideoTimelinePage'
 
 export function AtelierMediaCreationPanel({
   type,
@@ -67,6 +68,10 @@ export function AtelierMediaCreationPanel({
   const endFrameInputRef = useRef<HTMLInputElement>(null)
   const create3dInputRef = useRef<HTMLInputElement>(null)
   const [productStudioOpen, setProductStudioOpen] = useState(false)
+  const [timelineOpen, setTimelineOpen] = useState(false)
+  const [timelineVisited, setTimelineVisited] = useState(false)
+  const videoViewId = React.useId()
+  const showingTimeline = mediaType === 'video' && timelineOpen
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const [existingProjects, setExistingProjects] = useState<any[]>([])
   const [scene3dProjectsLoading, setScene3dProjectsLoading] = useState(false)
@@ -386,7 +391,7 @@ export function AtelierMediaCreationPanel({
   redoMaskFn.current = redoMask
 
   useEffect(() => {
-    if (!isMaskMode) return
+    if (!isMaskMode || showingTimeline) return
     function onKeyDown(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         e.preventDefault()
@@ -396,7 +401,7 @@ export function AtelierMediaCreationPanel({
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [isMaskMode])
+  }, [isMaskMode, showingTimeline])
 
   // Exporteert de originele afbeelding met de oranje overlay als composite PNG.
   // Het model ziet zo exact welk gebied aanpast moet worden.
@@ -605,6 +610,17 @@ export function AtelierMediaCreationPanel({
     }
   }, [])
 
+  function selectVideoView(view: 'single' | 'timeline') {
+    if (view === 'timeline') {
+      canvasRef.current?.querySelectorAll('video, audio').forEach(el => (el as HTMLMediaElement).pause())
+      setModelMenuOpen(false)
+      setLightboxIndex(null)
+      setFullscreenAsset(null)
+      setTimelineVisited(true)
+    }
+    setTimelineOpen(view === 'timeline')
+  }
+
   if (!mediaType) return null
 
   const activeItem = activeResultIndex != null && resultItems[activeResultIndex]
@@ -621,7 +637,34 @@ export function AtelierMediaCreationPanel({
     : 'absolute right-0 top-full z-50 flex w-80 flex-col pt-2'
 
   return (
-    <div className="relative z-10 flex h-full w-full overflow-hidden">
+    <div className="flex h-full min-h-0 w-full flex-col bg-[#0a0a0a]">
+    {mediaType === 'video' && (
+      <div className="flex flex-shrink-0 justify-center border-b border-white/[0.06] px-5 py-2">
+        <div role="tablist" aria-label="Videoweergave" className="flex rounded-full bg-white/[0.06] p-1 ring-1 ring-white/[0.06]"
+          onKeyDown={event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const next = event.key === 'Home' ? 'single' : event.key === 'End' ? 'timeline' : showingTimeline ? 'single' : 'timeline'
+            selectVideoView(next)
+            event.currentTarget.querySelector<HTMLButtonElement>(`[data-video-view="${next}"]`)?.focus()
+          }}
+        >
+          {(['single', 'timeline'] as const).map(view => {
+            const selected = showingTimeline === (view === 'timeline')
+            return <button key={view} type="button" role="tab" id={`${videoViewId}-${view}-tab`} data-video-view={view}
+              aria-selected={selected} aria-controls={`${videoViewId}-${view}-panel`} tabIndex={selected ? 0 : -1}
+              className={`min-w-[116px] rounded-full px-6 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#facc15] ${selected ? 'bg-[#f5f5f5] text-[#141414] shadow-sm' : 'text-white/50 hover:text-white/85'}`}
+              onClick={() => selectVideoView(view)}
+            >{view === 'single' ? 'Single' : 'Timeline'}</button>
+          })}
+        </div>
+      </div>
+    )}
+    <div className="min-h-0 flex-1">
+    {/* Keep the creator mounted so prompts, references and running jobs survive navigation. */}
+    <div className="relative z-10 flex h-full w-full overflow-hidden" style={showingTimeline ? { display: 'none' } : undefined}
+      role={mediaType === 'video' ? 'tabpanel' : undefined} id={`${videoViewId}-single-panel`}
+      aria-labelledby={mediaType === 'video' ? `${videoViewId}-single-tab` : undefined}>
       {/* Brush cursor — fixed overlay, exactly brushSize px, center = pointer */}
       {isMaskMode && !productStudioOpen && (
         <div
@@ -1371,6 +1414,12 @@ export function AtelierMediaCreationPanel({
           </div>
         </div>
       )}
+    </div>
+    <div className="h-full w-full" role="tabpanel" id={`${videoViewId}-timeline-panel`} aria-labelledby={`${videoViewId}-timeline-tab`}
+      style={!showingTimeline ? { display: 'none' } : undefined}>
+      {timelineVisited && <VideoTimelinePage active={showingTimeline} />}
+    </div>
+    </div>
     </div>
   )
 }

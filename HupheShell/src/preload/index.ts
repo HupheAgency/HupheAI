@@ -81,6 +81,15 @@ ipcRenderer.on('atelier:view-command', (_event, cmd) => {
 })
 
 contextBridge.exposeInMainWorld('api', {
+  timeline: {
+    list: () => ipcRenderer.invoke('timeline:list'),
+    save: (project: unknown) => ipcRenderer.invoke('timeline:save', project),
+    importMedia: (payload: unknown) => ipcRenderer.invoke('timeline:import', payload),
+    prepareReferences: (payload: unknown) => ipcRenderer.invoke('timeline:prepare-references', payload),
+    extractAudio: (payload: unknown) => ipcRenderer.invoke('timeline:extract-audio', payload),
+    export: (project: unknown) => ipcRenderer.invoke('timeline:export', project),
+    tools: () => ipcRenderer.invoke('timeline:tools'),
+  },
   platform: process.platform,
   generateDeck: () => ipcRenderer.invoke('deck:generate'),
   importTemplate: (clientId: string, buffer: ArrayBuffer) =>

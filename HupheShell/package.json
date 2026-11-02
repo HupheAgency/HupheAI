@@ -1,7 +1,7 @@
 {
   "name": "hupheai",
   "version": "1.0.0",
-  "description": "HupheAI — Desktop platform shell",
+  "description": "HupheAI \u2014 Desktop platform shell",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
@@ -14,7 +14,13 @@
     "test": "echo \"No tests configured\"",
     "test:canonical-lathe": "node scripts/canonical-lathe-core-test.mjs",
     "test:texture-geometry": "node scripts/texture-geometry-integrity-test.mjs",
-    "test:security": "node scripts/security-smoke-test.mjs"
+    "test:security": "node scripts/security-smoke-test.mjs",
+    "fixtures:timeline": "node scripts/video-timeline-fixtures.mjs",
+    "test:timeline": "node scripts/local-media-response-test.mjs && node scripts/video-timeline-editing-test.mjs && node scripts/video-timeline-backend-test.mjs",
+    "test:timeline-editing": "node scripts/video-timeline-editing-test.mjs",
+    "test:timeline-preview": "node scripts/video-timeline-preview-test.mjs",
+    "test:timeline-export": "node scripts/video-timeline-export-test.mjs",
+    "test:timeline-ui": "node scripts/video-timeline-ui-smoke.mjs"
   },
   "dependencies": {
     "@fal-ai/client": "^1.10.1",

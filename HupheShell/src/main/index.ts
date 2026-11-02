@@ -4,13 +4,14 @@ import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, re
 import mammoth from 'mammoth'
 import { tmpdir } from 'os'
 import { basename, dirname, extname, resolve, sep, join } from 'path'
-import { pathToFileURL } from 'url'
 import { randomUUID } from 'crypto'
 import AdmZip from 'adm-zip'
 import { registerHupheCodeIPC } from './huphe-code-ipc'
 import { registerPulseIPC } from './pulse-orchestrator'
 import { registerEngineIPC } from './engine-ipc'
 import { registerProductStudioIPC } from './product-studio-ipc'
+import { registerVideoTimelineIPC } from './video-timeline-ipc'
+import { serveLocalMedia } from './lib/local-media-response'
 import { autoUpdater } from 'electron-updater'
 import { generateHtml5Banner, IAB_FORMATS, type BannerProject } from './lib/banner-generator'
 import { generateHtml5Print, PRINT_FORMATS, type PrintPayload } from './lib/print-generator'
@@ -394,7 +395,7 @@ function registerHupheProtocol(): void {
       const url = new URL(request.url)
       if (url.hostname !== 'file') return new Response('Not found', { status: 404 })
       const filePath = normalizeLocalFilePath(decodeURIComponent(url.pathname.replace(/^\/+/, '')))
-      return net.fetch(pathToFileURL(filePath).toString())
+      return serveLocalMedia(request, filePath)
     } catch (err) {
       console.warn('[security] huphe:// request geblokkeerd:', request.url, err)
       return new Response('Forbidden', { status: 403 })
@@ -4551,6 +4552,7 @@ app.whenReady().then(async () => {
   }
 
   registerHupheProtocol()
+  registerVideoTimelineIPC()
   Menu.setApplicationMenu(buildApplicationMenu())
   if (app.dock) {
     const iconPath = join(__dirname, '../../build/icon.png')
