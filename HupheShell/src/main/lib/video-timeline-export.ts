@@ -2,6 +2,7 @@ import { mkdir, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { activeMedia, clipTrackId, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
+import { transitionPlaybackProblems } from '../../shared/video-timeline-transition'
 import { probeTimelineMedia, requireTimelineTools, runTimelineTool, type TimelineTools } from './video-timeline-media'
 import { isWithinTimelineDirectory, parseTimelineProject, validateOwnedAssets } from './video-timeline-storage'
 
@@ -22,7 +23,7 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
   await validateOwnedAssets(options.root, project)
   const used = new Set(project.clips.flatMap(clip => clip.variants.filter(v => v.id === clip.activeVariantId).map(v => v.assetId)))
   for (const asset of project.assets.filter(a => used.has(a.id))) Object.assign(asset, await probeTimelineMedia(asset.path, asset.kind, tools))
-  const problems = timelineProblems(project)
+  const problems = [...timelineProblems(project), ...transitionPlaybackProblems(project)]
   if (problems.length) throw new Error(problems.join('\n'))
   const frames = timelineEnd(project)
   const duration = frames / project.fps

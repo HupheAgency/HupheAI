@@ -1,3 +1,4 @@
+import {enhanceVideoCapability,buildVideoGenerationRequest,SEEDANCE,VEO,WAN,KLING} from '../supabase/functions/_shared/video-generation-contract';
 import {app,BrowserWindow,protocol,dialog,ipcMain} from 'electron';
 import {writeFile,mkdir,readFile,readdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
@@ -9,7 +10,14 @@ const work=process.env.TEST_WORK,fixtures=process.env.TEST_FIXTURES;
 app.setPath('userData',join(work,'user-data-'+process.env.TEST_RUN_ID));
 protocol.registerSchemesAsPrivileged([{scheme:'huphe',privileges:{standard:true,secure:true,supportFetchAPI:true,corsEnabled:true,stream:true}}]);
 app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
-let window,generated=0,finalized=0,expectedGenerationClip,expectedGenerationSettings,expectedReferenceTask;const preparedReferenceCalls=[];const queue=[];const passes=[];let rendererErrors=[];
+let window,generated=0,finalized=0,expectedGenerationClip,expectedGenerationSettings,expectedReferenceTask,trackDeletionGeneration;const preparedReferenceCalls=[];const queue=[];const passes=[];let rendererErrors=[];
+let currentContracts=false;
+const contractRequests=[];
+const currentCaps=[SEEDANCE,VEO,WAN,KLING].map(id=>enhanceVideoCapability({model_id:id,provider:'fal',markup_pct:0,video_cost_estimate:10000,
+ supported_durations:id===SEEDANCE?Array.from({length:27},(_,i)=>i+4):[5,10],supported_resolutions:id===KLING?['1080p']:['480p','720p','1080p'],
+ supported_aspect_ratios:['16:9','9:16','1:1',...(id===SEEDANCE?['auto']:[])],generate_audio:id!==WAN,seed:id===SEEDANCE,bitrate_mode:id===SEEDANCE,codec:id===SEEDANCE,
+ supports_end_image:[SEEDANCE,KLING].includes(id),supports_references:id===SEEDANCE,reference_limits:id===SEEDANCE?{image:30,video:10,audio:10}:undefined,
+ supports_auto_duration:id===SEEDANCE,supports_draft:id===SEEDANCE,draft_rate_per_second:0.005,draft_finalize_rate_per_second:0.01,pricing_skus:{duration_seconds:'0.01'}}));
 const audioVideoFile=join(work,'source-C-with-audio.mp4');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const js=code=>window.webContents.executeJavaScript(code,true);
@@ -344,6 +352,71 @@ async function multitrackEditing() {
  await writeFile(join(work,'artifacts','multitrack.png'),(await window.webContents.capturePage()).toPNG());
  passes.push('Meerdere sporen, lege sporen, beeldinstellingen en geluidsvolumes blijven bewaard na heropenen');
 }
+async function deleteTimelineTracks() {
+ const projectId=await js("localStorage.getItem('huphe:timeline:last-project')");
+ const save=async()=>{await until("[...document.querySelectorAll('.vt button')].some(e=>e.textContent.trim()==='Opslaan'&&!e.disabled)",'track deletion ready to save');await click('Opslaan');return JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,projectId,'project.json'),'utf8'));};
+ const key=clip=>clip.trackId??`${clip.track}-1`;
+ const edit=project=>({tracks:project.tracks,clips:project.clips});
+ const select=async id=>{await js(`document.querySelector('[data-clip-id="${id}"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);await click('Fragment');};
+ const undo=async redo=>{await js(`document.querySelector('[title="${redo?'Opnieuw':'Ongedaan maken'}"]').click()`);await sleep(150);};
+ const remove=async track=>{
+  const point=await js(`(()=>{const button=document.querySelector('[data-delete-track="${track.id}"]');if(!button)throw Error('Delete-track button missing');if(button.disabled)throw Error('Delete-track button disabled');if(button.getAttribute('aria-label')!==${JSON.stringify(track.name+' verwijderen')})throw Error('Delete-track accessible name missing');button.scrollIntoView({block:'nearest'});const r=button.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);
+  window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...point});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...point});
+  await until(`!document.querySelector('[data-track-id="${track.id}"]')`,'track removed');
+ };
+ let p=await save();
+ for(const kind of ['video','audio']) {
+  const before=structuredClone(p),track=p.tracks.find(track=>track.kind===kind&&p.clips.some(clip=>key(clip)===track.id));
+  assert.ok(track,`Een gevuld ${kind}spoor staat klaar voor verwijderen`);
+  await select(p.clips.find(clip=>key(clip)===track.id).id);
+  await remove(track);p=await save();
+  assert.deepEqual(p.tracks,before.tracks.filter(item=>item.id!==track.id));
+  assert.deepEqual(p.clips,before.clips.filter(clip=>key(clip)!==track.id),'Andere sporen, uitsneden en posities blijven exact gelijk');
+  assert.deepEqual(p.assets,before.assets,'Spoor verwijderen wist geen bronmedia');assert.deepEqual(p.jobs,before.jobs,'Spoor verwijderen wist geen jobhistorie');
+  assert.equal(await js("document.querySelector('.vt-block.selected')===null"),true,'Selectie van een verwijderd fragment wordt gewist');
+  assert.equal(await js("document.querySelector('.vt-inspector [aria-label=\"Lengte fragment\"]')===null"),true,'De inspector blijft niet aan een verwijderd fragment gekoppeld');
+  for(const asset of p.assets)assert.ok((await readFile(resolve(process.env.HUPHE_TIMELINE_ROOT,projectId,asset.path))).length>0,'Bronbestand blijft beschikbaar op schijf');
+  await undo(false);assert.deepEqual(edit(await save()),edit(before),'Eén undo herstelt spoor en alle fragmenten samen');
+  await undo(true);const redone=await save();assert.deepEqual(edit(redone),edit(p),'Eén redo verwijdert hetzelfde spoor en zijn fragmenten');p=redone;
+  passes.push(`${kind==='video'?'Videospoor':'Audiospoor'} verwijderen bewaart bronnen, jobs en andere posities; selectie verdwijnt en undo/redo herstelt spoor plus clips`);
+ }
+ await click('＋ Audiospoor');p=await save();const empty=p.tracks.filter(track=>track.kind==='audio').at(-1),beforeEmpty=structuredClone(p);
+ assert.equal(p.clips.some(clip=>key(clip)===empty.id),false);await remove(empty);p=await save();assert.deepEqual(p.clips,beforeEmpty.clips,'Een leeg spoor verwijderen verandert geen clips');
+ await undo(false);assert.deepEqual(edit(await save()),edit(beforeEmpty));await undo(true);p=await save();
+ await writeFile(join(work,'artifacts','track-removal.png'),(await window.webContents.capturePage()).toPNG());
+ const retainedAssets=structuredClone(p.assets),retainedJobs=structuredClone(p.jobs);
+ for(const track of [...p.tracks]){await remove(track);p=await save();}
+ assert.deepEqual(p.tracks,[],'Ook het laatste video- en audiospoor mogen weg');assert.deepEqual(p.clips,[]);assert.deepEqual(p.assets,retainedAssets);assert.deepEqual(p.jobs,retainedJobs);
+ await window.webContents.reload();await until("document.querySelector('input[placeholder=\"Beschrijf je video…\"]')",'zero-track project reload');await click('Timeline');
+ await until("document.querySelector('[data-testid=video-timeline]')?.getClientRects().length && document.querySelectorAll('[data-track-id]').length===0",'zero tracks restored');
+ p=await save();assert.deepEqual(p.tracks,[],'Heropenen maakt verwijderde standaardsporen niet opnieuw');assert.deepEqual(p.clips,[]);assert.deepEqual(p.assets,retainedAssets);
+ const video=p.assets.find(asset=>asset.kind==='video'),audio=p.assets.find(asset=>asset.kind==='audio');
+ await js(`document.querySelector('[data-asset-id="${video.id}"]').click()`);await until("document.querySelectorAll('[data-clip-id]').length===1",'video placed');p=await save();assert.equal(p.tracks.length,1);assert.equal(p.tracks[0].kind,'video');assert.equal(p.clips.length,1);assert.equal(key(p.clips[0]),p.tracks[0].id,'Mediakaart klikken maakt een ontbrekend videospoor');
+ await remove(p.tracks[0]);p=await save();await js(`document.querySelector('[data-asset-id="${audio.id}"]').click()`);await until("document.querySelectorAll('[data-clip-id]').length===1",'audio placed');p=await save();assert.equal(p.tracks.length,1);assert.equal(p.tracks[0].kind,'audio');assert.equal(p.clips.length,1);assert.equal(key(p.clips[0]),p.tracks[0].id,'Mediakaart klikken maakt een ontbrekend audiospoor');
+ await remove(p.tracks[0]);p=await save();await click('＋ Leeg blok');p=await save();assert.equal(p.tracks.length,1);assert.equal(p.tracks[0].kind,'video');assert.equal(p.clips.length,1);assert.equal(p.clips[0].variants.length,0,'Leeg blok maakt een nieuw videospoor na het verwijderen van alle sporen');
+ const generationTrack=p.tracks[0],generationClip=p.clips[0];
+ await importFile('audio','baseline.wav');p=await save();assert.equal(p.tracks.filter(track=>track.kind==='audio').length,1,'Audio-import herstelt een ontbrekend audiospoor');assert.ok(p.clips.some(clip=>clip.track==='audio'));
+ passes.push('Leeg en laatste spoor verwijderen; nul sporen blijft na heropenen bewaard en media klikken, leeg blok en import maken passende nieuwe sporen');
+
+ await click('＋ Audiospoor');p=await save();const removable=p.tracks.filter(track=>track.kind==='audio').at(-1);
+ await select(generationClip.id);await click('Genereren');await until("!document.querySelector('[aria-label=Videomodel]').disabled",'model selection for protected track');await input('[aria-label=Videomodel]','bytedance/seedance-2.5');await input('.vt textarea','Lokale test voor spoorbescherming.');
+ trackDeletionGeneration={projectId,clipId:generationClip.id,release:undefined};
+ await click('Genereer nieuwe variant');
+ await until(`document.querySelector('[data-delete-track="${generationTrack.id}"]')?.disabled`,'generating track cannot be removed');
+ const title=await js(`document.querySelector('[data-delete-track="${generationTrack.id}"]').title`);assert.match(title,/gener|render/i,'De knop legt uit waarom het spoor tijdelijk niet kan worden verwijderd');
+ await js(`document.querySelector('[data-delete-track="${generationTrack.id}"]').click()`);assert.equal(await js(`!!document.querySelector('[data-track-id="${generationTrack.id}"]')`),true);
+ await remove(removable);
+ const deadline=Date.now()+5000;while(!trackDeletionGeneration.release&&Date.now()<deadline)await sleep(30);assert.ok(trackDeletionGeneration.release,'De lokale simulatie heeft de generatieopdracht ontvangen');
+ trackDeletionGeneration.release();
+ await until(`!document.querySelector('[data-delete-track="${generationTrack.id}"]')?.disabled && ![...document.querySelectorAll('button')].some(button=>button.textContent.includes('Bezig met genereren'))`,'generation finishes and track becomes removable');
+ p=await save();const completed=p.jobs.find(job=>job.clipId===generationClip.id&&job.status==='completed');assert.ok(completed,'De generatie rondt af terwijl een ander spoor wordt verwijderd');
+ const completedAssets=structuredClone(p.assets),completedJobs=structuredClone(p.jobs);assert.ok(p.clips.find(clip=>clip.id===generationClip.id).variants.length>0);
+ await remove(generationTrack);p=await save();assert.deepEqual(p.assets,completedAssets);assert.deepEqual(p.jobs,completedJobs,'Ook afgeronde betaalde-opdrachthistorie blijft bewaard bij spoor verwijderen');
+ trackDeletionGeneration=undefined;
+ await writeFile(join(work,'artifacts','track-deletion.png'),(await window.webContents.capturePage()).toPNG());
+ passes.push('Een genererend spoor is beschermd met uitleg; andere sporen blijven verwijderbaar en afgeronde varianten/jobs blijven bewaard na verwijderen');
+}
+
 async function scrubAdditionalSource(file) {
  // Optional local diagnostic source: a clip of at least four seconds, no provider request.
  await click('Nieuw');await until("document.querySelectorAll('[data-clip-id]').length===0",'empty diagnostic timeline');
@@ -372,12 +445,52 @@ async function scrubAdditionalSource(file) {
  assert.equal(summary.blackFrames,0,'De extra bron toont geen zwarte tussenframes tijdens slepen');
  assert.ok(summary.distinctFramesWhileMoving>=6,'De extra bron ververst tijdens slepen');return summary;
 }
+async function modelCapabilityControls(){
+ currentContracts=true;
+ await window.webContents.reload();await until("document.querySelector('input[placeholder=\"Beschrijf je video…\"]')",'new capabilities in Single');
+ const selectSingle=async id=>{await js("document.querySelector('[aria-label^=\"Model kiezen\"]').click()");await until("document.querySelector('input[placeholder=\"Zoek model…\"]')",'model menu');await js(`([...document.querySelectorAll('button')].find(b=>b.querySelector('p.font-mono')?.textContent===${JSON.stringify(id)})).click()`);await sleep(250);};
+ await selectSingle(VEO);await until("!!document.querySelector('[aria-label=\"Veo-uitvoering\"]')",'Veo fields in Single');
+ await input('[aria-label="Veo-uitvoering"]','fast');await input('[aria-label="Negatieve prompt"]','tekst in beeld');
+ await selectSingle(WAN);await until("!!document.querySelector('[aria-label=\"Prompt uitbreiden\"]')",'Wan fields in Single');
+ await selectSingle(KLING);await until("document.body.innerText.includes('Shotindeling')",'Kling fields in Single');
+ await selectSingle(VEO);assert.equal(await js("document.querySelector('[aria-label=\"Veo-uitvoering\"]').value"),'fast');assert.equal(await js("document.querySelector('[aria-label=\"Negatieve prompt\"]').value"),'tekst in beeld');
+ passes.push('Nieuwe modelinstellingen verschijnen ook in Single en blijven bewaard bij modelwissel');
+ await click('Timeline');await until("document.querySelector('.vt')?.getClientRects().length",'current timeline');await click('Nieuw');await click('＋ Leeg blok');
+ const set=(selector,value)=>input('.vt '+selector,value);
+ const choose=async id=>{await until(`!!document.querySelector('[aria-label=Videomodel] option[value="${id}"]')`,'model available');await set('[aria-label=Videomodel]',id);};
+ const prompt=()=>'textarea[placeholder="Wat gebeurt er in deze scène?"]';
+ await choose(VEO);assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').max"),'2');
+ await set('[aria-label=Resolutie]','4k');assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').getAttribute('aria-valuetext')"),'8 seconden');
+ await set('[aria-label="Veo-uitvoering"]','fast');await set('[aria-label="Negatieve prompt"]','tekst in beeld');
+ queue.push(join(fixtures,'reference.png'));await click('＋ Startbeeld kiezen');await until("!!document.querySelector('.vt img.vt-reference') && !document.querySelector('.vt-generation-controls').disabled",'start image ready');queue.push(join(fixtures,'reference.png'));await click('＋ Eindbeeld kiezen');await until("document.querySelectorAll('.vt img.vt-reference').length===2 && !document.querySelector('.vt-generation-controls').disabled",'end image ready');
+ await set(prompt(),'Een papieren boot op een meer');await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'Veo simulated generation');
+ assert.equal(contractRequests.at(-1).endpoint,'fal-ai/veo3.1/fast/first-last-frame-to-video');assert.equal(contractRequests.at(-1).body.duration,'8s');assert.equal(contractRequests.at(-1).body.resolution,'4k');
+ passes.push('Veo Fast, eerste/laatste beeld en 4K dwingen 8 s af en gaan via de juiste aanvraagroute');
+ await click('Genereren');await choose(KLING);assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').max"),'12');await set('[aria-label=Generatieduur]',5);await set(prompt(),'');
+ await click('＋ Shot');await set('[aria-label="Shot 1 prompt"]','De boot vaart');await click('＋ Shot');await set('[aria-label="Shot 2 prompt"]','De camera komt dichterbij');await set('[aria-label="Shot 2 duur"]',5);
+ await click('＋ Personage of object');await set('[aria-label="Element 1 hoofdbeeld"]','https://fixture.invalid/front.png');await set('[aria-label="Element 1 aanzichten"]','https://fixture.invalid/side.png');await set('[aria-label="Prompt volgen"]',0.7);
+ await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'Kling simulated generation');
+ assert.equal(contractRequests.at(-1).endpoint,'fal-ai/kling-video/v3/pro/image-to-video');assert.equal(contractRequests.at(-1).body.multi_prompt.length,2);assert.equal(contractRequests.at(-1).body.elements.length,1);
+ await click('Opslaan');const projectId=await js("localStorage.getItem('huphe:timeline:last-project')");const saved=JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,projectId,'project.json'),'utf8'));
+ assert.equal(saved.clips[0].variants.at(-1).generation.extraParams.multi_prompt[1].duration,'5');assert.equal(saved.clips[0].generation.extraParams.cfg_scale,0.7);
+ passes.push('Kling 3: 3–15 s, twee shots en een personage gaan mee met de aanvraag en blijven in de variant opgeslagen');
+ await click('Genereren');await choose(WAN);await set(prompt(),'Een papieren boot op een meer');queue.push(join(fixtures,'baseline.wav'));await click('＋ Audioreferentie');await until("document.querySelectorAll('.vt-reference-item').length===1 && !document.querySelector('.vt-generation-controls').disabled",'audio reference ready');await set('[aria-label="Negatieve prompt"]','onscherp');await js("document.querySelector('.vt [aria-label=\"Prompt uitbreiden\"]').click()");
+ assert.equal(await js("!!document.querySelector('.vt [aria-label=\"Audio genereren\"]')"),false);assert.equal(await js("!!document.querySelector('.vt [aria-label=\"Seed\"]').disabled"),false);
+ await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'Wan simulated generation');
+ assert.equal(contractRequests.at(-1).endpoint,'fal-ai/wan-25-preview/image-to-video');assert.ok(contractRequests.at(-1).body.audio_url);assert.equal(contractRequests.at(-1).body.enable_prompt_expansion,false);
+ passes.push('Wan: startbeeld plus eigen audio, negatieve prompt en promptuitbreiding worden samen doorgegeven');
+ await click('Genereren');await choose(SEEDANCE);await js("document.querySelector('.vt [aria-label=Draft]').click()");assert.equal(await js("document.querySelector('.vt [aria-label=Draft]').disabled"),false);
+ await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'Seedance reference draft simulation');
+ assert.equal(contractRequests.at(-1).endpoint,'bytedance/seedance-2.5/us/reference-to-video');assert.equal(contractRequests.at(-1).body.draft,true);assert.equal(contractRequests.at(-1).body.resolution,'480p');
+ passes.push('Seedance: draft met referenties blijft beschikbaar en gebruikt de US-referentieroute');
+ await click('Genereren');await writeFile(join(work,'artifacts','model-capabilities.png'),(await window.webContents.capturePage()).toPNG());
+}
 (async()=>{try{
  await app.whenReady();registerVideoTimelineIPC();protocol.handle('huphe',request=>serveLocalMedia(request,decodeURIComponent(new URL(request.url).pathname.replace(/^\/+/,''))));
  const timelineTools=await requireTimelineTools();
  await runTimelineTool(timelineTools.ffmpeg,['-hide_banner','-loglevel','error','-y','-i',join(fixtures,'source-C.mp4'),'-i',join(fixtures,'baseline.wav'),'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-shortest',audioVideoFile]);
  dialog.showOpenDialog=async()=>({canceled:false,filePaths:[queue.shift()]});dialog.showSaveDialog=async()=>({canceled:false,filePath:join(work,'ui-export.mp4')});
- ipcMain.handle('test:capabilities',()=>({ok:true,models:[{model_id:'bytedance/seedance-2.5',provider:'fal',markup_pct:0,video_cost_estimate:10000,supported_durations:[4,5],supported_resolutions:['480p','720p','1080p'],supported_aspect_ratios:['16:9','9:16'],generate_audio:true,seed:true,bitrate_mode:true,codec:true,supports_end_image:true,supports_references:true,reference_limits:{image:4,video:2,audio:2},supports_auto_duration:true,supports_draft:true,draft_rate_per_second:0.005,draft_finalize_rate_per_second:0.01,pricing_skus:{duration_seconds:'0.01'}},{model_id:'fal-ai/veo3.1',provider:'fal',markup_pct:0,video_cost_estimate:10000,supported_durations:[6,10],supported_resolutions:['720p'],supported_aspect_ratios:['16:9'],generate_audio:false,pricing_skus:{duration_seconds:'0.01'}}]}));
+ ipcMain.handle('test:capabilities',()=>({ok:true,models:currentContracts?currentCaps:[{model_id:'bytedance/seedance-2.5',provider:'fal',markup_pct:0,video_cost_estimate:10000,supported_durations:[4,5],supported_resolutions:['480p','720p','1080p'],supported_aspect_ratios:['16:9','9:16'],generate_audio:true,seed:true,bitrate_mode:true,codec:true,supports_end_image:true,supports_references:true,reference_limits:{image:4,video:2,audio:2},supports_auto_duration:true,supports_draft:true,draft_rate_per_second:0.005,draft_finalize_rate_per_second:0.01,pricing_skus:{duration_seconds:'0.01'}},{model_id:'fal-ai/veo3.1',provider:'fal',markup_pct:0,video_cost_estimate:10000,supported_durations:[6,10],supported_resolutions:['720p'],supported_aspect_ratios:['16:9'],generate_audio:false,pricing_skus:{duration_seconds:'0.01'}}]}));
  ipcMain.handle('test:prepare-references',async(_event,args)=>{
   assert.equal(args.accessToken,'local-fixture-only');
   const saved=JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,args.projectId,'project.json'),'utf8'));
@@ -390,6 +503,24 @@ async function scrubAdditionalSource(file) {
   return {ok:true,references};
  });
  ipcMain.handle('test:generate',async(_event,args)=>{
+  if(currentContracts){
+   const settings=args[5],refs=args[7];
+   const media=value=>value?'https://fixture.invalid/image.png':undefined;
+   const request=buildVideoGenerationRequest(currentCaps.find(c=>c.model_id===args[1]),{
+    prompt:args[0],image_url:media(args[4]),end_image_url:media(args[9]),duration:settings.duration,resolution:settings.resolution,aspect_ratio:settings.aspectRatio,
+    generate_audio:settings.generateAudio,draft:settings.draft,seed:settings.seed,codec:settings.codec,bitrate_mode:settings.bitrateMode,extra_params:settings.extraParams,
+    image_urls:refs?.imageUrls,video_urls:refs?.videoUrls,audio_urls:refs?.audioUrls,task:refs?.task});
+   contractRequests.push(request);generated++;
+   return {ok:true,filePath:'huphe://file/'+encodeURIComponent(join(fixtures,'source-C.mp4')),...(request.draft?{draftId:'fixture-current-draft',resolvedDuration:4}:{})};
+  }
+
+  if(trackDeletionGeneration){
+   const held=trackDeletionGeneration;
+   const saved=JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,held.projectId,'project.json'),'utf8'));
+   const job=saved.jobs.find(job=>job.id===args[8]);assert.equal(job?.clipId,held.clipId);assert.equal(job.status,'running');
+   generated++;await new Promise(resolve=>{held.release=resolve;});
+   return {ok:true,filePath:'huphe://file/'+encodeURIComponent(join(fixtures,'source-C.mp4'))};
+  }
   assert.equal(args[1],'bytedance/seedance-2.5');assert.equal(args[5].duration,expectedGenerationSettings?.duration ?? 4);
   if(!expectedReferenceTask){assert.match(args[4],/^huphe:\/\/file\//,'Het gekozen startbeeld wordt meegestuurd');assert.match(args[9],/^huphe:\/\/file\//,'Het gekozen eindbeeld wordt meegestuurd');}
   assert.ok(expectedGenerationClip,'De generatieduurtest heeft een montageblok voorbereid');
@@ -421,6 +552,7 @@ async function scrubAdditionalSource(file) {
  window.webContents.on('console-message',(_event,level,message)=>{if(level>=3){rendererErrors.push(message);console.error('renderer:',message)}});
  window.webContents.on('did-fail-load',(_e,code,description)=>console.error('load:',code,description));
  await window.loadURL(process.env.TEST_URL);await until("document.querySelector('input[placeholder=\"Beschrijf je video…\"]') && !document.querySelector('[aria-label=\"Model kiezen\"]')?.disabled",'video generator');
+ if(process.env.TEST_MODEL_CONTROLS_ONLY){await modelCapabilityControls();console.log(JSON.stringify({passed:passes,rendererErrors,generatedProviderCalls:0,localSimulatedGenerations:generated},null,2));app.exit(0);return;}
  const draftPrompt='Deze videogenerator-prompt blijft bewaard bij een bezoek aan de tijdlijn.';
  await input('input[placeholder="Beschrijf je video…"]',draftPrompt);
  await js("window.__generatorPromptNode=document.querySelector('input[placeholder=\"Beschrijf je video…\"]')");
@@ -485,6 +617,8 @@ async function scrubAdditionalSource(file) {
  await generationSettingsParity(id,expectedGenerationClip.id);
  await mkdir(join(work,'artifacts'),{recursive:true});await writeFile(join(work,'artifacts','timeline.png'),(await window.webContents.capturePage()).toPNG());
  await multitrackEditing();
+ await deleteTimelineTracks();
+ await modelCapabilityControls();
  if(process.env.TEST_SCRUB_SOURCE){const result=await scrubAdditionalSource(process.env.TEST_SCRUB_SOURCE);console.log('Additional source pixels:',JSON.stringify(result));passes.push('Extra lokale bron: compositorbeelden blijven zichtbaar en verversen tijdens snel slepen');}
  const playingSamples=previewSamples.filter(x=>x.state==='playing');const previewSummary={samples:playingSamples.length,maxObservedDriftMs:Math.max(...playingSamples.map(x=>Math.abs(x.drift))),rebufferCount};const report={passed:passes,rendererErrors,previewSamples,previewSummary,scrubPixelSummary,videoEvents,generatedProviderCalls:0,localSimulatedGenerations:generated,localSimulatedFinalizations:finalized,preparedReferenceRequests:preparedReferenceCalls.length,export:join(work,'ui-export.mp4'),screenshot:join(work,'artifacts','timeline.png'),singleScreenshot:join(work,'artifacts','single.png')};await writeFile(join(work,'artifacts','report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({...report,previewSamples:undefined,videoEvents:undefined},null,2));app.exit(0);
  }catch(error){console.error(error);try{if(window&&!window.isDestroyed()){await writeFile(join(work,'failure.png'),(await window.webContents.capturePage()).toPNG());console.error(await js('document.body.innerText'));}}catch(captureError){console.error('Failure screenshot:',captureError);}app.exit(1)}})();

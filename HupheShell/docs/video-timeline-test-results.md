@@ -164,3 +164,59 @@ Validatie:
 - De Electron-schermtest slaagt voor 23 scenario’s, zonder rendererfouten of zwarte scrubbeelden, en controleert naast de bestaande generatie-/trim-/scrub-/exportscenario’s ook mediakaarten slepen, invoegen, verkeerde drops, undo/redo, afbeeldingen, volumes, clips tussen sporen verplaatsen en heropenen. Native DataTransfer-events testen de mediakaarten; echte muisbewegingen testen trimmen en doorslepen tussen sporen.
 
 Artefacten: `.local/timeline-ui-smoke/artifacts/multitrack.png`, `report.json`, `.local/video-timeline-fixtures/export-test-results.json` en `.local/multitrack-preview-test.log`. Er zijn geen betaalde providerverzoeken uitgevoerd. De productiebuild slaagt. De repositorybrede typecheck heeft bestaande fouten buiten de tijdlijn; de gewijzigde tijdlijnbestanden melden geen typefouten.
+
+
+## Video- en audiosporen verwijderen
+
+Naast iedere spoornaam staat een prullenbak. Die verwijdert het spoor met alle bijbehorende blokken in één handeling. Bronbestanden blijven in Projectmedia en op schijf; jobhistorie blijft in het project. Andere sporen behouden hun tijden en uitsneden. De selectie van een verwijderd fragment wordt gewist, afspelen stopt en de afspeelkop wordt begrensd tot de resterende filmlengte. Met één ‘Ongedaan maken’ komen het spoor en alle blokken inclusief varianten terug; ‘Opnieuw’ verwijdert ze weer.
+
+Ook lege sporen en het laatste spoor kunnen worden verwijderd. Een project met expliciet nul sporen kan worden opgeslagen en heropend. Media aanklikken, importeren of ‘＋ Leeg blok’ gebruiken maakt zo nodig weer een passend spoor. De grens van 32 sporen blijft gelden. Tijdens een lopende generatie is alleen de verwijderknop van het betreffende spoor uitgeschakeld, met uitleg in de tooltip; andere sporen blijven beschikbaar.
+
+De Electron-schermtest slaagt voor 27 scenario’s, zonder rendererfouten of betaalde providerverzoeken. De nieuwe controles verwijderen gevulde video- en audiosporen met echte muisklikken, controleren bronbestanden op schijf, bewaren overige sporen exact en herstellen de verwijdering met één undo/redo. Ook een leeg spoor, alle laatste sporen, heropenen met nul sporen en opnieuw toevoegen via mediakaarten, import en een leeg blok zijn gecontroleerd. Een tijdelijk vastgehouden lokale generatie controleert de bescherming van het betreffende spoor, het verwijderen van een ander spoor tijdens die generatie en behoud van de afgeronde job na verwijderen. Screenshot: `.local/timeline-ui-smoke/artifacts/track-removal.png`; log: `.local/track-deletion-ui.log`. De productiebuild slaagt; de gewijzigde tijdlijncode meldt geen typefouten binnen de repositorycheck, die bestaande fouten elders blijft melden.
+
+
+## Modelopties in Single en Timeline — 3 november 2026
+
+De modelcontrole staat in [video-model-capabilities.md](video-model-capabilities.md), met officiële bronnen per route. De uitbreiding gebruikt één set modelvelden in beide editors en bewaart de effectieve aanvraag bij de variant.
+
+- `npm run test:video-models`: geslaagd; Seedance-draft met referenties en correcte verlengduur, Veo Standaard/Fast en alle vijf ingangen, Wan met eigen audio en Kling-shots/elementen. Ongeldige combinaties worden vóór reservering geweigerd.
+- `npm run test:video-models-ui`: vijf aanvullende schermscenario's geslaagd, zonder rendererfouten. Vier lokale gesimuleerde generaties controleerden de daadwerkelijke invoer vanuit Timeline. Single bewaart de nieuwe velden bij modelwissels.
+- `npm run test:timeline-ui`: alle 32 scenario's geslaagd, inclusief de eerdere 27 montage-/variant-/spoorhandelingen. Negen lokale generaties, één lokale finalisatie, nul providergeneraties. Meetgegevens staan in `.local/timeline-ui-smoke/artifacts/report.json`.
+- `npm run test:timeline`: protocol-, montage- en opslagtests geslaagd, inclusief verschillende referentiegrenzen voor Veo en Wan en afwijzing vóór upload.
+- `npm run build`: geslaagd. De volledige TypeScript-controle meldt bestaande projectfouten; in de nieuwe modelcontracten en bediening zijn geen aanvullende typefouten gevonden.
+
+De schermtest wacht bij import en bij plaatsing op een nieuw spoor nu op het resultaat in de interface voordat hij verder klikt of opslaat. Dit voorkomt dat een test het vorige opgeslagen project leest terwijl de klik nog wordt verwerkt.
+
+Dit bewijs betreft lokale bediening, routes en opgeslagen aanvragen. Er is geen betaalde providerproef, prijsreconciliatie of hersteltest toegevoegd.
+
+### Productie-update na toestemming
+
+Op 3 november 2026 heeft Tom expliciet toestemming gegeven voor de productie-update. `proxy-fal-video` is bijgewerkt van versie 9 naar **versie 10** en staat op **ACTIVE**, met JWT-controle ingeschakeld. De vier teruggelezen runtime-bronbestanden komen exact overeen met de geteste lokale versie; andere functies zijn ongewijzigd. De functie antwoordt op een OPTIONS-controle met HTTP 200. Er zijn geen migraties of betaalde generaties uitgevoerd. De herstelkopie van versie 9 blijft lokaal in `.local/video-proxy-before/`. Herlaad de app om de bijgewerkte modelmogelijkheden op te halen.
+
+## RIFE-overgangen — 3 november 2026
+
+`npm run test:rife` controleert echte PNG-captures uit originele bestanden: 1920×1080, fractionele trims, VFR-timestamps, de exacte knip, transformatie/dekking van lagere lagen, uitsluiten van eigen/hogere en verouderde lagere overgangen, behoud van bronnen, opruimen bij gedeeltelijke fout, bronafhankelijkheden en opslaan/heropenen. Resultaatmetadata wordt gecontroleerd voordat een variant actief kan worden.
+
+Provider- en clienttests gebruiken lokale antwoorden: twee beelden, N−1 tussenframes, 25 fps, beginframe inbegrepen en rechter eindframe uitgesloten; reservering met vastgelegde prijs, afrekening op gemeten rekentijd, restitutie, herhaalde statusaanvragen, ontbrekende meetgegevens en bevestigde/onbevestigde annulering. De SQL-migratie is voorbereid; deze tests voeren haar niet uit.
+
+`npm run test:rife-ui` slaagt met vijf Electron-scenario’s en nul rendererfouten. Een echte muisbeweging over twee bezette fragmenten maakt een bovenliggend overgangsblok en twee PNG’s. Eén expliciete, lokaal gesimuleerde generatie levert een nieuwe variant; zelf actief kiezen houdt de oorspronkelijke filmduur en fragmenten intact. Verplaatsen of de bron trimmen maakt captures verouderd; vernieuwen en heropenen werken. Een gesimuleerde weigering wegens onvoldoende saldo bewaart een `failed`-job en laat opnieuw proberen toe. Rapport: `.local/rife-timeline-ui/artifacts/report.json`.
+
+De build slaagt. Repository-brede TypeScript-controles bevatten bestaande fouten; in de nieuwe RIFE-/tijdlijnbestanden zijn geen typefouten gemeld. Er is geen betaalde RIFE-generatie uitgevoerd; de kwaliteit van echte tussenframes is nog niet gemeten.
+
+De bestaande volledige `npm run test:timeline-ui` slaagt na de RIFE-wijziging met alle 32 scenario’s: nul rendererfouten, nul zwarte frames tijdens scrubbing en nul herbufferingen bij de afspeelproef. De losse backendregressie kon binnen de sandbox geen VideoToolbox-encoder openen; automatische goedkeuringsreview voor die herhaling liep in een timeout. De gerichte RIFE-capturetests gebruiken lokale software-encoding en slagen wel.
+
+Een echte lokale RIFE-laagexport is ook gecontroleerd: de film blijft 100 frames / 4 seconden, frame 24 toont bron A, frames 25–64 tonen de 40-frame overgang en frame 65 hervat bron B. Een verouderde actieve overgang wordt vóór het starten van de encoder geweigerd en laat een bestaande export intact. Het testresultaat vervangt alleen de provideruitvoer; compositie en encoding gebruiken de echte exportcode.
+
+## RIFE via de modellenlijst — 3 november 2026
+
+De aparte RIFE-knop is vervangen door **RIFE** in de gewone Model-lijst bij Genereren. Een normaal getekend blok op een bovenliggend videospoor houdt bij die keuze dezelfde ID, positie, lengte en hetzelfde spoor; geldige begin-/eindbeelden worden automatisch vastgelegd. De dropdown blijft beschikbaar om terug te wisselen naar een ander model. Bestaande varianten blijven intact en hun bronafhankelijkheid wordt gecontroleerd, ook nadat voor de volgende aanvraag een ander model is gekozen.
+
+`npm run test:rife-ui` slaagt nu met acht scenario’s, nul rendererfouten en nul betaalde calls: normale tekening en modelkeuze, scherpe captures, onvoldoende saldo en opnieuw proberen, expliciete variantactivatie, wisselen RIFE/Seedance, gewijzigde bronnen/verplaatsen, heropenen, ongeldige plaatsing en ontbrekende RIFE-servercapability. Zonder servercapability blijft RIFE selecteerbaar voor lokale bronbeelden; genereren blijft uitgeschakeld met uitleg.
+
+`npm run test:rife`, `npm run test:video-models` en `npm run build` slagen. De repository-brede TypeScript-controle meldt bestaande fouten buiten de gewijzigde bestanden; de gewijzigde UI-bestanden hebben geen typefouten. Serveractivering is in deze bedieningswijziging niet uitgevoerd.
+
+## RIFE-frameslider — 3 november 2026
+
+Bij RIFE bepaalt **Aantal frames** direct de bloklengte: 2–65 totale frames in stappen van één. De beginpositie blijft staan, de rechterrand en duur veranderen mee. Een wijziging bij Fragment wordt ook in de slider zichtbaar. Bestaande varianten blijven bewaard; gewijzigde grenzen vereisen nieuwe bronbeelden.
+
+`npm run test:rife-ui` slaagt met negen scenario’s en nul rendererfouten. De gerichte Electron-test controleert minimum/maximum, toetsenbordstappen, blokbreedte, opgeslagen duur, behoud van brontrims en variantsnapshots, en vernieuwen van gewijzigde eindbeelden. Een echte muissleep controleert de bijgewerkte blokbreedte en opgeslagen duur terwijl de muisknop nog ingedrukt is. Screenshot: `.local/rife-timeline-ui/artifacts/rife-slider-drag.png`. De build slaagt. De provider wordt uitsluitend lokaal gesimuleerd; er zijn geen betaalde calls gedaan.

@@ -35,3 +35,19 @@
 .vt-asset[draggable=true]{cursor:grab}.vt-asset[draggable=true]:active{cursor:grabbing}.vt-asset-art.image{background:repeating-conic-gradient(#252932 0% 25%,#343a44 0% 50%) 0 0/16px 16px}.vt-asset-art img{width:100%;height:100%;object-fit:contain;pointer-events:none}.vt-variant>img{max-width:100%;max-height:180px;object-fit:contain}.vt .vt-track-label{flex-shrink:0;align-self:stretch;min-width:96px;border-radius:0;border-top:0;border-bottom:0;border-left:0;text-align:left;white-space:normal;font-size:11px}.vt .vt-track-label.active{color:#f1cd45;background:#292b26}.vt .vt-timeline{max-height:45%;flex-shrink:0}.vt .vt-timeline-toolbar{flex-wrap:wrap;min-height:46px;height:auto;padding-top:7px;padding-bottom:7px}.vt .vt-track-drop-active{outline:2px solid #f1cd45;background:#484126}.vt-drop-preview{position:absolute;top:5px;height:55px;z-index:2;box-sizing:border-box;background:#756323bb;border:2px dashed #f1cd45;border-radius:6px;display:flex;flex-direction:column;gap:3px;padding:8px;pointer-events:none;font-size:11px;overflow:hidden}.vt-drop-preview.invalid{background:#6c2929b0;border-color:#ef7878}.vt-drop-preview b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vt-layer-controls{border-top:1px solid #30343d;margin-top:16px;padding-top:8px}.vt-layer-controls h3{font-size:13px}.vt-layer-controls input[type=range]{padding:0;accent-color:#f1cd45}.vt-inspector input[aria-label=Volume]{accent-color:#f1cd45}
 
 .vt-asset-dragging .vt-playhead{pointer-events:none}
+
+.vt-track-heading{position:sticky;left:0;z-index:3;display:flex;align-items:center;flex:0 0 96px;width:96px;background:#1c2129;border-right:1px solid #343943;padding-right:4px}
+.vt-track-heading.active{color:#f1cd45;background:#292b26}
+.vt .vt-track-heading .vt-track-label{position:static;z-index:auto;flex:1;min-width:0;width:auto;border:0;background:transparent;padding:6px 5px;overflow-wrap:anywhere}
+.vt .vt-track-delete{display:flex;align-items:center;justify-content:center;flex:0 0 24px;width:24px;height:28px;padding:0;border:0;background:transparent;color:#8c96a5}
+.vt .vt-track-delete:hover:not(:disabled){color:#ff8c8c;background:#492a2d}
+.vt .vt-track-delete:focus-visible{outline:2px solid #e8c64a;outline-offset:1px}
+
+/* Frame interpolation occupies its own video layer. */
+.vt .vt-rife-block { background: #45385d; border-color: #aa8dce; }
+.vt-rife-frames { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
+.vt-rife-frames figure { margin: 0; min-width: 0; }
+.vt-rife-frames img, .vt-rife-frame-empty { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #080a0d; border: 1px solid #393140; border-radius: 6px; }
+.vt-rife-frame-empty { display: grid; place-items: center; font-size: 11px; color: #9aa1ad; }
+.vt-rife-frames figcaption { margin-top: 6px; color: #b8b1c3; font-size: 12px; }
+.vt-rife-controls > button { width: 100%; }

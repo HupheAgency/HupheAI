@@ -14,7 +14,8 @@ const generation = z.object({
   resolution: z.string().max(100), aspectRatio: z.string().max(100), referenceAssetId: timelineIdSchema.optional(),
   requestedDuration: z.union([finite.positive().max(3600), z.literal('auto')]),
   endImageAssetId: timelineIdSchema.optional(), referenceAssetIds: z.array(timelineIdSchema).max(50).optional(),
-  task: z.enum(['reference', 'editing', 'extension']).optional(), draft: z.boolean().optional(), generateAudio: z.boolean().optional(),
+  task: z.enum(['auto', 'reference', 'editing', 'extension']).optional(), draft: z.boolean().optional(), generateAudio: z.boolean().optional(),
+  extraParams: z.record(z.string().max(100), z.unknown()).refine(value => JSON.stringify(value).length <= 100_000, 'Te veel modelinstellingen.').optional(),
   seed: finite.int().optional(), bitrateMode: z.enum(['standard', 'high']).optional(), codec: z.enum(['auto', 'H264', 'H265']).optional(),
 })
 const asset = z.object({
@@ -24,9 +25,13 @@ const asset = z.object({
   width: finite.int().positive().max(8192).optional(), height: finite.int().positive().max(8192).optional(),
   fps: finite.positive().max(1000).optional(), sampleRate: finite.int().positive().max(192000).optional(),
 })
+const transition = z.object({ kind: z.literal('rife'), startFrameAssetId: timelineIdSchema.optional(), endFrameAssetId: timelineIdSchema.optional(),
+  sourceSignature: z.string().max(1000).optional(), capturedStart: finite.int().min(0).max(90_000).optional(),
+  capturedEnd: finite.int().min(0).max(90_000).optional(), capturedAt: date.optional() })
 const variant = z.object({ id: timelineIdSchema, assetId: timelineIdSchema, createdAt: date,
   inPoint: finite.min(0).max(86_400), generation: generation.optional(), requestId: z.string().max(1000).optional(),
-  draftId: z.string().min(1).max(1000).optional(), draftDuration: finite.positive().max(3600).optional(), finalizedFromVariantId: timelineIdSchema.optional() })
+  draftId: z.string().min(1).max(1000).optional(), draftDuration: finite.positive().max(3600).optional(), finalizedFromVariantId: timelineIdSchema.optional(),
+  transition: transition.optional() })
 export const timelineProjectSchema = z.object({
   schemaVersion: z.literal(1), id: timelineIdSchema, name: z.string().trim().min(1).max(200), createdAt: date, updatedAt: date,
   width: finite.int().min(16).max(4096).refine(n => n % 2 === 0), height: finite.int().min(16).max(4096).refine(n => n % 2 === 0),
@@ -36,7 +41,7 @@ export const timelineProjectSchema = z.object({
     trackId: timelineIdSchema.optional(), transform: z.object({ scale: finite.min(0.05).max(2), x: finite.min(0).max(1), y: finite.min(0).max(1) }).optional(),
     opacity: finite.min(0).max(1).optional(), gain: finite.min(0).max(2).optional(),
     start: finite.int().min(0).max(90_000), duration: finite.int().positive().max(90_000), activeVariantId: timelineIdSchema.optional(),
-    variants: z.array(variant).max(200), generation: generation.optional() })).max(500),
+    variants: z.array(variant).max(200), generation: generation.optional(), transition: transition.optional() })).max(500),
   jobs: z.array(z.object({ id: timelineIdSchema, clipId: timelineIdSchema, createdAt: date, generation,
     status: z.enum(['running', 'completed', 'failed', 'unknown']), assetId: timelineIdSchema.optional(), error: z.string().max(10_000).optional(),
     kind: z.enum(['generate', 'finalize']).optional(), sourceVariantId: timelineIdSchema.optional() })).max(2000).optional(),

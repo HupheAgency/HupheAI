@@ -1,3 +1,6 @@
+import { enhanceVideoCapability, buildVideoGenerationRequest } from '../_shared/video-generation-contract.ts'
+import { RIFE_MODEL, RIFE_CAPABILITY, rifeReservationAmount } from '../_shared/rife-transition-contract.ts'
+import { submitRifeTransition, handleRifeJob } from '../_shared/rife-transition-handler.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { requireUserId, AuthError } from '../_shared/auth.ts'
 import { json, handleOptions, CORS_HEADERS } from '../_shared/response.ts'
@@ -28,6 +31,7 @@ const USD_TO_MILLICREDITS = 100000
 // OpenRouter's resolveRatePerSecond hieronder verwacht, zodat die functie ongewijzigd
 // hergebruikt kan worden en de client-side schatting in AtelierMediaPanel ook werkt.
 interface VideoModelCapability {
+  [key: string]: any
   model_id: string
   supported_durations: number[]
   supported_resolutions: string[]
@@ -74,7 +78,7 @@ interface VideoModelCapability {
   family?: 'remove_object' | 'edit_object' | 'restyle' | 'enhance' | 'interpolate'
   // Prijsmodel voor family-modellen: 'flat_per_video' slaat resolveRatePerSecond over
   // (VOID), 'per_second' (default wanneer family gezet is) gebruikt output_duration_source.
-  pricing_model?: 'per_second' | 'flat_per_video'
+  pricing_model?: 'per_second' | 'flat_per_video' | 'compute_second'
   flat_rate_usd?: number
   // Of de billing-duur van de gemeten BRONvideo komt (client-side duration-probe) i.p.v.
   // een door de gebruiker gekozen duration -- alle family-modellen gebruiken 'source_video'.
@@ -88,7 +92,7 @@ interface VideoModelCapability {
   // Modelspecifieke velden die de renderer generiek rendert (zie ExtraFieldsPanel, stap 6)
   // en die hier als enige laag gevalideerd worden via resolveExtraParams.
   extra_fields?: Record<string, {
-    type: 'select' | 'boolean' | 'number' | 'text'
+    type: 'select' | 'boolean' | 'number' | 'text' | 'json'
     label: string
     options?: string[]
     default?: unknown
@@ -100,6 +104,7 @@ interface VideoModelCapability {
 const SUPPORTED_DURATIONS = Array.from({ length: 27 }, (_, i) => i + 4) // 4..30
 
 const CAPABILITIES: Record<string, VideoModelCapability> = {
+  [RIFE_MODEL]: RIFE_CAPABILITY,
   'bytedance/seedance-2.5': {
     model_id: 'bytedance/seedance-2.5',
     supported_durations: SUPPORTED_DURATIONS,
@@ -134,7 +139,7 @@ const CAPABILITIES: Record<string, VideoModelCapability> = {
     draft_finalize_rate_per_second: 1.149696,
   },
 
-  // ── Generate Video: 3 nieuwe fal-modellen naast Seedance 2.5 (geen references/draft) ──
+  // Basisregistraties; route-specifieke instellingen komen uit video-generation-contract.
   'fal-ai/veo3.1': {
     model_id: 'fal-ai/veo3.1',
     supported_durations: [4, 6, 8],
@@ -161,12 +166,11 @@ const CAPABILITIES: Record<string, VideoModelCapability> = {
     seed: false,
     bitrate_mode: false,
     codec: false,
-    // Enige van de 3 nieuwe Generate Video-modellen met end_image_url (alleen i2v).
+    // Start- en eindbeeld worden door het modelcontract naar Kling-velden vertaald.
     supports_end_image: true,
     image_url_field: 'start_image_url',
     // Bevestigd via fal's eigen pricing-tekst: $0.112/s zonder audio, $0.168/s met
-    // audio (1.5x), $0.196/s met audio+voice-control (die laatste tier is v1 niet
-    // geïmplementeerd -- geen voice-control-param op dit model). Geen resolutie- of
+    // audio (1.5x), $0.196/s met audio+voice-control via een element. Geen resolutie- of
     // duration-afhankelijke staffel; de echte API kent zelfs geen resolution-veld
     // (alleen aspect_ratio) -- supported_resolutions: ['1080p'] hierboven is puur
     // een UI-label, geen echte fal-parameter.
@@ -313,6 +317,9 @@ const CAPABILITIES: Record<string, VideoModelCapability> = {
   },
 }
 
+// Route-specifieke mogelijkheden en nieuwe invoervelden hebben één contract.
+for (const [id, capability] of Object.entries(CAPABILITIES)) CAPABILITIES[id] = enhanceVideoCapability(capability)
+
 // Endpoints per model_id: text-to-video (alleen prompt), image-to-video (prompt +
 // image_url) of reference-to-video (prompt + image_urls/video_urls/audio_urls).
 // fal's schema voor de image-to-video-variant locked aspect_ratio hard op "auto" --
@@ -330,6 +337,7 @@ const ENDPOINTS: Record<string, {
   // text/image/reference-varianten -- zie capability.family in de submit-actie).
   edit?: string
 }> = {
+  [RIFE_MODEL]: { imageToVideo: RIFE_MODEL },
   'bytedance/seedance-2.5': {
     textToVideo: 'bytedance/seedance-2.5/us/text-to-video',
     imageToVideo: 'bytedance/seedance-2.5/us/image-to-video',
@@ -530,35 +538,8 @@ Deno.serve(async (req: Request) => {
       const result = (activeModels ?? []).flatMap((m) => {
         const capability = CAPABILITIES[m.model_id]
         if (!capability) return []
-        return [{
-          model_id: m.model_id,
-          provider: 'fal',
-          markup_pct: m.markup_pct,
-          video_cost_estimate: m.video_cost_estimate,
-          supported_durations: capability.supported_durations,
-          supported_resolutions: capability.supported_resolutions,
-          supported_aspect_ratios: capability.supported_aspect_ratios,
-          generate_audio: capability.generate_audio,
-          seed: capability.seed,
-          bitrate_mode: capability.bitrate_mode,
-          codec: capability.codec,
-          supports_end_image: capability.supports_end_image,
-          pricing_skus: capability.pricing_skus,
-          supports_references: capability.supports_references ?? false,
-          reference_limits: capability.reference_limits ?? null,
-          supports_auto_duration: capability.supports_auto_duration ?? false,
-          supports_draft: capability.supports_draft ?? false,
-          draft_rate_per_second: capability.draft_rate_per_second ?? null,
-          draft_finalize_rate_per_second: capability.draft_finalize_rate_per_second ?? null,
-          family: capability.family ?? null,
-          prompt_optional: capability.prompt_optional ?? false,
-          extra_fields: capability.extra_fields ?? null,
-          pricing_model: capability.pricing_model ?? 'per_second',
-          flat_rate_usd: capability.flat_rate_usd ?? null,
-          output_duration_source: capability.output_duration_source ?? 'user_choice',
-          resolution_tiers: capability.resolution_tiers ?? null,
-          audio_rate_multiplier: capability.audio_rate_multiplier ?? null,
-        }]
+        return [{ ...capability, model_id: m.model_id, provider: 'fal', markup_pct: m.markup_pct, video_cost_estimate: m.video_cost_estimate,
+          ...(m.model_id === RIFE_MODEL ? { max_reservation: rifeReservationAmount(m.markup_pct) } : {}) }]
       })
 
       return json({ models: result })
@@ -639,7 +620,9 @@ Deno.serve(async (req: Request) => {
         return json({ error: `Model '${model}' niet geconfigureerd voor fal-video`, code: 'model_not_found' }, 403)
       }
 
-      if (!prompt && !capability.prompt_optional) {
+      if (model === RIFE_MODEL) return await submitRifeTransition(serviceClient, userId, aiModel, body, FAL_API_KEY)
+
+      if (capability.family && !prompt && !capability.prompt_optional) {
         return json({ error: 'prompt is verplicht' }, 400)
       }
 
@@ -728,112 +711,17 @@ Deno.serve(async (req: Request) => {
         })
       }
 
-      // duration mag ook letterlijk "auto" zijn (fal bepaalt de lengte zelf o.b.v. de
-      // prompt) -- los van forceAuto hieronder, dat is de gedwongen variant bij task
-      // editing/extension. resolvedDuration blijft hoe dan ook een getal, want onze
-      // eigen kostenschatting heeft altijd een numerieke basis nodig (zie baseCostUsd).
-      const isAutoDuration = duration === 'auto'
-      if (isAutoDuration && !capability.supports_auto_duration) {
-        return json({ error: `Model '${model}' ondersteunt geen automatische lengte`, code: 'invalid_params' }, 400)
-      }
-      const resolvedDuration: number = isAutoDuration ? 5 : (duration ?? 5)
-      let resolvedResolution: string = resolution ?? capability.supported_resolutions[0]
-      let resolvedAspectRatio: string = aspect_ratio ?? capability.supported_aspect_ratios[0]
-      // Modellen zonder generate_audio-ondersteuning negeren de client-waarde volledig --
-      // anders zou de prijsberekening hieronder nog een niet-bestaande audio-toeslag
-      // kunnen toepassen.
-      const resolvedGenerateAudio: boolean = capability.generate_audio ? (generate_audio ?? true) : false
-
-      const resolvedImageUrls: string[] = Array.isArray(image_urls) ? image_urls.filter(Boolean) : []
-      const resolvedVideoUrls: string[] = Array.isArray(video_urls) ? video_urls.filter(Boolean) : []
-      const resolvedAudioUrls: string[] = Array.isArray(audio_urls) ? audio_urls.filter(Boolean) : []
-      const hasReferences = resolvedImageUrls.length > 0 || resolvedVideoUrls.length > 0 || resolvedAudioUrls.length > 0
-
-      if (hasReferences && !capability.supports_references) {
-        return json({ error: `Model '${model}' ondersteunt geen referentie-media`, code: 'invalid_params' }, 400)
-      }
-
-      // Draft: altijd 480p output (non-US endpoint-familie dwingt dit af), ongeacht de
-      // meegegeven resolution -- override vóór de resolution-validatie hieronder, zodat
-      // die altijd slaagt. Referenties zijn (nog) niet getest in combinatie met draft,
-      // dus bewust geblokkeerd i.p.v. op ongeverifieerde prijsaannames te gokken.
-      const resolvedDraft: boolean = draft === true
-      if (resolvedDraft && !capability.supports_draft) {
-        return json({ error: `Model '${model}' ondersteunt geen draft-modus`, code: 'invalid_params' }, 400)
-      }
-      if (resolvedDraft && hasReferences) {
-        return json({ error: `Draft-modus ondersteunt nog geen referentie-media`, code: 'invalid_params' }, 400)
-      }
-      if (resolvedDraft) resolvedResolution = '480p'
-
-      // task (reference/editing/extension) is alleen een concept van de
-      // reference-to-video-endpoint -- zonder referenties blijft dit altijd 'reference'.
-      const resolvedTask: string = hasReferences ? (task ?? 'reference') : 'reference'
-      if (hasReferences && !['reference', 'editing', 'extension'].includes(resolvedTask)) {
-        return json({ error: `task '${resolvedTask}' niet ondersteund`, code: 'invalid_params' }, 400)
-      }
-      // 'editing'/'extension' dwingen fal's aspect_ratio + duration naar "auto" af.
-      const forceAuto = hasReferences && resolvedTask !== 'reference'
-
-      if (seed != null && !Number.isInteger(seed)) {
-        return json({ error: `seed moet een geheel getal zijn`, code: 'invalid_params' }, 400)
-      }
-      if (seed != null && !capability.seed) {
-        return json({ error: `Model '${model}' ondersteunt geen seed-parameter`, code: 'invalid_params' }, 400)
-      }
-
-      const resolvedBitrateMode: string = bitrate_mode ?? 'standard'
-      if (!['standard', 'high'].includes(resolvedBitrateMode)) {
-        return json({ error: `bitrate_mode '${resolvedBitrateMode}' niet ondersteund`, code: 'invalid_params' }, 400)
-      }
-      const resolvedCodec: string = codec ?? 'auto'
-      if (!['auto', 'H264', 'H265'].includes(resolvedCodec)) {
-        return json({ error: `codec '${resolvedCodec}' niet ondersteund`, code: 'invalid_params' }, 400)
-      }
-
-      if (hasReferences && capability.reference_limits) {
-        if (resolvedImageUrls.length > capability.reference_limits.image) {
-          return json({ error: `Te veel image-referenties (max ${capability.reference_limits.image})`, code: 'invalid_params' }, 400)
-        }
-        if (resolvedVideoUrls.length > capability.reference_limits.video) {
-          return json({ error: `Te veel video-referenties (max ${capability.reference_limits.video})`, code: 'invalid_params' }, 400)
-        }
-        if (resolvedAudioUrls.length > capability.reference_limits.audio) {
-          return json({ error: `Te veel audio-referenties (max ${capability.reference_limits.audio})`, code: 'invalid_params' }, 400)
-        }
-      }
-
-      if (!isAutoDuration && !capability.supported_durations.includes(resolvedDuration)) {
-        return json({ error: `duration '${resolvedDuration}' niet ondersteund door dit model`, code: 'invalid_params' }, 400)
-      }
-      if (!capability.supported_resolutions.includes(resolvedResolution)) {
-        return json({ error: `resolution '${resolvedResolution}' niet ondersteund door dit model`, code: 'invalid_params' }, 400)
-      }
-      if (!image_url && !hasReferences && !capability.supported_aspect_ratios.includes(resolvedAspectRatio)) {
-        return json({ error: `aspect_ratio '${resolvedAspectRatio}' niet ondersteund door dit model`, code: 'invalid_params' }, 400)
-      }
-
-      // image-to-video: fal's schema locked aspect_ratio op "auto" -- echte API-beperking.
-      // reference-to-video met task "editing"/"extension" dwingt hetzelfde af; alleen
-      // task "reference" (de default) laat aspect_ratio door de gebruiker instelbaar.
-      if ((image_url && !hasReferences) || forceAuto) {
-        resolvedAspectRatio = 'auto'
-      }
-
-      let ratePerSecond = resolveRatePerSecond(capability.pricing_skus, resolvedResolution, resolvedGenerateAudio)
-      // Audio-toeslag als losse vermenigvuldiger (Veo3.1/Kling-v3-pro) -- alleen van
-      // toepassing wanneer pricing_skus geen eigen "_with_audio"-sku heeft geleverd.
-      if (ratePerSecond != null && resolvedGenerateAudio && capability.audio_rate_multiplier) {
-        ratePerSecond *= capability.audio_rate_multiplier
-      }
-      // fal's reference-to-video rekent 0.6x bij videoreferenties (bevestigd in fal's
-      // pricing-tekst: "$0.34056/s @ 720p met video inputs" = 0.5676 * 0.6).
-      const videoRefDiscount = resolvedVideoUrls.length > 0 ? 0.6 : 1
+      let plan: ReturnType<typeof buildVideoGenerationRequest>
+      try { plan = buildVideoGenerationRequest(capability, body) }
+      catch (err) { return json({ error: (err as Error).message, code: 'invalid_params' }, 400) }
+      const { endpoint: endpointId, body: falBody, duration: resolvedDuration, resolution: resolvedResolution,
+        generateAudio: resolvedGenerateAudio, draft: resolvedDraft } = plan
+      let ratePerSecond = resolveRatePerSecond(plan.capability.pricing_skus, resolvedResolution, resolvedGenerateAudio)
+      if (ratePerSecond != null && resolvedGenerateAudio && plan.capability.audio_rate_multiplier) ratePerSecond *= plan.capability.audio_rate_multiplier
       const baseCostUsd = resolvedDraft
-        ? capability.draft_rate_per_second! * resolvedDuration
-        : ratePerSecond != null
-        ? ratePerSecond * resolvedDuration * videoRefDiscount
-        : (aiModel.video_cost_estimate! / USD_TO_MILLICREDITS) * (resolvedDuration / 5)
+        ? plan.capability.draft_rate_per_second * resolvedDuration
+        : ratePerSecond != null ? ratePerSecond * resolvedDuration * plan.videoReferenceDiscount
+        : (aiModel.video_cost_estimate! / USD_TO_MILLICREDITS) * resolvedDuration / 5
       const costWithMarkup = Math.ceil(baseCostUsd * USD_TO_MILLICREDITS * (1 + aiModel.markup_pct / 100))
 
       const { data: reservationRows, error: reserveError } = await serviceClient.rpc('reserve_credits_for_user', {
@@ -850,38 +738,6 @@ Deno.serve(async (req: Request) => {
         }, 402)
       }
       if (reserveError) throw reserveError
-
-      const endpointId = resolvedDraft
-        ? (image_url ? endpoints.imageToVideoDraft! : endpoints.textToVideoDraft!)
-        : hasReferences ? endpoints.referenceToVideo : (image_url ? endpoints.imageToVideo : endpoints.textToVideo)
-      const falBody: Record<string, unknown> = {
-        prompt,
-        resolution: resolvedResolution,
-        // "auto" bij editing/extension, of wanneer de gebruiker zelf expliciet voor
-        // automatische lengte koos -- fal leidt de lengte dan zelf af; onze eigen
-        // kostenberekening blijft intussen op resolvedDuration (5s-schatting bij auto,
-        // anders het getal dat de gebruiker koos) gebaseerd, zie baseCostUsd hierboven.
-        duration: (forceAuto || isAutoDuration) ? 'auto' : String(resolvedDuration),
-        aspect_ratio: resolvedAspectRatio,
-      }
-      // Alleen zetten wanneer het model het veld daadwerkelijk kent -- anders stuurt fal
-      // soms een validatiefout terug op een onbekend veld (bevestigde bug, zie plan-
-      // correctie 3; end_image_url/seed waren hier al wel correct op gated).
-      if (capability.generate_audio) falBody.generate_audio = resolvedGenerateAudio
-      if (capability.bitrate_mode) falBody.bitrate_mode = resolvedBitrateMode
-      if (capability.codec) falBody.codec = resolvedCodec
-      if (resolvedDraft) falBody.draft = true
-      if (hasReferences) {
-        falBody.task = resolvedTask
-        if (resolvedImageUrls.length) falBody.image_urls = resolvedImageUrls
-        if (resolvedVideoUrls.length) falBody.video_urls = resolvedVideoUrls
-        if (resolvedAudioUrls.length) falBody.audio_urls = resolvedAudioUrls
-        // seed wordt door fal alleen op deze endpoint geaccepteerd.
-        if (capability.seed && seed != null) falBody.seed = seed
-      } else if (image_url) {
-        falBody[capability.image_url_field ?? 'image_url'] = image_url
-        if (capability.supports_end_image && end_image_url) falBody.end_image_url = end_image_url
-      }
 
       let submitRes: Response
       try {
@@ -1022,13 +878,15 @@ Deno.serve(async (req: Request) => {
 
       const { data: reservation } = await serviceClient
         .from('credit_reservations')
-        .select('user_id, status')
+        .select('*')
         .eq('id', reservation_id)
         .maybeSingle()
 
       if (!reservation || reservation.user_id !== userId) {
         return json({ error: 'Reservering niet gevonden' }, 404)
       }
+
+      if (reservation.provider_job?.model_id === RIFE_MODEL) return await handleRifeJob(serviceClient, reservation, 'status', FAL_API_KEY)
 
       if (!polling_url) return json({ error: 'polling_url is verplicht' }, 400)
 
@@ -1091,13 +949,15 @@ Deno.serve(async (req: Request) => {
 
       const { data: reservation } = await serviceClient
         .from('credit_reservations')
-        .select('user_id, status')
+        .select('*')
         .eq('id', reservation_id)
         .maybeSingle()
 
       if (!reservation || reservation.user_id !== userId) {
         return json({ error: 'Reservering niet gevonden' }, 404)
       }
+
+      if (reservation.provider_job?.model_id === RIFE_MODEL) return await handleRifeJob(serviceClient, reservation, 'cancel', FAL_API_KEY)
 
       if (reservation.status !== 'pending') {
         // Al afgehandeld (settled/released) -- niets meer te annuleren.
@@ -1131,13 +991,15 @@ Deno.serve(async (req: Request) => {
 
       const { data: reservation } = await serviceClient
         .from('credit_reservations')
-        .select('user_id, status')
+        .select('*')
         .eq('id', reservation_id)
         .maybeSingle()
 
       if (!reservation || reservation.user_id !== userId || reservation.status !== 'settled') {
         return json({ error: 'Video niet beschikbaar' }, 404)
       }
+
+      if (reservation.provider_job?.model_id === RIFE_MODEL) return await handleRifeJob(serviceClient, reservation, 'content', FAL_API_KEY)
 
       const resultRes = await fetch(content_url, {
         headers: { 'Authorization': `Key ${FAL_API_KEY}` },

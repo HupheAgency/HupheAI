@@ -6,41 +6,8 @@ import { loadModuleModels, loadImagePipelinePrompt, type ImagePipelineSlot } fro
 import { loadVideoGenerationSettings, saveVideoGenerationSettings, type VideoGenerationSettings } from '../lib/video-generation-settings'
 import { loadAudioGenerationSettings, saveAudioGenerationSettings, type AudioGenerationSettings } from '../lib/audio-generation-settings'
 
-export interface AtelierVideoCapability {
-  model_id: string
-  provider?: string
-  markup_pct: number
-  video_cost_estimate: number
-  supported_durations: number[]
-  supported_resolutions: string[]
-  supported_aspect_ratios: string[]
-  generate_audio: boolean
-  seed: boolean
-  bitrate_mode: boolean
-  codec: boolean
-  supports_end_image: boolean
-  pricing_skus: Record<string, string>
-  supports_references?: boolean
-  reference_limits?: { image: number; video: number; audio: number }
-  supports_auto_duration?: boolean
-  supports_draft?: boolean
-  draft_rate_per_second?: number
-  draft_finalize_rate_per_second?: number
-  // Metadata voor de generieke, tool-gebonden modellen (VOID/Kling O1 Edit/Ray 2
-  // Modify/Topaz) -- renderer bouwt hieruit automatisch de juiste extra-velden-UI,
-  // de edge function valideert/whitelist dezelfde set server-side.
-  extra_fields?: Record<string, { type: 'select' | 'boolean' | 'number'; label: string; options?: string[]; default?: unknown; min?: number; max?: number }>
-  // Topaz Upscale/Interpolate hebben geen promptveld in hun fal-schema.
-  prompt_optional?: boolean
-  // 'flat_per_video' (VOID) negeert resolveRatePerSecond en gebruikt flat_rate_usd
-  // + extra_params-modifiers i.p.v. duration x rate; default/ongezet = 'per_second'.
-  pricing_model?: 'per_second' | 'flat_per_video'
-  // 'source_video' (Kling O1 Edit/Ray 2/Topaz) billt op de gemeten bronvideo-lengte
-  // i.p.v. een door de gebruiker gekozen duration ('user_choice', het bestaande gedrag).
-  output_duration_source?: 'user_choice' | 'source_video'
-  // Prijsvermenigvuldiger wanneer generate_audio aan staat (Veo3.1/Kling-v3-pro).
-  audio_rate_multiplier?: number
-}
+export type { VideoModelCapability as AtelierVideoCapability } from '../../../shared/video-model-capabilities'
+import { resolveVideoMode, videoExtraParamErrors, videoExtraParams as videoExtraParamsForRequest, type VideoModelCapability as AtelierVideoCapability } from '../../../shared/video-model-capabilities'
 
 export interface AtelierAudioCapability {
   model_id: string
@@ -87,7 +54,7 @@ export interface AudioReferenceSlot {
  */
 export type VideoReferenceChipSlot = AudioReferenceSlot
 
-export type VideoTaskMode = 'reference' | 'editing' | 'extension'
+export type VideoTaskMode = 'auto' | 'reference' | 'editing' | 'extension'
 
 export type VideoReferenceKind = 'image' | 'video' | 'audio'
 
@@ -502,7 +469,7 @@ export function useAtelierMediaCreator({
   const canGenerate = !!mediaType && !!selectedModel && !generating && (
     prompt.trim().length > 0
     || (mediaType === 'audio' && !!selectedAudioCapability?.prompt_optional && videoReference?.status === 'ready')
-    || (mediaType === 'video' && !!selectedVideoCapability?.prompt_optional && videoReferences.some((r) => r.kind === 'video' && r.status === 'ready'))
+    || (mediaType === 'video' && (!!selectedVideoCapability?.prompt_optional || !!selectedVideoCapability?.mode_overrides?.image?.prompt_optional) && (Array.isArray(videoExtraParams.multi_prompt) && videoExtraParams.multi_prompt.length > 0 || !!selectedVideoCapability?.mode_overrides?.image?.prompt_optional || videoReferences.some((r) => r.kind === 'video' && r.status === 'ready')))
   )
 
   useEffect(() => {
@@ -526,6 +493,8 @@ export function useAtelierMediaCreator({
       seed: capability.seed ? stored?.seed : undefined,
       bitrateMode: capability.bitrate_mode ? (stored?.bitrateMode ?? 'standard') : undefined,
       codec: capability.codec ? (stored?.codec ?? 'auto') : undefined,
+      draft: capability.supports_draft ? stored?.draft : false,
+      extraParams: stored?.extraParams,
     })
   }, [mediaType, selectedModel?.model, videoCapabilities])
 
@@ -563,7 +532,7 @@ export function useAtelierMediaCreator({
     for (const [key, field] of Object.entries(fields)) {
       if (field.default !== undefined) defaults[key] = field.default
     }
-    setVideoExtraParams(defaults)
+    setVideoExtraParams({ ...defaults, ...loadVideoGenerationSettings(selectedModel.model)?.extraParams })
   }, [mediaType, selectedModel?.model, videoCapabilities])
 
   useEffect(() => {
@@ -588,6 +557,7 @@ export function useAtelierMediaCreator({
 
   function updateVideoExtraParam(key: string, value: unknown) {
     setVideoExtraParams((current) => ({ ...current, [key]: value }))
+    updateVideoSettings({ extraParams: { ...videoExtraParams, [key]: value } })
   }
 
   function updateAudioSettings(patch: Partial<AudioGenerationSettings>) {
@@ -682,15 +652,28 @@ export function useAtelierMediaCreator({
       const audioReferenceUrl = audioReference?.status === 'ready' ? audioReference.fileUrl : undefined
       const videoReferenceUrl = videoReference?.status === 'ready' ? videoReference.fileUrl : undefined
       const isLipsync = selectedAudioCapability?.family === 'sync_lipsync'
-      const videoSettingsPayload = videoSettings
-        ? {
-          ...videoSettings,
-          extraParams: Object.keys(videoExtraParams).length > 0 ? videoExtraParams : undefined,
-          sourceDurationSeconds: readyVideoRefSlot?.durationSec,
-          sourceWidth: readyVideoRefSlot?.width,
-          sourceHeight: readyVideoRefSlot?.height,
-        }
-        : undefined
+      const modeState = selectedVideoCapability && resolveVideoMode(selectedVideoCapability, {
+        imageCount: readyImageRefs.length, videoCount: readyVideoRefs.length, audioCount: readyAudioRefs.length,
+        hasStart: !!referenceImageSrc, hasEnd: !!endImageOverride, task: videoTask,
+        resolution: videoSettings?.resolution, extraParams: videoExtraParams,
+      })
+      if (mediaType === 'video' && !selectedVideoCapability?.family) {
+        if (videoReferences.some(r => r.status !== 'ready')) throw new Error('Wacht tot alle referenties klaar zijn of verwijder een mislukte upload.')
+        const errors = videoExtraParamErrors(modeState?.capability.extra_fields, videoExtraParams)
+        if (errors.length) throw new Error(errors[0])
+      }
+      const seedAllowed = modeState?.capability.seed && (!(modeState.capability.seed_requires_references ?? true) || hasVideoReferences)
+      const videoSettingsPayload = videoSettings ? {
+        ...videoSettings,
+        duration: modeState?.forceAutoDuration ? 'auto' : videoSettings.duration,
+        resolution: videoSettings.draft ? '480p' : videoSettings.resolution,
+        aspectRatio: modeState?.forceAutoAspect ? 'auto' : videoSettings.aspectRatio,
+        seed: seedAllowed ? videoSettings.seed : undefined,
+        extraParams: selectedVideoCapability?.family ? videoExtraParams : videoExtraParamsForRequest(modeState?.capability.extra_fields, videoExtraParams),
+        sourceDurationSeconds: readyVideoRefSlot?.durationSec,
+        sourceWidth: readyVideoRefSlot?.width,
+        sourceHeight: readyVideoRefSlot?.height,
+      } : undefined
       const res = mediaType === 'images'
         ? await api.generateAtelierImage(promptText, selectedModel.model, imagePipelineSystemPrompt, referenceImageSrc, accessToken, selectedModel.label, maskDataUrl)
         : mediaType === 'audio'
@@ -715,7 +698,7 @@ export function useAtelierMediaCreator({
           audioDurationSeconds: isLipsync ? audioReference?.durationSec : undefined,
           syncMode: isLipsync ? audioSyncMode : undefined,
         }, requestId)
-        : await api.generateAtelierVideo(promptText, selectedModel.model, undefined, accessToken, referenceImageSrc, videoSettingsPayload, selectedModel.provider as 'openrouter' | 'fal' | undefined, hasVideoReferences ? { imageUrls: readyImageRefs, videoUrls: readyVideoRefs, audioUrls: readyAudioRefs, task: videoTask } : undefined, requestId, endImageOverride)
+        : await api.generateAtelierVideo(promptText, selectedModel.model, undefined, accessToken, modeState?.allowsStartImage === false ? undefined : referenceImageSrc, videoSettingsPayload, selectedModel.provider as 'openrouter' | 'fal' | undefined, hasVideoReferences ? { imageUrls: readyImageRefs, videoUrls: readyVideoRefs, audioUrls: readyAudioRefs, task: videoTask } : undefined, requestId, modeState?.allowsStartImage === false ? undefined : endImageOverride)
       if (!res?.ok) {
         if (res?.cancelled) {
           updateJob({ status: 'cancelled', progressLabel: 'Geannuleerd', finishedAt: new Date().toISOString() })

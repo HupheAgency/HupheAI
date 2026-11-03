@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from 'react'
 import { activeMedia, clipTrackId, newTimelineProject, timelineTracks, timelineEnd, timelineProblems, type TimelineAsset, type TimelineClip, type TimelineGeneration, type TimelineProject, type TimelineVariant, type TimelineTrack } from '../../../shared/video-timeline'
 import { assetClip, assetTrackKind, editSnapshot, mergeGesture, newTrack, placeAsset, planAssetDrop, TIMELINE_ASSET_MIME, type TimelineDrop, type TimelineEdit } from '../components/video-timeline/timeline-editing'
 import { TimelineGenerationControls, type TimelineReferenceTarget } from '../components/video-timeline/TimelineGenerationControls'
@@ -6,6 +6,8 @@ import { generationDurations, timelineGenerationCredits, timelineGenerationState
 import { TimelinePreview } from '../components/video-timeline/TimelinePreview'
 import { TimelineScrubber } from '../components/video-timeline/TimelineScrubber'
 import { TimelineLane, type TimelineDrawRange } from '../components/video-timeline/TimelineLane'
+import { TimelineRifeControls } from '../components/video-timeline/TimelineRifeControls'
+import { RIFE_MODEL, transitionCaptureIsCurrent, transitionOutputProblem, transitionPlaybackProblems, transitionSourceSignature, transitionVariantIsCurrent, validateTransitionRange } from '../../../shared/video-timeline-transition'
 import { loadAtelierMediaProjects, type AtelierVideoCapability } from '../hooks/useAtelierMedia'
 import { loadModuleModels } from '../lib/atelier-module-config'
 import { supabase } from '../lib/supabase'
@@ -36,6 +38,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const [saveState, setSaveState] = useState('Nieuw project')
   const [busy, setBusy] = useState('')
   const [generating, setGenerating] = useState<string>()
+  const [rifeCapability, setRifeCapability] = useState<AtelierVideoCapability>()
   const [capabilities, setCapabilities] = useState<AtelierVideoCapability[]>([])
   const [capLoading, setCapLoading] = useState(true)
   const [capError, setCapError] = useState('')
@@ -54,7 +57,11 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const media = clip ? activeMedia(project, clip) : undefined
   const duration = timelineEnd(project) / project.fps
   const extent = Math.max(project.targetDuration, duration + 2, 10)
-  const problems = timelineProblems(project)
+  const problems = [...timelineProblems(project), ...transitionPlaybackProblems(project)]
+  const previewProject = useMemo(() => ({ ...project, clips: project.clips.map(c => {
+    const variant = c.variants.find(v => v.id === c.activeVariantId)
+    return variant?.transition && (!transitionVariantIsCurrent(project, c, variant) || !!transitionOutputProblem(project, c, variant)) ? { ...c, activeVariantId: undefined } : c
+  }) }), [project])
   const generation = clip?.generation
   const capability = capabilities.find(c => c.model_id === generation?.modelId)
   const generationState = generation ? timelineGenerationState(generation, capability, project.assets) : undefined
@@ -128,7 +135,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   function openProject(value: TimelineProject) {
     const next = { ...value, jobs: value.jobs?.map(j => j.status === 'running' ? { ...j, status: 'unknown' as const, error: 'De app is gesloten tijdens deze opdracht. Controleer de bestaande generatie voordat je opnieuw start.' } : j) }
     setPlaying(false); setPosition(0); setSelected(undefined); setMessage('')
-    setSelectedTrack(timelineTracks(next)[0].id); setDropPreview(undefined)
+    setSelectedTrack(timelineTracks(next)[0]?.id ?? ''); setDropPreview(undefined)
     current.current = next; setProject(next)
     history.current = { undo: [], redo: [] }; bumpHistory(v => v + 1)
     localStorage.setItem('huphe:timeline:last-project', next.id)
@@ -136,6 +143,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   }
 
   function undo(redo = false) {
+    if (busy || generating) return
     setPlaying(false)
     const h = history.current
     const from = redo ? h.redo : h.undo
@@ -149,7 +157,9 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     })
     const next = { ...current.current, clips: restored, tracks: edit.tracks }
     const selectedClip = restored.find(c => c.id === selected)
-    setSelectedTrack(selectedClip ? clipTrackId(selectedClip) : timelineTracks(next).find(t => t.id === selectedTrack)?.id ?? timelineTracks(next)[0].id)
+    setSelectedTrack(selectedClip ? clipTrackId(selectedClip) : timelineTracks(next).find(t => t.id === selectedTrack)?.id ?? timelineTracks(next)[0]?.id ?? '')
+    setPosition(value => Math.min(value, timelineEnd(next) / next.fps))
+    setMessage('')
     apply(next, false)
     bumpHistory(v => v + 1)
   }
@@ -179,7 +189,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     finally { setBusy('') }
   }
 
-  function preferredTrack(base: TimelineProject, kind: TimelineTrack['kind']) {
+  function preferredTrack(base: TimelineProject, kind: TimelineTrack['kind']): TimelineTrack | undefined {
     const available = timelineTracks(base).filter(t => t.kind === kind)
     return available.find(t => t.id === selectedTrack) ?? available[0]
   }
@@ -190,6 +200,27 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     const track = newTrack(base, kind)
     apply({ ...base, tracks: [...timelineTracks(base), track] })
     setSelectedTrack(track.id); setSelected(undefined)
+  }
+
+  function trackIsGenerating(base: TimelineProject, trackId: string) {
+    return base.clips.some(c => clipTrackId(c) === trackId && (c.id === generating
+      || base.jobs?.some(job => job.clipId === c.id && job.status === 'running')))
+  }
+
+  function deleteTrack(trackId: string) {
+    const base = current.current
+    const track = timelineTracks(base).find(t => t.id === trackId)
+    if (!active || busy || drag.current || !track || trackIsGenerating(base, trackId)) return
+    const remaining = timelineTracks(base).filter(t => t.id !== trackId)
+    const next = { ...base, tracks: remaining, clips: base.clips.filter(c => clipTrackId(c) !== trackId) }
+    setPlaying(false)
+    setPosition(value => Math.min(value, timelineEnd(next) / next.fps))
+    if (base.clips.some(c => c.id === selected && clipTrackId(c) === trackId)) setSelected(undefined)
+    if (selectedTrack === trackId) setSelectedTrack(remaining.find(t => t.kind === track.kind)?.id ?? remaining[0]?.id ?? '')
+    setDropPreview(undefined)
+    apply(next)
+    setMessage(`${track.name} verwijderd. Met ‘Ongedaan maken’ herstel je het spoor en de blokken.`)
+    root.current?.focus({ preventScroll: true })
   }
 
   function dragAsset(event: DragEvent<HTMLElement>, asset: TimelineAsset) {
@@ -267,7 +298,12 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       if (target) {
         next.clips = next.clips.map(c => c.id === target.id ? { ...c, variants: [...c.variants, variant] } : c)
       } else {
-        const track = preferredTrack(next, assetTrackKind(asset))
+        const existing = preferredTrack(next, assetTrackKind(asset))
+        if (!existing && timelineTracks(next).length >= 32) {
+          setMessage('Het project heeft al 32 sporen. Maak eerst ruimte voor een passend spoor; het bestand staat in Projectmedia.'); continue
+        }
+        const track = existing ?? newTrack(next, assetTrackKind(asset))
+        if (!existing) next.tracks = [...timelineTracks(next), track]
         const start = Math.max(0, ...next.clips.filter(c => clipTrackId(c) === track.id).map(c => c.start + c.duration))
         const added = assetClip(next, asset, track, start)
         next.clips.push(added); setSelected(added.id); setSelectedTrack(track.id); setPosition(start / base.fps)
@@ -296,7 +332,9 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   function addEmpty(range?: TimelineDrawRange, trackId?: string) {
     if (busy) return
     const base = current.current
-    const track = timelineTracks(base).find(t => t.id === trackId && t.kind === 'video') ?? preferredTrack(base, 'video')
+    const existing = timelineTracks(base).find(t => t.id === trackId && t.kind === 'video') ?? preferredTrack(base, 'video')
+    if (!existing && timelineTracks(base).length >= 32) { setMessage('Het project heeft al 32 sporen. Verwijder een spoor om een videospoor toe te voegen.'); return }
+    const track = existing ?? newTrack(base, 'video')
     const videos = base.clips.filter(c => clipTrackId(c) === track.id)
     const start = range?.start ?? Math.max(0, ...videos.map(c => c.start + c.duration))
     const duration = range?.duration ?? 4 * base.fps
@@ -306,7 +344,74 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     }
     const added: TimelineClip = { id: uid(), track: 'video', trackId: track.id, label: `Scène ${base.clips.filter(c => c.track === 'video').length + 1}`, start, duration, variants: [] }
     added.generation = defaultGeneration(added)
-    apply({ ...base, clips: [...base.clips, added] }); setSelected(added.id); setSelectedTrack(track.id); setPosition(start / base.fps); setPlaying(false); setTab('generate'); setMessage('')
+    apply({ ...base, tracks: existing ? base.tracks : [...timelineTracks(base), track], clips: [...base.clips, added] }); setSelected(added.id); setSelectedTrack(track.id); setPosition(start / base.fps); setPlaying(false); setTab('generate'); setMessage('')
+  }
+
+  async function captureTransition(clipId: string) {
+    await action('Begin- en eindbeeld maken…', async () => {
+      const base = current.current
+      const target = base.clips.find(c => c.id === clipId)
+      if (!target) return
+      const errors = validateTransitionRange(base, target)
+      if (errors.length) throw new Error(errors[0])
+      const signature = transitionSourceSignature(base, target)
+      setPlaying(false)
+      await persist(base)
+      const result = await api().timeline.captureTransition({ projectId: base.id, clipId })
+      if (!result.ok) throw new Error(result.error ?? 'Begin- en eindbeelden maken mislukt.')
+      if (current.current.id !== base.id) return
+      const latest = current.current.clips.find(c => c.id === clipId)
+      if (!latest) return
+      // Local capture reads a saved snapshot. Never attach it to changed geometry.
+      if (latest.transition?.kind !== 'rife' || transitionSourceSignature(current.current, latest) !== signature) throw new Error('De montage is tijdens het vastleggen gewijzigd. Vernieuw de begin- en eindbeelden.')
+      apply({ ...current.current, assets: [...current.current.assets, ...result.assets],
+        clips: current.current.clips.map(c => c.id === clipId ? { ...c, transition: result.transition } : c) }, false)
+      await persist()
+      setMessage('Begin- en eindbeeld staan klaar. Kies ‘Genereer overgang’ om de tussenframes te maken.')
+    })
+  }
+
+  async function generateTransition() {
+    if (!clip?.transition || !rifeCapability || generating || busy || unknownJobs.length) return
+    const base = current.current, target = structuredClone(clip)
+    const errors = validateTransitionRange(base, target)
+    if (errors.length || !transitionCaptureIsCurrent(base, target)) { setMessage(errors[0] ?? 'Vernieuw eerst de begin- en eindbeelden.'); return }
+    const capture = structuredClone(target.transition!)
+    const start = base.assets.find(a => a.id === capture.startFrameAssetId)!
+    const end = base.assets.find(a => a.id === capture.endFrameAssetId)!
+    const snapshot: TimelineGeneration = { prompt: '', modelId: RIFE_MODEL, provider: 'fal', resolution: 'original', aspectRatio: 'original',
+      requestedDuration: target.duration / base.fps, generateAudio: false, referenceAssetId: start.id, endImageAssetId: end.id,
+      extraParams: { num_frames: target.duration - 1, fps: base.fps } }
+    const requestId = uid()
+    setGenerating(target.id); setMessage(''); setPlaying(false)
+    apply({ ...base, jobs: [...base.jobs ?? [], { id: requestId, clipId: target.id, createdAt: new Date().toISOString(), generation: snapshot, kind: 'generate', status: 'running' }] }, false)
+    let submitted = false
+    try {
+      await persist()
+      const session = await supabase?.auth.getSession()
+      const token = session?.data.session?.access_token
+      if (!token) throw new Error('Log eerst in om te genereren.')
+      submitted = true
+      const result = await api().generateAtelierVideo('', RIFE_MODEL, undefined, token, start.src,
+        { resolution: 'original', aspectRatio: 'original', generateAudio: false, extraParams: snapshot.extraParams }, 'fal', undefined, requestId, end.src)
+      if (!result.ok) {
+        if (result.definitiveFailure || result.cancelled) submitted = false
+        throw new Error(result.error ?? 'De overgang is nog niet afgerond; controleer de bestaande opdracht.')
+      }
+      const imported = await api().timeline.importMedia({ projectId: base.id, kind: 'video', sources: [{ src: result.filePath, name: 'RIFE-overgang.mp4' }] })
+      if (!imported.ok || !imported.assets?.[0]) throw new Error(imported.error ?? 'De overgang is gemaakt maar kon nog niet in het project worden opgeslagen.')
+      const asset: TimelineAsset = imported.assets[0]
+      const variant: TimelineVariant = { id: uid(), assetId: asset.id, createdAt: new Date().toISOString(), inPoint: 0, generation: snapshot, transition: capture, requestId }
+      apply({ ...current.current, assets: [...current.current.assets, asset],
+        clips: current.current.clips.map(c => c.id === target.id ? { ...c, variants: [...c.variants, variant] } : c),
+        jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: 'completed', assetId: asset.id } : j) }, false)
+      await persist(); setSelected(target.id); setTab('variants')
+      setMessage('De overgang staat als nieuwe variant klaar. Kies ‘Gebruik deze variant’ om hem in je film te zien.')
+    } catch (e: any) {
+      apply({ ...current.current, jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: submitted ? 'unknown' : 'failed', error: e.message } : j) }, false)
+      await persist().catch(() => {})
+      setMessage(e.message)
+    } finally { setGenerating(undefined) }
   }
 
   function changedClip(base: TimelineProject, id: string, patch: Partial<TimelineClip>) {
@@ -325,7 +430,10 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   function chooseVariant(id: string) {
     if (!clip) return
     const variant = clip.variants.find(v => v.id === id)!
+    if (variant.transition && !transitionVariantIsCurrent(project, clip, variant)) { setMessage('Deze overgang hoort bij eerdere beelden of een eerdere plaatsing. Vernieuw de bronbeelden en genereer een nieuwe variant.'); return }
     const asset = project.assets.find(a => a.id === variant.assetId)!
+    const outputProblem = variant.transition ? transitionOutputProblem(project, clip, variant) : undefined
+    if (outputProblem) { setMessage(outputProblem); return }
     if (asset.kind !== 'image' && variant.inPoint + clip.duration / project.fps > asset.duration + 0.00001) {
       setMessage(`Deze variant heeft ${seconds(asset.duration - variant.inPoint)} s beschikbaar. Maak het blok eerst korter.`); return
     }
@@ -333,7 +441,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   }
 
   function pointerDown(e: PointerEvent<HTMLElement>, c: TimelineClip, mode: 'move' | 'left' | 'right') {
-    if (busy) return
+    if (busy || generating === c.id) return
     e.stopPropagation(); e.preventDefault(); setPlaying(false); setSelected(c.id); setPosition(c.start / project.fps)
     setSelectedTrack(clipTrackId(c))
     e.currentTarget.closest<HTMLElement>('[data-clip-id]')?.focus({ preventScroll: true })
@@ -354,7 +462,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     else if (d.mode === 'right') patch = { duration: Math.max(1, d.clip.duration + delta) }
     else {
       const active = activeMedia(d.project, d.clip)
-      const variant = active.asset?.kind === 'image' ? undefined : active.variant
+      const variant = active.variant?.transition || active.asset?.kind === 'image' ? undefined : active.variant
       const bounded = Math.min(d.clip.duration - 1, Math.max(-d.clip.start, variant ? -Math.floor(variant.inPoint * project.fps) : -d.clip.start, delta))
       patch = { start: d.clip.start + bounded, duration: d.clip.duration - bounded, variants: d.clip.variants.map(v => v.id === variant?.id ? { ...v, inPoint: Math.max(0, v.inPoint + bounded / project.fps) } : v) }
     }
@@ -379,7 +487,8 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
         if (!result.ok) throw new Error(result.error || 'Videomodellen laden mislukt.')
         if (!mounted.current) return
         const configured = loadModuleModels('video')
-        const caps: AtelierVideoCapability[] = (result.models ?? []).filter((c: AtelierVideoCapability) => c.output_duration_source !== 'source_video' && c.pricing_model !== 'flat_per_video' && c.supported_durations?.length && (!configured.length || configured.some(m => m.model === c.model_id || m.id === c.model_id)))
+        setRifeCapability((result.models ?? []).find((c: AtelierVideoCapability) => c.model_id === RIFE_MODEL && c.tool === 'rife_transition'))
+        const caps: AtelierVideoCapability[] = (result.models ?? []).filter((c: AtelierVideoCapability) => c.model_id !== RIFE_MODEL && c.output_duration_source !== 'source_video' && c.pricing_model !== 'flat_per_video' && c.supported_durations?.length && (!configured.length || configured.some(m => m.model === c.model_id || m.id === c.model_id)))
         setCapabilities(caps)
         if (!caps.length) setCapError('Geen geschikte videomodellen gevonden. Controleer je modellen in Atelier of probeer opnieuw.')
       } catch (e: any) {
@@ -404,20 +513,32 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   }, [active, loadModels])
 
   function chooseModel(id: string) {
+    if (!clip || clip.track !== 'video' || busy || generating) return
+    if (id === RIFE_MODEL) {
+      const previousCapture = clip.transition ?? [...clip.variants].reverse().find(v => v.transition)?.transition
+      const nextClip: TimelineClip = { ...clip, transition: previousCapture ?? { kind: 'rife' } }
+      const next = { ...current.current, clips: current.current.clips.map(c => c.id === clip.id ? nextClip : c) }
+      apply(next); setPlaying(false); setMessage('')
+      // Selecting a model keeps the block, its source variants and earlier model settings intact.
+      // Captures are local; the paid job still requires the explicit Generate button.
+      if (!validateTransitionRange(next, nextClip).length && !transitionCaptureIsCurrent(next, nextClip)) void captureTransition(clip.id)
+      return
+    }
     const c = capabilities.find(c => c.model_id === id)
-    if (!c || !clip) return
+    if (!c) return
     const durations = generationDurations(c)
     if (!durations.length) return
     const previousDuration = typeof generation?.requestedDuration === 'number' ? generation.requestedDuration : clip.duration / project.fps
     const requestedDuration = generation?.requestedDuration === 'auto' && c.supports_auto_duration ? 'auto' : durations.find(value => value >= previousDuration) ?? durations[durations.length - 1]
     const configured = loadModuleModels('video').find(m => m.model === id || m.id === id)
-    patchGeneration({ modelId: id, requestedDuration, generateAudio: generation?.generateAudio ?? false, provider: (configured?.provider ?? c.provider ?? (id.startsWith('fal-ai/') ? 'fal' : 'openrouter')) as 'fal' | 'openrouter', resolution: c.supported_resolutions[0] ?? '720p', aspectRatio: c.supported_aspect_ratios.includes('16:9') ? '16:9' : c.supported_aspect_ratios[0] ?? '16:9' })
+    patchClip({ transition: undefined, generation: { ...defaultGeneration(clip), ...generation, modelId: id, requestedDuration, generateAudio: generation?.generateAudio ?? false, provider: (configured?.provider ?? c.provider ?? (id.startsWith('fal-ai/') ? 'fal' : 'openrouter')) as 'fal' | 'openrouter', resolution: c.supported_resolutions[0] ?? '720p', aspectRatio: c.supported_aspect_ratios.includes('16:9') ? '16:9' : c.supported_aspect_ratios[0] ?? '16:9' } })
+    setMessage('')
   }
 
   async function generate(finalize?: TimelineVariant) {
     if (!clip || generating || busy || unknownJobs.length) return
     const resolved = generation && capability ? timelineGenerationState(generation, capability, project.assets) : undefined
-    if (!finalize && (!resolved || resolved.errors.length || !generation?.prompt.trim())) { setMessage(resolved?.errors[0] ?? 'Kies een model en vul een prompt in.'); return }
+    if (!finalize && (!resolved || resolved.errors.length || !resolved?.promptReady)) { setMessage(resolved?.errors[0] ?? 'Kies een model en vul een prompt in.'); return }
     if (finalize && (!finalize.draftId || !finalize.draftDuration || !finalize.generation)) return
     const snapshot: TimelineGeneration = structuredClone(finalize
       ? { ...finalize.generation!, requestedDuration: finalize.draftDuration!, resolution: '1080p', draft: false }
@@ -434,7 +555,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       if (!token) throw new Error('Log eerst in om te genereren.')
       let references: { imageUrls: string[]; videoUrls: string[]; audioUrls: string[]; task?: string } | undefined
       if (!finalize && snapshot.referenceAssetIds?.length) {
-        const uploaded = await api().timeline.prepareReferences({ projectId, assetIds: snapshot.referenceAssetIds, accessToken: token })
+        const uploaded = await api().timeline.prepareReferences({ projectId, assetIds: snapshot.referenceAssetIds, modelId: snapshot.modelId, task: snapshot.task, accessToken: token })
         if (!uploaded.ok) throw new Error(uploaded.error ?? 'Referenties voorbereiden mislukt.')
         references = { ...uploaded.references, task: snapshot.task }
       }
@@ -443,7 +564,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
         ? await api().renderVideoDraftFinal(snapshot.modelId, finalize.draftId, finalize.draftDuration, snapshot.codec, token, requestId)
         : await api().generateAtelierVideo(snapshot.prompt, snapshot.modelId, undefined, token, resolved!.start?.src, {
           duration: snapshot.requestedDuration, resolution: snapshot.resolution, aspectRatio: snapshot.aspectRatio,
-          generateAudio: snapshot.generateAudio, draft: snapshot.draft, seed: snapshot.seed, bitrateMode: snapshot.bitrateMode, codec: snapshot.codec,
+          extraParams: snapshot.extraParams, generateAudio: snapshot.generateAudio, draft: snapshot.draft, seed: snapshot.seed, bitrateMode: snapshot.bitrateMode, codec: snapshot.codec,
         }, snapshot.provider, references, requestId, resolved!.end?.src)
       if (!result.ok) throw new Error(result.error ?? 'Generatie niet afgerond; controleer de bestaande opdracht.')
       const imported = await api().timeline.importMedia({ projectId, kind: 'video', sources: [{ src: result.filePath, name: `${clip.label} · ${snapshot.modelId.split('/').pop()}${finalize ? ' · 1080p' : result.draftId ? ' · draft' : ''}.mp4` }] })
@@ -465,9 +586,9 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     const target = base.clips.find(c => c.id === targetId)
     if (!target) throw new Error('Het geselecteerde blok bestaat niet meer.')
     const settings = { ...defaultGeneration(target), ...target.generation }
-    const added = { ...settings, referenceAssetIds: [...new Set([...(settings.referenceAssetIds ?? []), ...assetIds])], draft: false, ...(extend ? { task: 'extension' as const } : {}) }
+    const added = { ...settings, referenceAssetIds: [...new Set([...(settings.referenceAssetIds ?? []), ...assetIds])], ...(extend ? { task: 'extension' as const } : {}) }
     const model = capabilities.find(c => c.model_id === added.modelId)
-    const errors = timelineGenerationState(added, model, base.assets).errors.filter(error => /referentie/.test(error))
+    const errors = timelineGenerationState(added, model, base.assets).errors.filter(error => /ontbreekt in dit project/.test(error))
     if (errors.length) throw new Error(errors[0])
     return { ...base, clips: base.clips.map(c => c.id === targetId ? { ...c, generation: added } : c) }
   }
@@ -545,62 +666,76 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
         {!project.assets.length && <p className="vt-help">Voeg je bestaande fragmenten toe. De volledige bron blijft bewaard wanneer je knipt.</p>}
       </aside>
       <main className="vt-viewer"><div className="vt-viewer-top"><span>{clip?.label ?? 'Je film'}</span><span>{project.width} × {project.height} · {project.fps} fps</span></div>
-        <TimelinePreview project={project} position={position} playing={active && playing} generating={!!generating && generating === clip?.id} onPosition={setPosition} onPlaying={setPlaying} onError={setMessage} />
+        <TimelinePreview project={previewProject} position={position} playing={active && playing} generating={!!generating && generating === clip?.id} onPosition={setPosition} onPlaying={setPlaying} onError={setMessage} />
         <div className="vt-transport"><span className="vt-time">{timeLabel(position)}</span><button aria-label="Naar begin" onClick={() => { setPlaying(false); setPosition(0) }}>⏮</button><button className="vt-play" aria-label={playing ? 'Pauzeren' : 'Afspelen'} disabled={!duration} onClick={() => { if (position >= duration) setPosition(0); setPlaying(!playing) }}>{playing ? 'Ⅱ' : '▶'}</button><span className="vt-time">{timeLabel(duration)}</span></div>
       </main>
       <aside className="vt-inspector"><div className="vt-tabs">{(['clip', 'generate', 'variants'] as const).map(t => <button className={tab === t ? 'active' : ''} key={t} onClick={() => setTab(t)}>{t === 'clip' ? 'Fragment' : t === 'generate' ? 'Genereren' : `Varianten${clip ? ` (${clip.variants.length})` : ''}`}</button>)}</div>
         {!clip ? <div className="vt-inspector-body"><h2>Jouw film begint hier</h2><p>Selecteer een fragment of maak een leeg blok voor een nieuwe scène.</p><button className="vt-primary" onClick={() => addEmpty()}>＋ Leeg videoblok</button><label>Richtduur (seconden)<input type="number" min="1" max="3600" value={project.targetDuration} onChange={e => apply({ ...project, targetDuration: Math.max(1, Math.min(3600, Number(e.target.value))) }, false)} /></label><label>Filmformaat<select value={`${project.width}x${project.height}`} onChange={e => { const [width, height] = e.target.value.split('x').map(Number); apply({ ...project, width, height }, false) }}><option value="1920x1080">Liggend · 1920 × 1080</option><option value="1080x1920">Staand · 1080 × 1920</option><option value="1080x1080">Vierkant · 1080 × 1080</option></select></label><p className="vt-help">De richtduur groeit mee met je montage. Video’s worden passend in beeld gezet; eventuele lege randen blijven zichtbaar.</p></div> : <div className="vt-inspector-body">
           {tab === 'clip' && <><h2>{clip.track === 'audio' ? 'Audiofragment' : 'Videofragment'}</h2><label>Naam<input value={clip.label} onChange={e => patchClip({ label: e.target.value })} /></label><div className="vt-field-row"><label>Start op tijdlijn (s)<input aria-label="Start fragment" type="number" min="0" step={1 / project.fps} value={seconds(clip.start / project.fps)} onChange={e => patchClip({ start: Math.max(0, Math.round(Number(e.target.value) * project.fps)) })} /></label><label>Lengte op tijdlijn (s)<input aria-label="Lengte fragment" type="number" min={1 / project.fps} step={1 / project.fps} value={seconds(clip.duration / project.fps)} onChange={e => patchClip({ duration: Math.max(1, Math.round(Number(e.target.value) * project.fps)) })} /></label></div>
-          {media?.asset && media.asset.kind !== 'image' && <><label>Begin in bron (s)<input aria-label="Begin in bron" type="number" min="0" step={0.01} value={seconds(media.variant!.inPoint)} onChange={e => patchClip({ variants: clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: Math.max(0, Number(e.target.value)) } : v) })} /></label><p className="vt-help">Volledige bron: {seconds(media.asset.duration)} s. Alles buiten de uitsnede blijft bewaard.</p><button onClick={() => patchClip({ duration: Math.max(1, Math.floor(media.asset!.duration * project.fps)), variants: clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: 0 } : v) })}>Volledige bron gebruiken</button></>}
+          {!clip.transition && !media?.variant?.transition && media?.asset && media.asset.kind !== 'image' && <><label>Begin in bron (s)<input aria-label="Begin in bron" type="number" min="0" step={0.01} value={seconds(media.variant!.inPoint)} onChange={e => patchClip({ variants: clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: Math.max(0, Number(e.target.value)) } : v) })} /></label><p className="vt-help">Volledige bron: {seconds(media.asset.duration)} s. Alles buiten de uitsnede blijft bewaard.</p><button onClick={() => patchClip({ duration: Math.max(1, Math.floor(media.asset!.duration * project.fps)), variants: clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: 0 } : v) })}>Volledige bron gebruiken</button></>}
           <label>Spoor<select aria-label="Spoor fragment" value={clipTrackId(clip)} onChange={e => moveToTrack(e.target.value)}>{visibleTracks.filter(t => t.kind === clip.track).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
-          {clip.track === 'video' && media?.asset && <div className="vt-layer-controls"><h3>Beeld op de film</h3>
+          {!clip.transition && !media?.variant?.transition && clip.track === 'video' && media?.asset && <div className="vt-layer-controls"><h3>Beeld op de film</h3>
             <p className="vt-help">Een hoger videospoor ligt bovenop de sporen eronder. Gebruik een PNG met transparantie voor een vrijstaand logo.</p>
             {([{ key: 'scale', label: 'Grootte', min: 5, max: 200, fallback: 1 }, { key: 'x', label: 'Horizontale positie', min: 0, max: 100, fallback: 0.5 }, { key: 'y', label: 'Verticale positie', min: 0, max: 100, fallback: 0.5 }] as const).map(field => <label key={field.key}>{field.label} · {Math.round((clip.transform?.[field.key] ?? field.fallback) * 100)}%<input type="range" aria-label={field.label} min={field.min} max={field.max} step="1" value={Math.round((clip.transform?.[field.key] ?? field.fallback) * 100)} onChange={e => patchClip({ transform: { scale: 1, x: 0.5, y: 0.5, ...clip.transform, [field.key]: Number(e.target.value) / 100 } })} /></label>)}
             <label>Dekking · {Math.round((clip.opacity ?? 1) * 100)}%<input type="range" aria-label="Dekking" min="0" max="100" value={Math.round((clip.opacity ?? 1) * 100)} onChange={e => patchClip({ opacity: Number(e.target.value) / 100 })} /></label>
           </div>}
           {clip.track === 'audio' && <label>Volume · {Math.round((clip.gain ?? 1) * 100)}%<input type="range" aria-label="Volume" min="0" max="200" step="1" value={Math.round((clip.gain ?? 1) * 100)} onChange={e => patchClip({ gain: Number(e.target.value) / 100 })} /></label>}
-          <button disabled={!!busy} onClick={() => void importMedia(media?.asset?.kind ?? clip.track, undefined, true)}>Andere versie importeren</button><button className="vt-danger" disabled={!!busy || generating === clip.id} onClick={deleteSelectedClip} title="Blok verwijderen (Backspace)">Blok verwijderen</button></>}
+          {!clip.transition && <button disabled={!!busy} onClick={() => void importMedia(media?.asset?.kind ?? clip.track, undefined, true)}>Andere versie importeren</button>}<button className="vt-danger" disabled={!!busy || generating === clip.id} onClick={deleteSelectedClip} title="Blok verwijderen (Backspace)">Blok verwijderen</button></>}
           {tab === 'generate' && (clip.track === 'audio' ? <p>Voeg je bestaande ElevenLabs-audio toe via ‘Audio toevoegen’.</p> : <>
+            <label>Model<select aria-label="Videomodel" aria-busy={capLoading} disabled={capLoading || !!busy || !!generating} value={clip.transition ? RIFE_MODEL : generation?.modelId ?? ''} onChange={e => chooseModel(e.target.value)}>
+              <option value="">{capLoading ? 'Videomodellen laden…' : 'Kies een model'}</option>
+              {capabilities.map(c => <option key={c.model_id} value={c.model_id}>{modelLabel(c.model_id)}</option>)}
+              <option value={RIFE_MODEL}>RIFE</option>
+            </select></label>
+            {clip.transition ? <TimelineRifeControls project={project} clip={clip} capability={rifeCapability} loading={capLoading} busy={!!busy} generating={generating === clip.id} generationBlocked={!!generating || !!unknownJobs.length} onFramesChange={frames => patchClip({ duration: frames })} onCapture={() => void captureTransition(clip.id)} onGenerate={() => void generateTransition()} onReload={() => void loadModels()} /> : <>
             <h2>Genereer dit fragment</h2>
             <p className="vt-help">Gebruik je bestaande videomodellen. Iedere generatie wordt een nieuwe variant.</p>
-            <label>Model<select aria-label="Videomodel" aria-busy={capLoading} disabled={capLoading || !capabilities.length} value={generation?.modelId ?? ''} onChange={e => chooseModel(e.target.value)}>
-              <option value="">{capLoading ? 'Videomodellen laden…' : capabilities.length ? 'Kies een model' : 'Geen modellen beschikbaar'}</option>
-              {capabilities.map(c => <option key={c.model_id} value={c.model_id}>{modelLabel(c.model_id)}</option>)}
-            </select></label>
             {capError && <><p role="alert">{capError}</p><button disabled={capLoading} onClick={() => void loadModels()}>Opnieuw proberen</button></>}
             <TimelineGenerationControls project={project} clip={clip} generation={generation ?? defaultGeneration(clip)} capability={capability} loading={capLoading} disabled={!!busy}
               onPatch={patchGeneration} onImport={(kind, target) => void importGenerationReference(kind, target)} onUseReference={useReference} onTrim={() => setTab('clip')} />
             <div className="vt-price">{estimate != null ? `Geschat: ${estimate.toLocaleString('nl-NL')} credits` : generationState?.errors[0] ?? (capability ? 'Prijsindicatie niet beschikbaar' : 'Kies een model voor een prijsindicatie')}<small>Via de bestaande rekeninginstellingen van je account.</small></div>
-            <button className="vt-primary" disabled={!!generating || !!busy || !generation?.prompt.trim() || estimate == null || !!generationState?.errors.length || !!unknownJobs.length} onClick={() => void generate()}>{generating === clip.id ? 'Bezig met genereren…' : 'Genereer nieuwe variant'}</button>
+            <button className="vt-primary" disabled={!!generating || !!busy || !generationState?.promptReady || estimate == null || !!generationState?.errors.length || !!unknownJobs.length} onClick={() => void generate()}>{generating === clip.id ? 'Bezig met genereren…' : 'Genereer nieuwe variant'}</button>
+            </>}
           </>)}
           {tab === 'variants' && <><h2>Kies de actieve versie</h2>{clip.variants.length === 0 && <p>Genereer een fragment of importeer een bestaande video als variant.</p>}{clip.variants.map((v, i) => {
             const a = project.assets.find(x => x.id === v.assetId)
+            const stale = !!v.transition && !transitionVariantIsCurrent(project, clip, v)
+            const outputProblem = v.transition ? transitionOutputProblem(project, clip, v) : undefined
             const finalCost = v.draftDuration ? timelineFinalizeCredits(capabilities.find(c => c.model_id === v.generation?.modelId), v.draftDuration) : null
             return <div className={`vt-variant ${v.id === clip.activeVariantId ? 'active' : ''}`} key={v.id} data-variant-id={v.id}>
               {a?.kind === 'image' && <img src={a.src} alt={a.name} />}
               {a?.kind === 'video' && <video src={a.previewSrc ?? a.src} preload="metadata" controls />}
               <b>Variant {i + 1}{v.draftId ? ' · Draft' : v.finalizedFromVariantId ? ' · 1080p' : ''}</b>
               <small>{seconds(a?.duration ?? 0)} s · {v.generation?.modelId ?? 'Geïmporteerd'}</small>
-              <button disabled={v.id === clip.activeVariantId || !!busy} onClick={() => chooseVariant(v.id)}>{v.id === clip.activeVariantId ? 'Actief op tijdlijn' : 'Gebruik deze variant'}</button>
+              {stale && <small className="vt-warning">Deze overgang hoort bij eerdere bronbeelden of een eerdere plaatsing.</small>}
+              {outputProblem && <small className="vt-warning">{outputProblem}</small>}
+              <button disabled={v.id === clip.activeVariantId || !!busy || stale || !!outputProblem} onClick={() => chooseVariant(v.id)}>{v.id === clip.activeVariantId ? 'Actief op tijdlijn' : 'Gebruik deze variant'}</button>
               {v.draftId && <>{finalCost != null && <small>1080p-render geschat: {finalCost.toLocaleString('nl-NL')} credits</small>}<button disabled={!!generating || !!busy || !v.draftDuration || !v.generation || !!unknownJobs.length} onClick={() => void generate(v)}>Render naar 1080p</button>{!v.draftDuration && <small>De provider heeft geen draftduur teruggegeven; finaliseren is nog niet beschikbaar.</small>}</>}
-              {a?.kind === 'video' && <button disabled={!!busy} onClick={() => void addVariantAudio(v)}>Geluid op audiospoor</button>}
+              {!clip.transition && a?.kind === 'video' && <button disabled={!!busy} onClick={() => void addVariantAudio(v)}>Geluid op audiospoor</button>}
             </div>
           })}</>}
 
         </div>}
       </aside>
     </div>
-    <section className="vt-timeline" style={{ height: Math.min(446, 112 + tracks.length * 67) }}><div className="vt-timeline-toolbar"><strong>Tijdlijn</strong><button onClick={() => addEmpty()}>＋ Leeg blok</button>{(['video', 'audio'] as const).map(kind => <button key={kind} className={dropPreview?.trackId === `new-${kind}` ? 'vt-track-drop-active' : ''}
+    <section className="vt-timeline" style={{ height: Math.min(446, 112 + tracks.length * 67) }}><div className="vt-timeline-toolbar"><strong>Tijdlijn</strong><button disabled={!!busy} onClick={() => addEmpty()}>＋ Leeg blok</button>{(['video', 'audio'] as const).map(kind => <button key={kind} className={dropPreview?.trackId === `new-${kind}` ? 'vt-track-drop-active' : ''}
         disabled={!!busy || tracks.length >= 32} title="Klik voor een leeg spoor, of sleep hier media naartoe om die bij de afspeelkop op een nieuw spoor te zetten"
-        onClick={() => addTrack(kind)} onDragOver={e => assetDrop(e, kind)} onDragLeave={leaveAssetDrop} onDrop={e => assetDrop(e, kind, true)} data-new-track={kind}>＋ {kind === 'video' ? 'Videospoor' : 'Audiospoor'}</button>)}<button title="Ongedaan maken" disabled={!history.current.undo.length} onClick={() => undo()}>↶</button><button title="Opnieuw" disabled={!history.current.redo.length} onClick={() => undo(true)}>↷</button><label className="vt-ripple"><input type="checkbox" checked={ripple} onChange={e => setRipple(e.target.checked)} /> Volgende blokken meeschuiven</label><span className="vt-spacer" /><label className="vt-zoom">Zoom<input aria-label="Tijdlijnzoom" type="range" min="12" max="100" value={zoom} onChange={e => setZoom(Number(e.target.value))} /></label></div>
+        onClick={() => addTrack(kind)} onDragOver={e => assetDrop(e, kind)} onDragLeave={leaveAssetDrop} onDrop={e => assetDrop(e, kind, true)} data-new-track={kind}>＋ {kind === 'video' ? 'Videospoor' : 'Audiospoor'}</button>)}<button title="Ongedaan maken" disabled={!!busy || !!generating || !history.current.undo.length} onClick={() => undo()}>↶</button><button title="Opnieuw" disabled={!!busy || !!generating || !history.current.redo.length} onClick={() => undo(true)}>↷</button><label className="vt-ripple"><input type="checkbox" checked={ripple} onChange={e => setRipple(e.target.checked)} /> Volgende blokken meeschuiven</label><span className="vt-spacer" /><label className="vt-zoom">Zoom<input aria-label="Tijdlijnzoom" type="range" min="12" max="100" value={zoom} onChange={e => setZoom(Number(e.target.value))} /></label></div>
       <div className="vt-scroll"><div className="vt-tracks" style={{ width: Math.max(650, extent * zoom + 96) }}>
         <TimelineScrubber position={position} duration={duration} extent={extent} zoom={zoom} fps={project.fps} onSeek={next => { setPlaying(false); setPosition(next) }} />
         {visibleTracks.map(track => <div className={`vt-track ${track.kind}`} key={`${project.id}:${track.id}`}>
-          <button className={`vt-track-label ${selectedTrack === track.id ? 'active' : ''}`} title={`Selecteer ${track.name}`} onClick={() => { setSelectedTrack(track.id); setSelected(undefined) }}>{track.kind === 'video' ? '▣' : '♫'} {track.name}</button>
+          <div className={`vt-track-heading ${selectedTrack === track.id ? 'active' : ''}`}>
+            <button className="vt-track-label" title={`Selecteer ${track.name}`} onClick={() => { setSelectedTrack(track.id); setSelected(undefined) }}>{track.kind === 'video' ? '▣' : '♫'} {track.name}</button>
+            <button className="vt-track-delete" data-delete-track={track.id} aria-label={`${track.name} verwijderen`} disabled={!active || !!busy || trackIsGenerating(project, track.id)}
+              title={trackIsGenerating(project, track.id) ? 'Wacht tot de generatie op dit spoor klaar is' : `${track.name} en de blokken verwijderen (ongedaan maken mogelijk)`}
+              onClick={() => deleteTrack(track.id)}>
+              <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6" /></svg>
+            </button>
+          </div>
           <TimelineLane track={track.kind} trackId={track.id} clips={project.clips} fps={project.fps} zoom={zoom} disabled={!active || !!busy}
             onDrawStart={() => { setPlaying(false); setSelectedTrack(track.id); root.current?.focus({ preventScroll: true }) }} onCreate={range => addEmpty(range, track.id)} onDeselect={() => { setSelected(undefined); setSelectedTrack(track.id) }}
             onDragOver={e => assetDrop(e, track)} onDragLeave={leaveAssetDrop} onDrop={e => assetDrop(e, track, true)}>
-            {project.clips.filter(c => clipTrackId(c) === track.id).map(c => { const a = activeMedia(project, c); return <div role="button" tabIndex={0} aria-label={`${c.label}, ${seconds(c.duration / project.fps)} seconden`} data-clip-id={c.id} key={c.id} className={`vt-block ${selected === c.id ? 'selected' : ''} ${!a.asset ? 'empty' : ''}`} style={{ left: c.start / project.fps * zoom, width: Math.max(6, c.duration / project.fps * zoom) }} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter') { setPlaying(false); setSelected(c.id); setSelectedTrack(track.id); setPosition(c.start / project.fps) } }} onPointerDown={e => pointerDown(e, c, 'move')}><div className="vt-handle left" aria-label="Begin trimmen" onPointerDown={e => pointerDown(e, c, 'left')} /><b>{generating === c.id ? '◌ ' : ''}{c.label}</b><span>{seconds(c.duration / project.fps)} s{c.variants.length > 1 ? ` · ${c.variants.length} varianten` : ''}</span><div className="vt-handle right" aria-label="Einde trimmen" onPointerDown={e => pointerDown(e, c, 'right')} /></div> })}
+            {project.clips.filter(c => clipTrackId(c) === track.id).map(c => { const a = activeMedia(project, c); return <div role="button" tabIndex={0} aria-label={`${c.label}, ${seconds(c.duration / project.fps)} seconden`} data-clip-id={c.id} data-transition-kind={c.transition?.kind} key={c.id} className={`vt-block ${c.transition ? 'vt-rife-block' : ''} ${selected === c.id ? 'selected' : ''} ${!a.asset ? 'empty' : ''}`} style={{ left: c.start / project.fps * zoom, width: Math.max(6, c.duration / project.fps * zoom) }} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter') { setPlaying(false); setSelected(c.id); setSelectedTrack(track.id); setPosition(c.start / project.fps) } }} onPointerDown={e => pointerDown(e, c, 'move')}><div className="vt-handle left" aria-label="Begin trimmen" onPointerDown={e => pointerDown(e, c, 'left')} /><b>{generating === c.id ? '◌ ' : ''}{c.label}</b><span>{seconds(c.duration / project.fps)} s{c.variants.length > 1 ? ` · ${c.variants.length} varianten` : ''}</span><div className="vt-handle right" aria-label="Einde trimmen" onPointerDown={e => pointerDown(e, c, 'right')} /></div> })}
             {dropPreview?.trackId === track.id && <div className={`vt-drop-preview ${dropPreview.valid ? '' : 'invalid'}`} style={{ left: dropPreview.start / project.fps * zoom, width: Math.max(6, dropPreview.duration / project.fps * zoom) }}><b>{!dropPreview.valid ? 'Geen vrije ruimte' : dropPreview.insert ? 'Invoegen · volgende schuiven mee' : 'Hier plaatsen'}</b><span>{seconds(dropPreview.start / project.fps)} s · {seconds(dropPreview.duration / project.fps)} s</span></div>}
           </TimelineLane>
         </div>)}

@@ -26,6 +26,8 @@ export interface FalVideoJobState {
 }
 
 export class VideoJobCancelledError extends Error {
+  readonly code = 'provider_cancelled'
+  readonly definitiveFailure = true
   constructor() {
     super('Video-generatie geannuleerd.')
     this.name = 'VideoJobCancelledError'
@@ -89,6 +91,26 @@ export async function runFalVideoJob(options: {
   jobState?: FalVideoJobState
 }): Promise<FalVideoJobResult> {
   const { model, prompt, imageUrl, imageUrls, videoUrls, audioUrls, endImageUrl, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, extraParams, sourceDurationSeconds, sourceWidth, sourceHeight, jwt, onProgress = () => {}, jobState } = options
+  const isRife = model === 'fal-ai/rife'
+  let rifeCancellationPending = false
+  const checkCancellation = async () => {
+    if (!jobState?.cancelled) return
+    if (!isRife) return abortForCancellation(jobState, jwt)
+    // Consume this click before awaiting the server, allowing a later click to
+    // request another attempt. Keep polling until the provider confirms a result.
+    jobState.cancelled = false
+    try {
+      const result = await cancelFalVideoJob({ reservationId: jobState.reservationId!, cancelUrl: jobState.cancelUrl }, jwt)
+      if (result?.cancelled === true) throw new VideoJobCancelledError()
+      rifeCancellationPending = result?.reason === 'cancellation_requested'
+      onProgress({ step: rifeCancellationPending
+        ? 'Annulering bij RIFE aangevraagd; wachten op bevestiging...'
+        : 'Annulering nog niet bevestigd; RIFE-status wordt gevolgd...', progress: 0 })
+    } catch (error) {
+      if (error instanceof VideoJobCancelledError) throw error
+      onProgress({ step: 'Annulering niet bevestigd; RIFE-status wordt verder gevolgd...', progress: 0 })
+    }
+  }
 
   onProgress({ step: 'Video-aanvraag wordt verstuurd...', progress: 0 })
   const job = await submitFalVideoJob({ model, prompt, imageUrl, imageUrls, videoUrls, audioUrls, endImageUrl, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, extraParams, sourceDurationSeconds, sourceWidth, sourceHeight }, jwt)
@@ -105,14 +127,14 @@ export async function runFalVideoJob(options: {
   if (jobState) {
     jobState.cancelUrl = job.cancel_url
     jobState.reservationId = reservationId
-    if (jobState.cancelled) await abortForCancellation(jobState, jwt)
+    await checkCancellation()
   }
 
   const started = Date.now()
   while (true) {
-    if (jobState?.cancelled) await abortForCancellation(jobState, jwt)
+    await checkCancellation()
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
-    if (jobState?.cancelled) await abortForCancellation(jobState, jwt)
+    await checkCancellation()
     const s = await pollFalVideoJobStatus({ jobId, pollingUrl, reservationId, maxReservation, model, draft, contentUrl }, jwt)
 
     if (s.status === 'completed') {
@@ -122,12 +144,19 @@ export async function runFalVideoJob(options: {
     }
 
     if (s.status === 'failed' || s.status === 'cancelled' || s.status === 'expired') {
-      throw new Error(`Video-generatie ${s.status}: ${s.error ?? 'onbekende fout'}`)
+      if (isRife && s.status === 'cancelled') throw new VideoJobCancelledError()
+      const error = new Error(`Video-generatie ${s.status}: ${s.error ?? 'onbekende fout'}`)
+      if (isRife) Object.assign(error, { code: `provider_${s.status}`, definitiveFailure: true })
+      throw error
     }
 
     const elapsed = Math.round((Date.now() - started) / 1000)
     const pct = Math.min(90, Math.round((elapsed / (TIMEOUT_MS / 1000)) * 90))
-    const label = s.status === 'pending'
+    const label = isRife && s.code === 'billing_pending' && typeof s.error === 'string'
+      ? s.error
+      : isRife && rifeCancellationPending
+      ? 'Annulering bij RIFE aangevraagd; wachten op bevestiging...'
+      : s.status === 'pending'
       ? `Video in wachtrij... (${elapsed}s)`
       : `Video wordt gegenereerd... (${elapsed}s)`
     onProgress({ step: label, progress: pct })

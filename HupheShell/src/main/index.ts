@@ -2781,12 +2781,12 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
   requestId?: string
 }) => {
   payload = parseIpcPayload('video:generate-ai', z.object({
-    prompt: z.string().trim().max(12000).optional(),
+    prompt: z.string().trim().max(20000).optional(),
     model: z.string().trim().min(1).max(200),
     systemPrompt: z.string().max(6000).optional(),
     accessToken: AccessTokenSchema,
-    referenceImageSrc: z.string().max(20 * 1024 * 1024).optional(),
-    endImageSrc: z.string().max(20 * 1024 * 1024).optional(),
+    referenceImageSrc: z.string().max(70 * 1024 * 1024).optional(),
+    endImageSrc: z.string().max(70 * 1024 * 1024).optional(),
     imageUrls: z.array(z.string()).max(30).optional(),
     videoUrls: z.array(z.string()).max(10).optional(),
     audioUrls: z.array(z.string()).max(10).optional(),
@@ -2808,7 +2808,7 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
   }), payload)
   const { prompt, model, systemPrompt, accessToken, referenceImageSrc, endImageSrc, imageUrls, videoUrls, audioUrls, duration, resolution, aspectRatio, generateAudio, bitrateMode, codec, seed, task, draft, extraParams, sourceDurationSeconds, sourceWidth, sourceHeight, provider, requestId } = payload
   const effectiveJwtVideo = accessToken ?? cachedJwt
-  if (!effectiveJwtVideo) return { ok: false, error: 'Niet ingelogd.' }
+  if (!effectiveJwtVideo) return { ok: false, error: 'Niet ingelogd.', code: 'not_authenticated', definitiveFailure: true }
   const { runOpenRouterVideoJob } = await import('./lib/video-job')
   const { runFalVideoJob, VideoJobCancelledError } = await import('./lib/fal-video-job')
 
@@ -2882,9 +2882,9 @@ ipcMain.handle('video:generate-ai', async (_event, payload: {
     return { ok: true, filePath: toHupheFileUrl(filePath), draftId, resolvedDuration }
   } catch (err: any) {
     if (err instanceof VideoJobCancelledError) {
-      return { ok: false, error: err.message, cancelled: true }
+      return { ok: false, error: err.message, cancelled: true, code: err.code, definitiveFailure: true }
     }
-    return { ok: false, error: err.message }
+    return { ok: false, error: err.message, code: typeof err.code === 'string' ? err.code : undefined, definitiveFailure: err.definitiveFailure === true }
   } finally {
     if (requestId) activeVideoJobs.delete(requestId)
   }

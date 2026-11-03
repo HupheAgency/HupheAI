@@ -16,11 +16,15 @@
     "test:texture-geometry": "node scripts/texture-geometry-integrity-test.mjs",
     "test:security": "node scripts/security-smoke-test.mjs",
     "fixtures:timeline": "node scripts/video-timeline-fixtures.mjs",
+    "test:video-models-ui": "TEST_MODEL_CONTROLS_ONLY=1 node scripts/video-timeline-ui-smoke.mjs",
+    "test:video-models": "node scripts/video-model-contract-test.mjs",
     "test:timeline": "node scripts/local-media-response-test.mjs && node scripts/video-timeline-editing-test.mjs && node scripts/video-timeline-backend-test.mjs",
     "test:timeline-editing": "node scripts/video-timeline-editing-test.mjs",
     "test:timeline-preview": "node scripts/video-timeline-preview-test.mjs",
     "test:timeline-export": "node scripts/video-timeline-export-test.mjs",
-    "test:timeline-ui": "node scripts/video-timeline-ui-smoke.mjs"
+    "test:timeline-ui": "node scripts/video-timeline-ui-smoke.mjs",
+    "test:rife": "node scripts/rife-transition-backend-test.mjs && node scripts/rife-provider-test.mjs && node scripts/rife-client-test.mjs",
+    "test:rife-ui": "TEST_RIFE_ONLY=1 node scripts/video-timeline-ui-smoke.mjs"
   },
   "dependencies": {
     "@fal-ai/client": "^1.10.1",

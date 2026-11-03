@@ -1,3 +1,5 @@
+import { resolveVideoMode, type VideoReferenceConstraint, type VideoExtraField } from '../../../shared/video-model-capabilities'
+import { VideoModelFields } from './VideoModelFields'
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -529,6 +531,29 @@ export function AtelierMediaCreationPanel({
     setCanvasScale(1)
     setCanvasOffset({ x: 0, y: 0 })
   }, [activeResultIndex])
+
+  const singleMode = selectedVideoCapability && resolveVideoMode(selectedVideoCapability, {
+    imageCount: videoReferences.filter(r => r.kind === 'image').length,
+    videoCount: videoReferences.filter(r => r.kind === 'video').length,
+    audioCount: videoReferences.filter(r => r.kind === 'audio').length,
+    hasStart: inputFileIsImage && !!inputFileSrc, hasEnd: !!endFrameSrc,
+    task: videoTask, resolution: videoSettings?.resolution, extraParams: videoExtraParams,
+  })
+  const singleVideoCapability = singleMode ? { ...singleMode.capability, reference_limits: selectedVideoCapability?.reference_limits,
+    force_auto_duration: singleMode.forceAutoDuration, force_auto_aspect: singleMode.forceAutoAspect } : selectedVideoCapability
+  useEffect(() => {
+    if (mediaType !== 'video' || !singleMode || !videoSettings || selectedVideoCapability?.family) return
+    const c = singleMode.capability
+    const patch: Partial<VideoGenerationSettings> = {}
+    if (singleMode.forceAutoDuration && videoSettings.duration !== 'auto') patch.duration = 'auto'
+    else if (!singleMode.forceAutoDuration && (videoSettings.duration === 'auto' ? !c.supports_auto_duration : !c.supported_durations.includes(videoSettings.duration))) patch.duration = c.supported_durations[0]
+    if (!c.supported_resolutions.includes(videoSettings.resolution)) patch.resolution = c.supported_resolutions[0]
+    if (singleMode.forceAutoAspect && videoSettings.aspectRatio !== 'auto') patch.aspectRatio = 'auto'
+    else if (!singleMode.forceAutoAspect && !c.supported_aspect_ratios.includes(videoSettings.aspectRatio)) patch.aspectRatio = c.supported_aspect_ratios[0]
+    if (Object.keys(patch).length) updateVideoSettings(patch)
+  }, [mediaType, selectedVideoCapability, videoTask, videoReferences, inputFileIsImage, inputFileSrc, endFrameSrc, videoSettings, videoExtraParams])
+
+  const canGenerateSelection = canGenerate && (mediaType !== 'video' || !!selectedVideoCapability?.family || !!prompt.trim() || (Array.isArray(videoExtraParams.multi_prompt) && videoExtraParams.multi_prompt.length > 0) || (!!singleMode?.capability.prompt_optional && inputFileIsImage && !!inputFileSrc))
 
   async function handleGenerateWithFocus(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -1213,10 +1238,10 @@ export function AtelierMediaCreationPanel({
 
               <button
                 type="submit"
-                disabled={!canGenerate}
+                disabled={!canGenerateSelection}
                 className={[
                   'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-colors',
-                  canGenerate ? 'bg-white text-black' : 'bg-white/[0.05] text-white/20',
+                  canGenerateSelection ? 'bg-white text-black' : 'bg-white/[0.05] text-white/20',
                 ].join(' ')}
                 aria-label="Genereren"
               >
@@ -1262,7 +1287,7 @@ export function AtelierMediaCreationPanel({
         maskRedoLen={maskRedoLen}
         videoSettings={videoSettings}
         onVideoSettingsChange={updateVideoSettings}
-        videoCapability={selectedVideoCapability}
+        videoCapability={singleVideoCapability}
         videoReferences={videoReferences}
         onVideoReferencesChange={setVideoReferences}
         videoTask={videoTask}
@@ -2086,6 +2111,8 @@ function AtelierToolDetailPanel({
             onChange={onVideoSettingsChange}
             capability={videoCapability}
             hasReferences={(videoReferences?.length ?? 0) > 0}
+            extraParams={videoExtraParams}
+            onExtraParamChange={onVideoExtraParamChange}
           />
         </>
       )
@@ -2254,7 +2281,7 @@ function estimateVideoCreditsCost(capability: AtelierVideoCapability, settings: 
   }
   const ratePerSecond = resolveRatePerSecond(capability.pricing_skus, settings.resolution, settings.generateAudio)
   const usd = ratePerSecond != null
-    ? ratePerSecond * billedDuration
+    ? ratePerSecond * billedDuration * (settings.generateAudio ? capability.audio_rate_multiplier ?? 1 : 1)
     : (capability.video_cost_estimate / 100000) * (billedDuration / 5)
   return Math.ceil(usd * 100000 * (1 + capability.markup_pct / 100))
 }
@@ -2289,11 +2316,11 @@ function VideoReferencesPanel({
         <p className="text-xs leading-relaxed text-white/35">Voeg beeld, video of audio toe om de generatie te sturen.</p>
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
-        <VideoReferenceKindRow kind="image" label="Image" limit={limits.image} accept="image/png,image/jpeg,image/webp,image/gif" references={references} onChange={onChange} />
-        <VideoReferenceKindRow kind="video" label="Video" limit={limits.video} accept="video/mp4,video/webm,video/quicktime" references={references} onChange={onChange} />
-        <VideoReferenceKindRow kind="audio" label="Audio" limit={limits.audio} accept="audio/mpeg,audio/wav,audio/mp4" references={references} onChange={onChange} />
+        <VideoReferenceKindRow kind="image" constraints={capability.reference_constraints?.image} label="Image" limit={limits.image} accept="image/png,image/jpeg,image/webp,image/gif" references={references} onChange={onChange} />
+        <VideoReferenceKindRow kind="video" constraints={capability.reference_constraints?.video} label="Video" limit={limits.video} accept="video/mp4,video/webm,video/quicktime" references={references} onChange={onChange} />
+        <VideoReferenceKindRow kind="audio" constraints={capability.reference_constraints?.audio} label="Audio" limit={limits.audio} accept="audio/mpeg,audio/wav,audio/mp4" references={references} onChange={onChange} />
       </div>
-      {hasReferences && (
+      {hasReferences && capability.model_id === 'bytedance/seedance-2.5' && (
         <p className="mt-2 text-[10px] leading-relaxed text-white/30">
           Tip: verwijs in je prompt naar een referentie met <span className="text-white/45">@Image1</span>, <span className="text-white/45">@Video1</span> of <span className="text-white/45">@Audio1</span> (oplopend per toegevoegd bestand van dat type).
         </p>
@@ -2303,11 +2330,9 @@ function VideoReferencesPanel({
           Modus{!hasReferences && <span className="text-white/25"> — vereist referenties</span>}
         </p>
         <div className="flex flex-wrap gap-1.5">
-          <button type="button" disabled={!hasReferences} onClick={() => onTaskChange('reference')} className={pillClass(task === 'reference')}>Referentie</button>
-          <button type="button" disabled={!hasReferences} onClick={() => onTaskChange('editing')} className={pillClass(task === 'editing')}>Bewerken</button>
-          <button type="button" disabled={!hasReferences} onClick={() => onTaskChange('extension')} className={pillClass(task === 'extension')}>Verlengen</button>
+          {(capability.reference_tasks ?? ['reference', 'editing', 'extension']).map(mode => <button key={mode} type="button" disabled={!hasReferences} onClick={() => onTaskChange(mode)} className={pillClass(task === mode)}>{mode === 'auto' ? 'Auto' : mode === 'reference' ? 'Referentie' : mode === 'editing' ? 'Bewerken' : 'Verlengen'}</button>)}
         </div>
-        {hasReferences && task !== 'reference' && (
+        {hasReferences && capability.force_auto_duration && (
           <p className="mt-1.5 text-[10px] leading-relaxed text-white/30">Lengte en beeldverhouding worden in deze modus automatisch door fal bepaald.</p>
         )}
       </div>
@@ -2332,6 +2357,7 @@ function VideoReferenceKindRow({
   label,
   limit,
   accept,
+  constraints,
   references,
   onChange,
 }: {
@@ -2339,6 +2365,7 @@ function VideoReferenceKindRow({
   label: string
   limit: number
   accept: string
+  constraints?: VideoReferenceConstraint
   references: VideoReferenceSlot[]
   onChange: (updater: VideoReferenceSlot[] | ((prev: VideoReferenceSlot[]) => VideoReferenceSlot[])) => void
 }) {
@@ -2348,7 +2375,10 @@ function VideoReferenceKindRow({
   function addFile(file: File) {
     const id = `ref_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
-    const maxSize = REFERENCE_MAX_SIZE_BYTES[kind]
+    const maxSize = constraints?.max_bytes ?? REFERENCE_MAX_SIZE_BYTES[kind]
+    if (constraints?.extensions && !constraints.extensions.some(ext => file.name.toLowerCase().endsWith(ext))) {
+      onChange(prev => [...prev, { id, kind, status: 'error', fileName: file.name, error: `Gebruik ${constraints.extensions!.join(' of ')}.` }]); return
+    }
     if (file.size > maxSize) {
       const maxMb = Math.round(maxSize / (1024 * 1024))
       onChange((prev) => [...prev, { id, kind, status: 'error', fileName: file.name, error: `Bestand te groot (max ${maxMb}MB).` }])
@@ -2400,18 +2430,18 @@ function VideoReferenceKindRow({
         startUpload(undefined, width, height)
         return
       }
-      if (dur < REFERENCE_MIN_DURATION_SEC || dur > REFERENCE_MAX_DURATION_SEC) {
+      if (dur < (constraints?.min_duration ?? REFERENCE_MIN_DURATION_SEC) || dur > (constraints?.max_duration ?? REFERENCE_MAX_DURATION_SEC)) {
         onChange((prev) => [...prev, {
           id, kind, status: 'error', fileName: file.name,
-          error: `Lengte moet tussen ${REFERENCE_MIN_DURATION_SEC}s en ${REFERENCE_MAX_DURATION_SEC}s zijn (dit bestand: ${dur.toFixed(1)}s).`,
+          error: `Lengte moet tussen ${constraints?.min_duration ?? REFERENCE_MIN_DURATION_SEC}s en ${constraints?.max_duration ?? REFERENCE_MAX_DURATION_SEC}s zijn (dit bestand: ${dur.toFixed(1)}s).`,
         }])
         return
       }
       const existingTotal = slots.reduce((sum, s) => sum + (s.durationSec ?? 0), 0)
-      if (existingTotal + dur > REFERENCE_MAX_DURATION_SEC) {
+      if (existingTotal + dur > (constraints?.max_total_duration ?? REFERENCE_MAX_DURATION_SEC)) {
         onChange((prev) => [...prev, {
           id, kind, status: 'error', fileName: file.name,
-          error: `Totale lengte van alle ${label.toLowerCase()}-referenties mag max ${REFERENCE_MAX_DURATION_SEC}s zijn.`,
+          error: `Totale lengte van alle ${label.toLowerCase()}-referenties mag max ${constraints?.max_total_duration ?? REFERENCE_MAX_DURATION_SEC}s zijn.`,
         }])
         return
       }
@@ -2477,60 +2507,8 @@ function VideoReferenceKindRow({
 
 // Generieke renderer voor capability.extra_fields (VOID/Kling O1 Edit/Ray 2 Modify/
 // Topaz) -- vermijdt 5 losse handgeschreven settings-panelen, zie plan Sectie B/6.
-function ExtraFieldsPanel({
-  fields,
-  values,
-  onChange,
-}: {
-  fields: Record<string, { type: 'select' | 'boolean' | 'number'; label: string; options?: string[]; default?: unknown; min?: number; max?: number }>
-  values: Record<string, unknown>
-  onChange: (key: string, value: unknown) => void
-}) {
-  const entries = Object.entries(fields)
-  if (entries.length === 0) return null
-
-  return (
-    <>
-      {entries.map(([key, field]) => {
-        const value = values[key] ?? field.default
-        if (field.type === 'boolean') {
-          return (
-            <div key={key} className="flex items-center justify-between rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
-              <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">{field.label}</p>
-              <Toggle checked={!!value} onChange={(checked) => onChange(key, checked)} />
-            </div>
-          )
-        }
-        if (field.type === 'select') {
-          return (
-            <div key={key} className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
-              <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">{field.label}</p>
-              <select
-                value={(value as string) ?? field.options?.[0] ?? ''}
-                onChange={(e) => onChange(key, e.target.value)}
-                className="w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
-              >
-                {(field.options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
-              </select>
-            </div>
-          )
-        }
-        return (
-          <div key={key} className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
-            <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-white/35">{field.label}</p>
-            <input
-              type="number"
-              min={field.min}
-              max={field.max}
-              value={value == null ? '' : (value as number)}
-              onChange={(e) => onChange(key, e.target.value === '' ? undefined : Number(e.target.value))}
-              className="w-full rounded-xl border border-white/[0.08] bg-[#0f0f0f] px-3 py-2 text-xs text-white/70 outline-none focus:border-white/20"
-            />
-          </div>
-        )
-      })}
-    </>
-  )
+function ExtraFieldsPanel(props: { fields: Record<string, VideoExtraField>; values: Record<string, unknown>; onChange: (key: string, value: unknown) => void }) {
+  return <VideoModelFields {...props} />
 }
 
 // Dunne wrapper rond de kale VideoReferenceKindRow voor de 5 tool-gebonden
@@ -2586,11 +2564,15 @@ function VideoGenerationSettingsPanel({
   onChange,
   capability,
   hasReferences,
+  extraParams = {},
+  onExtraParamChange,
 }: {
   settings?: VideoGenerationSettings | null
   onChange?: (patch: Partial<VideoGenerationSettings>) => void
   capability?: AtelierVideoCapability
   hasReferences?: boolean
+  extraParams?: Record<string, unknown>
+  onExtraParamChange?: (key: string, value: unknown) => void
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false)
 
@@ -2627,7 +2609,7 @@ function VideoGenerationSettingsPanel({
               {capability.supports_auto_duration && (
                 <button
                   type="button"
-                  onClick={() => onChange?.({ duration: settings.duration === 'auto' ? (capability.supported_durations[0] ?? 5) : 'auto' })}
+                  disabled={capability.force_auto_duration} onClick={() => onChange?.({ duration: settings.duration === 'auto' ? (capability.supported_durations[0] ?? 5) : 'auto' })}
                   className={pillClass(settings.duration === 'auto')}
                 >
                   Auto
@@ -2640,7 +2622,7 @@ function VideoGenerationSettingsPanel({
             min={0}
             max={Math.max(capability.supported_durations.length - 1, 0)}
             step={1}
-            disabled={settings.duration === 'auto'}
+            disabled={settings.duration === 'auto' || capability.force_auto_duration}
             value={Math.max(capability.supported_durations.indexOf(typeof settings.duration === 'number' ? settings.duration : -1), 0)}
             onChange={(e) => onChange?.({ duration: capability.supported_durations[Number(e.target.value)] })}
             className="w-full accent-[#facc15] disabled:opacity-30"
@@ -2660,12 +2642,12 @@ function VideoGenerationSettingsPanel({
               <div>
                 <p className="text-[11px] font-medium uppercase tracking-widest text-white/35">Draft</p>
                 <p className="mt-1 text-xs leading-relaxed text-white/40">
-                  {hasReferences
+                  {hasReferences && !capability.supports_reference_draft
                     ? 'Niet beschikbaar in combinatie met referentie-media.'
                     : 'Genereer eerst goedkoop in 480p, render later desgewenst door naar 1080p.'}
                 </p>
               </div>
-              <Toggle checked={Boolean(settings.draft) && !hasReferences} onChange={(value) => onChange?.({ draft: value })} disabled={hasReferences} />
+              <Toggle checked={Boolean(settings.draft) && (!hasReferences || !!capability.supports_reference_draft)} onChange={(value) => onChange?.({ draft: value })} disabled={hasReferences && !capability.supports_reference_draft} />
             </div>
           </div>
         )}
@@ -2689,7 +2671,7 @@ function VideoGenerationSettingsPanel({
         <div className="rounded-2xl border border-white/[0.07] bg-[#151515] p-4">
           <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-white/35">Beeldverhouding</p>
           <div className="flex flex-wrap gap-1.5">
-            {capability.supported_aspect_ratios.map((ratio) => (
+            {(capability.force_auto_aspect ? ['auto'] : capability.supported_aspect_ratios).map((ratio) => (
               <button key={ratio} type="button" onClick={() => onChange?.({ aspectRatio: ratio })} className={pillClass(settings.aspectRatio === ratio)}>
                 {ratio}
               </button>
@@ -2726,11 +2708,11 @@ function VideoGenerationSettingsPanel({
                   <div>
                     <label className="text-xs text-white/40">
                       Seed (optioneel, voor herhaalbare resultaten)
-                      {!hasReferences && <span className="text-white/25"> — vereist referenties</span>}
+                      {!hasReferences && (capability.seed_requires_references ?? true) && <span className="text-white/25"> — vereist referenties</span>}
                     </label>
                     <input
                       type="number"
-                      disabled={!hasReferences}
+                      disabled={!hasReferences && (capability.seed_requires_references ?? true)}
                       value={settings.seed ?? ''}
                       onChange={(e) => onChange?.({ seed: e.target.value ? Number(e.target.value) : undefined })}
                       placeholder="Willekeurig"
@@ -2767,6 +2749,8 @@ function VideoGenerationSettingsPanel({
           </div>
         )}
 
+        {capability.extra_fields && <VideoModelFields fields={capability.extra_fields} values={extraParams} onChange={onExtraParamChange ?? (() => {})} />}
+        {capability.notice && <p className="text-xs text-white/50">{capability.notice}</p>}
         {estimatedMillicredits != null && (
           <div className="rounded-2xl border border-white/[0.06] bg-[#0f0f0f] p-3">
             <p className="text-[10px] leading-relaxed text-white/25">

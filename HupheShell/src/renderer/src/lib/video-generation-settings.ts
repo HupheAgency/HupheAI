@@ -7,6 +7,7 @@ export interface VideoGenerationSettings {
   bitrateMode?: string
   codec?: string
   draft?: boolean
+  extraParams?: Record<string, unknown>
 }
 
 const KEY_PREFIX = 'huphe:video-generation-settings:'

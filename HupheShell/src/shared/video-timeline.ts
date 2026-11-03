@@ -23,7 +23,8 @@ export interface TimelineGeneration {
   referenceAssetId?: string
   endImageAssetId?: string
   referenceAssetIds?: string[]
-  task?: 'reference' | 'editing' | 'extension'
+  task?: 'auto' | 'reference' | 'editing' | 'extension'
+  extraParams?: Record<string, unknown>
   draft?: boolean
   generateAudio?: boolean
   seed?: number
@@ -43,6 +44,18 @@ export interface TimelineVariant {
   draftId?: string
   draftDuration?: number
   finalizedFromVariantId?: string
+  /** Immutable endpoint capture used to create this transition variant. */
+  transition?: TimelineTransition
+}
+
+export interface TimelineTransition {
+  kind: 'rife'
+  startFrameAssetId?: string
+  endFrameAssetId?: string
+  sourceSignature?: string
+  capturedStart?: number
+  capturedEnd?: number
+  capturedAt?: string
 }
 
 export interface TimelineClip {
@@ -57,6 +70,7 @@ export interface TimelineClip {
   activeVariantId?: string
   variants: TimelineVariant[]
   generation?: TimelineGeneration
+  transition?: TimelineTransition
   transform?: { scale: number; x: number; y: number }
   opacity?: number
   gain?: number

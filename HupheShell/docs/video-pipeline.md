@@ -1,12 +1,12 @@
 # Video-pipeline — productvisie
 
-Bijgewerkt: 2 november 2026. Dit is het productdoel. Het [MVP-bouwplan](video-mvp.md) beschrijft de voorgestelde bouwvolgorde; [financiën](video-financien.md) beschrijft de zakelijke afhandeling. Er is inmiddels een eerste lokale tijdlijn gebouwd op Toms opdracht; zie het [meetverslag](video-timeline-test-results.md). De visie blijft het einddoel; open fases zijn daarmee niet automatisch afgerond. Tom bepaalt de vervolgstappen.
+Bijgewerkt: 3 november 2026. Dit is het productdoel. Het [MVP-bouwplan en de afvinklijst](video-mvp.md) laten zien wat inmiddels werkt en wat nog moet gebeuren; [financiën](video-financien.md) beschrijft de zakelijke afhandeling. De tijdlijn is op Toms vervolgopdrachten uitgebreid met meerdere sporen, slepen van media en afbeeldingslagen; zie het [meetverslag](video-timeline-test-results.md). Tom bepaalt de vervolgstappen.
 
 ## Eerste oplevering in één zin
 
-**Eerste oplevering: de videowerkomgeving opzetten met projecten, één video- en één audiospoor, blokken, import, varianten, trim, preview, opslag en export, plus de technische aansluiting voor generatie vanuit een blok.**
+**Eerste oplevering: de videowerkomgeving opzetten met projecten, video- en audiosporen, blokken, import, varianten, trim, preview, opslag en export, plus generatie vanuit een blok.**
 
-Tom wil eerst de omgeving opzetten en nog niets namaken. De geplande route begint met lokale testmedia. Na de reparaties uit M2 en Toms model-/budgetkeuze kunnen de eerste vijf stappen van L1 één echte, korte generatie met een neutraal beeld onderzoeken, parallel aan de montageproef. Alleen het testen van die clip in het prototype wacht op M1. Beide uitkomsten voeden het projectmodel; de simulator groeit mee met de regressietests vanaf M2. De eerdere animatiecommercial blijft voor later. De auditpunten B01–B20 blijven onderdeel van het bouwplan.
+Tom wil eerst de omgeving opzetten en nog niets namaken. Lokale testmedia, montage en de bestaande modelkoppeling zijn inmiddels aanwezig; Tom heeft echte Seedance-generatie in de tijdlijn bevestigd. De gecontroleerde L1-proef onderzoekt nog jobherstel, uitvoermetadata en afrekening, na de benodigde M2-reparaties en een model-/budgetkeuze. Die uitkomsten vullen het projectmodel en de regressietests aan. De eerdere animatiecommercial blijft voor later. De auditpunten B01–B20 blijven onderdeel van het bouwplan.
 
 Het afzonderlijke [beeld-video-workflow.MD](beeld-video-workflow.MD) behandelt de gedeelde beeld/video-pilot voor Roorda, met samenwerking, centrale opslag en overdracht tussen collega's als vroege doelen. Dit solo tijdlijn-MVP heeft een andere scope en volgorde. We hergebruiken relevante bevindingen; de Roorda-pilot vormt geen voorafgaande oplevervoorwaarde voor deze technische basis.
 
@@ -49,9 +49,13 @@ Per shot blijven houding, actie, camera en omgeving apart instelbaar. Nieuwe ref
 
 Bij een latere creatieve proef beoordelen we de kenmerken aan begin, midden en einde van de clip, tussen twee varianten en tussen concept en eindversie. Daarna volgt een proef met twee aansluitende clips.
 
+De eerste [RIFE-overgangstool](video-rife-transitions.md) is lokaal gebouwd: RIFE kiezen in de modellenlijst van een gewoon tijdlijnblok bepaalt twee verliesvrije bronbeelden en een expliciete generatie levert een nieuwe variant op het bovenliggende spoor. Serveractivering en een echte visuele proef staan nog open.
+
 RIFE kan tussenframes maken. Identiteit, stijl en de beweging van beide bronclips beoordelen we vóór zo'n overgang; interpolatie bewijst geen personageconsistentie. Bron: [RIFE-auteursimplementatie](https://github.com/hzwer/ECCV2022-RIFE).
 
 ## Uitbreiden na de technische basis
+
+Een deel van deze oorspronkelijke uitbreidingen is op Toms vervolgopdracht al gebouwd: extra video-/audiosporen, ripple/vaste posities en logo-/afbeeldingslagen. De actuele status staat per functie in de MVP-afvinklijst; naadloos vervolg, lipsync en de andere hieronder beschreven uitbreidingen blijven afzonderlijke stappen.
 
 | Oplevering | Inhoud | Voorwaarde |
 | --- | --- | --- |
@@ -61,7 +65,7 @@ RIFE kan tussenframes maken. Identiteit, stijl en de beweging van beide bronclip
 | Gerichte AI-bewerking | Aanwijzen, selectie corrigeren, gekozen tijdsbereik en stijlreferenties; nieuwe variant naast de bron. | Eerst een geslaagde modelproef per bewerking, daarna bijbehorende bediening bouwen. |
 | Formaten en samenwerking | Horizontaal, verticaal, vierkant en eigen maten; projectuitnodigingen voor collega's, gedeelde media en rollen. | Zelfstandig gebruik werkt; formaatversies en gelijktijdige wijzigingen behouden bestaand werk. |
 | Zakelijke afhandeling | Uitwerken volgens [video-financien.md](video-financien.md). | Filmketen werkt; registratie en correcte jobbetaler gelden vanaf de eerste echte generatie. |
-| Eigen montage-assets — als laatste | Logo's/afbeeldingen als gewone lagen met positie, schaal, zichtduur en transparantie. | Lage prioriteit zoals afgesproken; lokale video-import zit al in v1. |
+| Eigen montage-assets — inmiddels gebouwd | Logo's/afbeeldingen als gewone lagen met positie, schaal, zichtduur en transparantie. | Op Toms vervolgopdracht samen met meerdere sporen gebouwd; lokale preview en export getest. |
 
 Stem en muziek krijgen eigen bewerkingen en varianten. Lipsync gebruikt een specifieke video- en stemversie; de stem mag niet dubbel afspelen. Het concrete gedrag van fades, mute/solo, gekoppelde audio, titels en ondertitels bepalen we bij die uitbreiding.
 
@@ -84,4 +88,4 @@ Een bewerkte uitsnede 2–5 s kan een nieuw bestand van 0–3 s worden: bewaar d
 
 ## Wat nu nodig is
 
-Het [MVP-bouwplan](video-mvp.md) splitst M1 in export/binaries/packaging (M1a) en preview/synchronisatie (M1b). Voor M1b geldt een voorgestelde timebox van twee werkdagen, gevolgd door meetresultaten en Toms keuze over het vervolg. M2 bevat vier lokale reparaties en apart serverwerk voor B10 met een compatibele uitrol. L1 stappen 1–5 kunnen daarna parallel aan M1; stap 6 wacht op het M1a/M1b-prototype. M3 volgt pas na complete M1 en L1. Tom kiest het model en kostenplafond vóór de persoonlijke proef; eigen bronmateriaal en een commercial zijn nu niet nodig.
+De [MVP-afvinklijst](video-mvp.md) is de werklijst voor het vervolg. De montagebediening en generatiekoppeling zijn grotendeels gebouwd; de open punten liggen onder meer bij jobherstel, resterende Single-reparaties, serverbinding, daadwerkelijke kosten en volledige preview-/importmetingen. M3–M5 zijn op Toms verzoek al deels uitgevoerd; volledige acceptatie wacht nog op de resterende M1-, M2- en L1-resultaten. Tom kiest de volgende stap en vooraf het model en kostenplafond voor een betaalde proef. Distributie heeft een eigen checklist; een commercial namaken is nu niet nodig.

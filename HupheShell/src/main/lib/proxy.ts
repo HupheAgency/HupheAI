@@ -82,16 +82,21 @@ export async function callFalProxy(
   return res.json()
 }
 
-async function handleVideoProxyResponse(res: Response): Promise<any> {
-  if (res.status === 402) throw new InsufficientCreditsError()
-  if (res.status === 403) {
-    const data = await res.json().catch(() => ({})) as any
-    if (data.code === 'wallet_blocked') throw new WalletBlockedError()
-    throw new Error(data.error ?? `Proxy 403`)
-  }
+async function handleVideoProxyResponse(res: Response, submission = false): Promise<any> {
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(`Video proxy ${res.status}: ${text.slice(0, 200)}`)
+    let data: Record<string, unknown> = {}
+    try { data = JSON.parse(text) ?? {} } catch { /* A non-JSON gateway failure is not proof of rejection. */ }
+    const code = typeof data.code === 'string' ? data.code
+      : res.status === 402 ? 'insufficient_balance' : res.status === 401 ? 'not_authenticated' : undefined
+    const error = res.status === 402 ? new InsufficientCreditsError()
+      : res.status === 403 && code === 'wallet_blocked' ? new WalletBlockedError()
+      : new Error(typeof data.error === 'string' ? data.error : `Video proxy ${res.status}: ${text.slice(0, 200)}`)
+    // Only explicit pre-submission rejection proves that another attempt is safe.
+    // The same error while polling says nothing about an already running job.
+    const rejectedStatuses: Record<string, number> = { insufficient_balance: 402, invalid_params: 400, wallet_blocked: 403,
+      model_not_found: 403, rate_limited: 429, not_authenticated: 401, rife_not_configured: 503 }
+    throw Object.assign(error, { code, definitiveFailure: !!(submission && code && rejectedStatuses[code] === res.status) })
   }
   return res.json()
 }
@@ -262,7 +267,7 @@ export async function submitFalVideoJob(
       source_height: params.sourceHeight,
     }),
   })
-  return handleVideoProxyResponse(res)
+  return handleVideoProxyResponse(res, true)
 }
 
 /**

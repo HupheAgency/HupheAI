@@ -5,6 +5,7 @@ import { findTimelineTools, timelineExtensions } from './lib/video-timeline-medi
 import { extractTimelineAudio, importTimelineSources, listTimelineProjects, parseTimelineProject, saveTimelineProject, timelineImportSchema, timelineProjectDirectory, validateOwnedAssets } from './lib/video-timeline-storage'
 import { renderTimelineProject } from './lib/video-timeline-export'
 import { prepareTimelineReferences } from './lib/video-timeline-references'
+import { captureTimelineTransition } from './lib/video-timeline-transition'
 
 let registered = false
 const rootDirectory = () => process.env.HUPHE_TIMELINE_ROOT || join(app.getPath('documents'), 'HupheAI', 'Video')
@@ -54,6 +55,10 @@ export function registerVideoTimelineIPC(): void {
   ipcMain.handle('timeline:extract-audio', async (_event, input: unknown) => {
     try { return { ok: true, asset: await extractTimelineAudio(rootDirectory(), input) } }
     catch (error) { return { ok: false, error: message(error) } }
+  })
+  ipcMain.handle('timeline:capture-transition', async (_event, input: unknown) => {
+    try { return { ok: true, ...await captureTimelineTransition(rootDirectory(), input) } }
+    catch (error) { return { ok: false, assets: [], error: message(error) } }
   })
   ipcMain.handle('timeline:export', async (_event, input: unknown) => {
     try {
