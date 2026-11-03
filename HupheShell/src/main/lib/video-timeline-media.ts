@@ -17,7 +17,9 @@ const extensions = {
 export function timelineExtensions(kind: TimelineMediaKind): string[] { return [...extensions[kind]] }
 
 export async function findTimelineTools(): Promise<Partial<TimelineTools>> {
-  const dirs = [...(process.env.PATH || '').split(delimiter), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin']
+  // Binaries shipped with the app (Resources/bin, see extraResources) win over whatever is installed on the machine.
+  const bundled = typeof process.resourcesPath === 'string' && process.resourcesPath ? [join(process.resourcesPath, 'bin')] : []
+  const dirs = [...bundled, ...(process.env.PATH || '').split(delimiter), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin']
   const result: Partial<TimelineTools> = {}
   for (const name of ['ffmpeg', 'ffprobe'] as const) {
     const configured = process.env[`HUPHE_TIMELINE_${name.toUpperCase()}`]
@@ -31,7 +33,7 @@ export async function findTimelineTools(): Promise<Partial<TimelineTools>> {
 
 export async function requireTimelineTools(tools?: TimelineTools): Promise<TimelineTools> {
   const found = tools || await findTimelineTools()
-  if (!found.ffmpeg || !found.ffprobe) throw new Error('FFmpeg en FFprobe ontbreken. Installeer beide lokale mediagereedschappen en herstart de app.')
+  if (!found.ffmpeg || !found.ffprobe) throw new Error('FFmpeg en FFprobe ontbreken. Installeer beide lokale mediagereedschappen (bijvoorbeeld met Homebrew) en herstart de app.')
   return found as TimelineTools
 }
 

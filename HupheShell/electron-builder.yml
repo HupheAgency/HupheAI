@@ -46,6 +46,9 @@ extraResources:
     filter:
       - "brush"
       - "brush.exe"
+      # FFmpeg voor de videotimeline: alleen meegeleverd als de bestanden in build/bin staan (zie docs/video-mvp.md, LGPL).
+      - "ffmpeg"
+      - "ffprobe"
 
   - from: src/modules/huphe-code
     to: modules/huphe-code
