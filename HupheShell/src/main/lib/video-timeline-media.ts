@@ -55,7 +55,7 @@ export function timelineEncoderArgs(encoder: TimelineVideoEncoder, bitrate: stri
 
 export async function requireTimelineTools(tools?: TimelineTools): Promise<TimelineTools> {
   const found = tools || await findTimelineTools()
-  if (!found.ffmpeg || !found.ffprobe) throw new Error('FFmpeg en FFprobe ontbreken. Installeer beide lokale mediagereedschappen (bijvoorbeeld met Homebrew) en herstart de app.')
+  if (!found.ffmpeg || !found.ffprobe) throw new Error('FFmpeg en FFprobe ontbreken. Open Terminal, typ brew install ffmpeg en herstart de app.')
   return found as TimelineTools
 }
 

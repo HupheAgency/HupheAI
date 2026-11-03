@@ -45,6 +45,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   })
   const [exportOpen, setExportOpen] = useState(false)
   const [encoder, setEncoder] = useState<string>()
+  const [copied, setCopied] = useState(false)
   const [renaming, setRenaming] = useState<string>()
   const [trackDrag, setTrackDrag] = useState<{ id: string; over?: string }>()
   const clipboard = useRef<TimelineClip[]>([])
@@ -897,7 +898,11 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
         </div>}</span>
       <button className="vt-primary vt-icon" aria-label="Film exporteren" title={problems.length ? `Export niet mogelijk: ${problems[0]}` : 'Film exporteren'} disabled={!!busy || !!problems.length || !toolsAvailable} onClick={() => void action('Film exporteren…', async () => { setPlaying(false); await persist(); const r = await api().timeline.export(structuredClone(current.current), exportSettings); if (!r.ok && !r.canceled) throw new Error(r.error); if (r.ok) setMessage(`Film geëxporteerd: ${r.path}`) })}>{busy === 'Film exporteren…' ? '…' : <Icon name="export" />}</button>
     </header>
-    {(message || busy || !toolsAvailable) && <div className="vt-message" role="status">{busy || message || 'FFmpeg en FFprobe zijn nodig voor import en export. Installeer de lokale videotools.'}<button aria-label="Melding sluiten" onClick={() => setMessage('')}><Icon name="close" size={12} /></button></div>}
+    {!toolsAvailable && <div className="vt-message vt-warning vt-install" role="alert"><span>Voor importeren en exporteren is FFmpeg nodig. Open Terminal, plak deze regel, druk op Enter en start de app daarna opnieuw:</span>
+      <code>brew install ffmpeg</code>
+      <button onClick={() => { navigator.clipboard?.writeText('brew install ffmpeg').then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) }, () => setMessage('Kopiëren is niet gelukt; typ de regel over.')) }}>{copied ? 'Gekopieerd ✓' : 'Kopieer regel'}</button>
+      <small>Heb je Homebrew nog niet? Kijk op brew.sh.</small></div>}
+    {(message || busy) && <div className="vt-message" role="status">{busy || message}<button aria-label="Melding sluiten" onClick={() => setMessage('')}><Icon name="close" size={12} /></button></div>}
     {unknownJobs.length > 0 && <div className="vt-message vt-warning" role="alert"><span>Een eerdere generatie heeft een onbekende uitkomst (de app werd gesloten of de verbinding viel weg). Controleer in Atelier of de generatie is gelukt voordat je opnieuw genereert; anders betaal je mogelijk twee keer. Je montage en invoer zijn bewaard.</span>
       {unknownJobs.map(job => <button key={job.id} className="vt-job-resolve" title="Ik heb dit gecontroleerd; nieuwe generaties weer toestaan" disabled={!!generating} onClick={() => apply({ ...current.current, jobs: current.current.jobs?.map(j => j.id === job.id ? { ...j, status: 'failed' as const, error: 'Handmatig afgehandeld na onbekende uitkomst.' } : j) }, false)}>{project.clips.find(c => c.id === job.clipId)?.label ?? 'Fragment'} · {new Date(job.createdAt).toLocaleString('nl-NL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} · afgehandeld</button>)}</div>}
     <div className="vt-workspace">

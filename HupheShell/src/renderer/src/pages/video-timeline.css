@@ -83,3 +83,5 @@
 .vt-block>b,.vt-block>span{position:relative;z-index:1}.vt-speed{position:absolute;right:6px;top:3px;z-index:1;font:600 10px/1 -apple-system,sans-serif;font-style:normal;padding:2px 4px;border-radius:4px;background:#000a;color:#ffd978}
 .vt-export-wrap{position:relative;display:inline-flex}.vt-export-menu{position:absolute;right:0;top:36px;z-index:50;width:260px;display:grid;gap:8px;padding:12px;border-radius:9px;background:#161a20;border:1px solid #2f3541;box-shadow:0 10px 30px rgba(0,0,0,.5)}
 .vt-message.vt-warning{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}.vt-job-resolve{border:1px solid #6b5a2a;background:#3a3216;color:#f4df8f;border-radius:6px;padding:3px 8px;cursor:pointer}.vt-job-resolve:hover:not(:disabled){background:#4a4020}
+
+.vt-install code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:#0e1013;border:1px solid #3a3f49;border-radius:5px;padding:3px 8px;color:#f4df8f;user-select:all}.vt-install small{flex-basis:100%;color:#a99a62}
