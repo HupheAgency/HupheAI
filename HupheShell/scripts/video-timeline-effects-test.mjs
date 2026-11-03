@@ -2,7 +2,7 @@
 /** Fades, crossfade and speed: render with FFmpeg and measure decoded pixels/audio. */
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -100,4 +100,26 @@ try {
   assert.deepEqual(parseTimelineExportOptions({ quality: 'bogus', outputHeight: 'x' }), { quality: 'standard', outputHeight: undefined })
   assert.deepEqual(parseTimelineExportOptions({ quality: 'high', outputHeight: 1080 }), { quality: 'high', outputHeight: 1080 })
   console.log('PASS export settings')
+
+  // Encoder choice: a GPL build (libx264) is used when present, an LGPL-style build falls back to VideoToolbox
+  const { pickTimelineEncoder } = await import(pathToFileURL(await (async () => {
+    const out = join(root, 'media-helper.cjs')
+    await build({ entryPoints: [join(appRoot, 'src/main/lib/video-timeline-media.ts')], outfile: out, bundle: true, platform: 'node', format: 'cjs', logLevel: 'warning' })
+    return out
+  })()).href)
+  const lgpl = join(root, 'ffmpeg-lgpl')
+  await writeFile(lgpl, `#!/bin/sh\nif [ "$2" = "-encoders" ]; then ${tools.ffmpeg} "$@" | grep -v libx264; else exec ${tools.ffmpeg} "$@"; fi\n`)
+  await chmod(lgpl, 0o755)
+  assert.equal(await pickTimelineEncoder(tools.ffmpeg), 'libx264', 'GPL build picks libx264')
+  assert.equal(await pickTimelineEncoder(lgpl), 'h264_videotoolbox', 'LGPL-style build falls back to the hardware encoder')
+  const gplOut = join(root, 'gpl.mp4'), lgplOut = join(root, 'lgpl.mp4')
+  await renderTimelineProject(project([clip('a', 'ramp', 0, 25)]), { root, outputPath: gplOut, tools })
+  await renderTimelineProject(project([clip('a', 'ramp', 0, 25)]), { root, outputPath: lgplOut, tools: { ffmpeg: lgpl, ffprobe: tools.ffprobe } })
+  assert.ok((await readFile(gplOut)).includes('x264 - core'), 'default export with a GPL build is encoded by x264')
+  assert.ok(!(await readFile(lgplOut)).includes('x264 - core'), 'export with an LGPL-style build is not encoded by x264')
+  for (const file of [gplOut, lgplOut]) {
+    const v = (await probe(file, tools.ffprobe)).streams.find(x => x.codec_type === 'video')
+    assert.equal(v.codec_name, 'h264'); assert.equal(v.nb_frames ?? '25', '25')
+  }
+  console.log('PASS encoder choice (x264 vs hardware fallback)')
 } finally { await rm(root, { recursive: true, force: true }) }

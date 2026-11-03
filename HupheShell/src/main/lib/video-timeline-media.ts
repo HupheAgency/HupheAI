@@ -17,9 +17,10 @@ const extensions = {
 export function timelineExtensions(kind: TimelineMediaKind): string[] { return [...extensions[kind]] }
 
 export async function findTimelineTools(): Promise<Partial<TimelineTools>> {
-  // Binaries shipped with the app (Resources/bin, see extraResources) win over whatever is installed on the machine.
+  // A FFmpeg the user installed themselves comes first (it may include libx264, the best H.264 encoder). The LGPL build
+  // shipped with the app (Resources/bin, see extraResources) is the fallback, so distributed copies never need a GPL binary.
   const bundled = typeof process.resourcesPath === 'string' && process.resourcesPath ? [join(process.resourcesPath, 'bin')] : []
-  const dirs = [...bundled, ...(process.env.PATH || '').split(delimiter), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin']
+  const dirs = [...(process.env.PATH || '').split(delimiter), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', ...bundled]
   const result: Partial<TimelineTools> = {}
   for (const name of ['ffmpeg', 'ffprobe'] as const) {
     const configured = process.env[`HUPHE_TIMELINE_${name.toUpperCase()}`]
@@ -29,6 +30,27 @@ export async function findTimelineTools(): Promise<Partial<TimelineTools>> {
     }
   }
   return result
+}
+
+export type TimelineVideoEncoder = 'libx264' | 'h264_videotoolbox' | 'mpeg4'
+const encoderCache = new Map<string, Promise<TimelineVideoEncoder>>()
+
+/** Best H.264 encoder this FFmpeg build has: libx264 (GPL builds), else the macOS hardware encoder, else MPEG-4. */
+export function pickTimelineEncoder(ffmpeg: string): Promise<TimelineVideoEncoder> {
+  let found = encoderCache.get(ffmpeg)
+  if (!found) {
+    found = runTimelineTool(ffmpeg, ['-hide_banner', '-encoders'], 15_000).then(list => {
+      const has = (name: string) => new RegExp(`^\\s*V\\S*\\s+${name}\\s`, 'm').test(list)
+      return has('libx264') ? 'libx264' : process.platform === 'darwin' && has('h264_videotoolbox') ? 'h264_videotoolbox' : 'mpeg4'
+    }, () => (process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264') as TimelineVideoEncoder)
+    encoderCache.set(ffmpeg, found)
+  }
+  return found
+}
+
+/** libx264 steers on quality (CRF); the other encoders need a bitrate. */
+export function timelineEncoderArgs(encoder: TimelineVideoEncoder, bitrate: string, crf: string): string[] {
+  return ['-c:v', encoder, ...(encoder === 'libx264' ? ['-preset', 'veryfast', '-crf', crf] : encoder === 'h264_videotoolbox' ? ['-b:v', bitrate] : ['-q:v', '2'])]
 }
 
 export async function requireTimelineTools(tools?: TimelineTools): Promise<TimelineTools> {
@@ -131,10 +153,10 @@ export async function probeTimelineMedia(path: string, kind: TimelineMediaKind, 
 /** Retain the source timestamps and original file; only the browser preview is encoded. */
 export async function createTimelineVideoPreview(source: string, output: string, tools?: TimelineTools): Promise<void> {
   const bins = await requireTimelineTools(tools)
-  const encoder = process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264'
+  const encoder = await pickTimelineEncoder(bins.ffmpeg)
   await runTimelineTool(bins.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
     '-protocol_whitelist', 'file,pipe', '-i', source, '-map', '0:v:0', '-map', '0:a:0?', '-fps_mode', 'passthrough',
-    '-c:v', encoder, ...(encoder === 'h264_videotoolbox' ? ['-b:v', '12M'] : ['-preset', 'veryfast', '-crf', '18']),
+    ...timelineEncoderArgs(encoder, '12M', '18'),
     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output], 30 * 60_000)
 }
 

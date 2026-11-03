@@ -1,7 +1,7 @@
 import { app, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
-import { findTimelineTools, timelineExtensions } from './lib/video-timeline-media'
+import { findTimelineTools, pickTimelineEncoder, timelineExtensions } from './lib/video-timeline-media'
 import { extractTimelineAudio, importTimelineSources, listTimelineProjects, parseTimelineProject, saveTimelineProject, timelineImportSchema, timelineProjectDirectory, validateOwnedAssets } from './lib/video-timeline-storage'
 import { parseTimelineExportOptions, renderTimelineProject } from './lib/video-timeline-export'
 import { prepareTimelineReferences } from './lib/video-timeline-references'
@@ -17,7 +17,8 @@ export function registerVideoTimelineIPC(): void {
   ipcMain.handle('timeline:tools', async () => {
     try {
       const tools = await findTimelineTools()
-      return { ok: true, ffmpeg: !!tools.ffmpeg, ffprobe: !!tools.ffprobe, ffmpegPath: tools.ffmpeg, ffprobePath: tools.ffprobe }
+      const encoder = tools.ffmpeg ? await pickTimelineEncoder(tools.ffmpeg) : undefined
+      return { ok: true, encoder, ffmpeg: !!tools.ffmpeg, ffprobe: !!tools.ffprobe, ffmpegPath: tools.ffmpeg, ffprobePath: tools.ffprobe }
     } catch (error) { return { ok: false, error: message(error), ffmpeg: false, ffprobe: false } }
   })
   ipcMain.handle('timeline:list', async () => {

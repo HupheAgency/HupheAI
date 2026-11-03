@@ -3,14 +3,14 @@ import { basename, dirname, extname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { activeMedia, clipFades, clipSpeed, clipTrackId, renderableProject, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
 import { transitionPlaybackProblems } from '../../shared/video-timeline-transition'
-import { probeTimelineMedia, requireTimelineTools, runTimelineTool, type TimelineTools } from './video-timeline-media'
+import { pickTimelineEncoder, probeTimelineMedia, requireTimelineTools, runTimelineTool, timelineEncoderArgs, type TimelineTools } from './video-timeline-media'
 import { isWithinTimelineDirectory, parseTimelineProject, validateOwnedAssets } from './video-timeline-storage'
 
 export interface TimelineRenderOptions {
   root: string
   outputPath: string
   tools?: TimelineTools
-  /** Explicit override for local test fixtures; the macOS app uses VideoToolbox. */
+  /** Explicit override for tests; normally the best encoder the FFmpeg build offers is detected. */
   encoder?: 'h264_videotoolbox' | 'libx264' | 'mpeg4'
   quality?: TimelineExportQuality
   /** Output height in pixels; the width follows the project's aspect ratio. Omitted = project size. */
@@ -155,10 +155,10 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
   // Do not automatically attenuate one track when another track is added.
   else filters.push(`${audioLayers.join('')}amix=inputs=${audioLayers.length}:duration=longest:normalize=0[aout]`)
   const quality = QUALITY[options.quality ?? 'standard']
-  const encoder = options.encoder || (process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264')
+  const encoder = options.encoder || await pickTimelineEncoder(tools.ffmpeg)
   args.push('-filter_complex_threads', '1', '-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]',
-    '-frames:v', String(frames), '-t', seconds(frames, project.fps), '-r', String(project.fps), '-fps_mode', 'cfr', '-c:v', encoder,
-    ...(encoder === 'h264_videotoolbox' ? ['-b:v', quality.bitrate] : encoder === 'libx264' ? ['-preset', 'veryfast', '-crf', quality.crf] : ['-q:v', '2']),
+    '-frames:v', String(frames), '-t', seconds(frames, project.fps), '-r', String(project.fps), '-fps_mode', 'cfr',
+    ...timelineEncoderArgs(encoder, quality.bitrate, quality.crf),
     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', quality.audio, '-ar', '48000', '-ac', '2', '-movflags', '+faststart', temporary)
   try {
     await runTimelineTool(tools.ffmpeg, args, 30 * 60_000)

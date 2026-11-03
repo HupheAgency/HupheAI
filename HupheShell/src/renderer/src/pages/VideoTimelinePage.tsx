@@ -44,6 +44,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     try { return { quality: 'standard', ...JSON.parse(localStorage.getItem('vt-export') ?? '{}') } } catch { return { quality: 'standard' } }
   })
   const [exportOpen, setExportOpen] = useState(false)
+  const [encoder, setEncoder] = useState<string>()
   const [renaming, setRenaming] = useState<string>()
   const [trackDrag, setTrackDrag] = useState<{ id: string; over?: string }>()
   const clipboard = useRef<TimelineClip[]>([])
@@ -126,6 +127,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       const all = list.projects ?? []
       setProjects(all)
       setToolsAvailable(!!tools.ffmpeg && !!tools.ffprobe)
+      setEncoder(tools.encoder)
       const saved = all.find((p: TimelineProject) => p.id === localStorage.getItem('huphe:timeline:last-project'))
       if (saved) openProject(saved)
       ready.current = true
@@ -891,6 +893,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
           <label>Formaat<select aria-label="Exportformaat" value={exportSettings.outputHeight ?? 0} onChange={e => { const next = { ...exportSettings, outputHeight: Number(e.target.value) || undefined }; setExportSettings(next); try { localStorage.setItem('vt-export', JSON.stringify(next)) } catch { /* optional */ } }}>
             <option value={0}>Projectformaat ({project.width}×{project.height})</option><option value={720}>720p</option><option value={1080}>1080p</option><option value={2160}>4K (2160p)</option></select></label>
           <p className="vt-help">MP4 · H.264 · AAC · {project.fps} fps. Een groter formaat dan het project rekent op, het wordt niet scherper.</p>
+          {encoder && <p className="vt-help">Encoder: {encoder === 'libx264' ? 'x264 (hoogste kwaliteit)' : encoder === 'h264_videotoolbox' ? 'macOS-videochip (snel, iets minder compact)' : 'basis-MPEG-4 (geen H.264 beschikbaar)'}.</p>}
         </div>}</span>
       <button className="vt-primary vt-icon" aria-label="Film exporteren" title={problems.length ? `Export niet mogelijk: ${problems[0]}` : 'Film exporteren'} disabled={!!busy || !!problems.length || !toolsAvailable} onClick={() => void action('Film exporteren…', async () => { setPlaying(false); await persist(); const r = await api().timeline.export(structuredClone(current.current), exportSettings); if (!r.ok && !r.canceled) throw new Error(r.error); if (r.ok) setMessage(`Film geëxporteerd: ${r.path}`) })}>{busy === 'Film exporteren…' ? '…' : <Icon name="export" />}</button>
     </header>
