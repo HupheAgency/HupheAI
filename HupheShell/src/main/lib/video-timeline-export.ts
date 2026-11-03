@@ -13,11 +13,16 @@ export interface TimelineRenderOptions {
   /** Explicit override for tests; normally the best encoder the FFmpeg build offers is detected. */
   encoder?: 'h264_videotoolbox' | 'libx264' | 'mpeg4'
   quality?: TimelineExportQuality
+  /** 'prores' = ProRes 422 in a .mov for further editing (Media Encoder, Premiere); default H.264 in an .mp4. */
+  format?: TimelineExportFormat
   /** Output height in pixels; the width follows the project's aspect ratio. Omitted = project size. */
   outputHeight?: number
 }
 
 export type TimelineExportQuality = 'draft' | 'standard' | 'high'
+export type TimelineExportFormat = 'mp4' | 'prores'
+/** prores_ks profiles: 1 = LT, 2 = 422, 3 = 422 HQ. */
+const PRORES_PROFILE = { draft: '1', standard: '2', high: '3' } as const
 const QUALITY = {
   draft: { bitrate: '4M', crf: '26', audio: '128k' },
   standard: { bitrate: '12M', crf: '18', audio: '192k' },
@@ -25,11 +30,11 @@ const QUALITY = {
 } as const
 
 /** Settings arrive from the renderer, so unknown values fall back to the defaults instead of reaching FFmpeg. */
-export function parseTimelineExportOptions(input: unknown): Pick<TimelineRenderOptions, 'quality' | 'outputHeight'> {
+export function parseTimelineExportOptions(input: unknown): Pick<TimelineRenderOptions, 'quality' | 'outputHeight' | 'format'> {
   const raw = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   const quality = raw.quality === 'draft' || raw.quality === 'high' ? raw.quality : 'standard'
   const height = Number(raw.outputHeight)
-  return { quality, outputHeight: Number.isInteger(height) && height >= 144 && height <= 4320 ? height : undefined }
+  return { quality, format: raw.format === 'prores' ? 'prores' : 'mp4', outputHeight: Number.isInteger(height) && height >= 144 && height <= 4320 ? height : undefined }
 }
 
 const seconds = (frames: number, fps: number) => (frames / fps).toFixed(9)
@@ -46,7 +51,9 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
   const frames = timelineEnd(project)
   const duration = frames / project.fps
   if (frames <= 0 || duration > 3600) throw new Error('Exporteer een tijdlijn van maximaal één uur met minimaal één videofragment.')
-  if (extname(options.outputPath).toLowerCase() !== '.mp4') throw new Error('Kies een uitvoerbestand met de extensie .mp4.')
+  const prores = options.format === 'prores'
+  const extension = prores ? '.mov' : '.mp4'
+  if (extname(options.outputPath).toLowerCase() !== extension) throw new Error(`Kies een uitvoerbestand met de extensie ${extension}.`)
   const outputPath = resolve(options.outputPath)
   await mkdir(dirname(outputPath), { recursive: true })
   const outputDirectory = await realpath(dirname(outputPath))
@@ -55,7 +62,7 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
   if (isWithinTimelineDirectory(managedRoot, outputDirectory) && outputDirectory.split(/[\\/]/).some(part => part === 'originals' || part === 'previews'))
     throw new Error('Bewaar de export buiten de mappen met originele media en previewkopieën.')
   if (project.assets.some(asset => (asset.path === join(outputDirectory, basename(outputPath)) || asset.previewPath === join(outputDirectory, basename(outputPath))))) throw new Error('Een export mag geen bronbestand vervangen.')
-  const temporary = join(outputDirectory, `.huphe-export-${randomUUID()}.mp4`)
+  const temporary = join(outputDirectory, `.huphe-export-${randomUUID()}${extension}`)
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y']
   const filters: string[] = []
   let inputIndex = 0
@@ -149,17 +156,19 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
   // Even dimensions only: yuv420p cannot hold odd sizes.
   const outputHeight = options.outputHeight ? Math.max(2, Math.round(options.outputHeight / 2) * 2) : undefined
   const outputWidth = outputHeight ? Math.max(2, Math.round(project.width * outputHeight / project.height / 2) * 2) : undefined
-  filters.push(`${composite}${outputHeight && outputHeight !== project.height ? `scale=${outputWidth}:${outputHeight}:flags=lanczos,` : ''}format=yuv420p[vout]`)
+  filters.push(`${composite}${outputHeight && outputHeight !== project.height ? `scale=${outputWidth}:${outputHeight}:flags=lanczos,` : ''}format=${prores ? 'yuv422p10le' : 'yuv420p'}[vout]`)
   if (!audioLayers.length) filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${seconds(frames, project.fps)}[aout]`)
   else if (audioLayers.length === 1) filters.push(`${audioLayers[0]}anull[aout]`)
   // Do not automatically attenuate one track when another track is added.
   else filters.push(`${audioLayers.join('')}amix=inputs=${audioLayers.length}:duration=longest:normalize=0[aout]`)
   const quality = QUALITY[options.quality ?? 'standard']
-  const encoder = options.encoder || await pickTimelineEncoder(tools.ffmpeg)
+  // ProRes (LGPL-safe, built into FFmpeg) is for editing onwards: little loss, big files, PCM audio.
+  const video = prores ? ['-c:v', 'prores_ks', '-profile:v', PRORES_PROFILE[options.quality ?? 'standard'], '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le']
+    : [...timelineEncoderArgs(options.encoder || await pickTimelineEncoder(tools.ffmpeg), quality.bitrate, quality.crf), '-pix_fmt', 'yuv420p']
+  const audio = prores ? ['-c:a', 'pcm_s16le'] : ['-c:a', 'aac', '-b:a', quality.audio]
   args.push('-filter_complex_threads', '1', '-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]',
     '-frames:v', String(frames), '-t', seconds(frames, project.fps), '-r', String(project.fps), '-fps_mode', 'cfr',
-    ...timelineEncoderArgs(encoder, quality.bitrate, quality.crf),
-    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', quality.audio, '-ar', '48000', '-ac', '2', '-movflags', '+faststart', temporary)
+    ...video, ...audio, '-ar', '48000', '-ac', '2', ...(prores ? [] : ['-movflags', '+faststart']), temporary)
   try {
     await runTimelineTool(tools.ffmpeg, args, 30 * 60_000)
     if ((await stat(temporary)).size === 0) throw new Error('De export heeft geen bestand opgeleverd.')

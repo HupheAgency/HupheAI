@@ -2,7 +2,7 @@
 /** Fades, crossfade and speed: render with FFmpeg and measure decoded pixels/audio. */
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -97,8 +97,8 @@ try {
   await renderTimelineProject(project([clip('a', 'ramp', 0, 50)]), { root, outputPath: sized, tools, encoder: 'libx264', outputHeight: 90, quality: 'draft' })
   const info = (await probe(sized, tools.ffprobe)).streams.find(x => x.codec_type === 'video')
   assert.deepEqual([info.width, info.height], [160, 90], 'output is scaled to the requested height')
-  assert.deepEqual(parseTimelineExportOptions({ quality: 'bogus', outputHeight: 'x' }), { quality: 'standard', outputHeight: undefined })
-  assert.deepEqual(parseTimelineExportOptions({ quality: 'high', outputHeight: 1080 }), { quality: 'high', outputHeight: 1080 })
+  assert.deepEqual(parseTimelineExportOptions({ quality: 'bogus', outputHeight: 'x' }), { quality: 'standard', format: 'mp4', outputHeight: undefined })
+  assert.deepEqual(parseTimelineExportOptions({ quality: 'high', format: 'mp4', outputHeight: 1080 }), { quality: 'high', format: 'mp4', outputHeight: 1080 })
   console.log('PASS export settings')
 
   // Encoder choice: a GPL build (libx264) is used when present, an LGPL-style build falls back to VideoToolbox
@@ -122,4 +122,25 @@ try {
     assert.equal(v.codec_name, 'h264'); assert.equal(v.nb_frames ?? '25', '25')
   }
   console.log('PASS encoder choice (x264 vs hardware fallback)')
+
+  // ProRes: editing format in a .mov, also from the LGPL-style build (prores_ks is part of FFmpeg itself)
+  assert.equal(parseTimelineExportOptions({ format: 'prores' }).format, 'prores')
+  assert.equal(parseTimelineExportOptions({ format: 'x' }).format, 'mp4')
+  const movs = {}
+  for (const quality of ['draft', 'high']) {
+    const mov = join(root, `prores-${quality}.mov`)
+    await renderTimelineProject(project([clip('a', 'ramp', 0, 25)]), { root, outputPath: mov, tools: { ffmpeg: lgpl, ffprobe: tools.ffprobe }, format: 'prores', quality })
+    const streams = (await probe(mov, tools.ffprobe)).streams
+    const v = streams.find(x => x.codec_type === 'video'), au = streams.find(x => x.codec_type === 'audio')
+    assert.equal(v.codec_name, 'prores'); assert.equal(v.pix_fmt, 'yuv422p10le'); assert.equal(v.nb_frames, '25')
+    assert.equal(v.profile, quality === 'draft' ? 'LT' : 'HQ'); assert.equal(au.codec_name, 'pcm_s16le'); assert.equal(au.sample_rate, '48000')
+    movs[quality] = (await stat(mov)).size
+  }
+  assert.ok(movs.high > movs.draft, `HQ is larger than LT (${movs.high} vs ${movs.draft})`)
+  await assert.rejects(renderTimelineProject(project([clip('a', 'ramp', 0, 25)]), { root, outputPath: join(root, 'wrong.mp4'), tools, format: 'prores' }), /\.mov/)
+  const sizedMov = join(root, 'sized.mov')
+  await renderTimelineProject(project([clip('a', 'ramp', 0, 25)]), { root, outputPath: sizedMov, tools, format: 'prores', outputHeight: 90 })
+  const sv = (await probe(sizedMov, tools.ffprobe)).streams.find(x => x.codec_type === 'video')
+  assert.deepEqual([sv.width, sv.height], [160, 90])
+  console.log('PASS ProRes export (.mov, 10-bit 4:2:2, PCM audio, profiles, scaling)')
 } finally { await rm(root, { recursive: true, force: true }) }

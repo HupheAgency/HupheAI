@@ -40,7 +40,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const [ripple, setRipple] = useState(false)
   const [tab, setTab] = useState<'clip' | 'generate' | 'edit' | 'variants'>('clip')
   const [group, setGroup] = useState<string[]>([])
-  const [exportSettings, setExportSettings] = useState<{ quality: 'draft' | 'standard' | 'high'; outputHeight?: number }>(() => {
+  const [exportSettings, setExportSettings] = useState<{ quality: 'draft' | 'standard' | 'high'; outputHeight?: number; format?: 'mp4' | 'prores' }>(() => {
     try { return { quality: 'standard', ...JSON.parse(localStorage.getItem('vt-export') ?? '{}') } } catch { return { quality: 'standard' } }
   })
   const [exportOpen, setExportOpen] = useState(false)
@@ -889,12 +889,14 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       <button className="vt-icon" aria-label="Opslaan" title="Opslaan (gebeurt ook automatisch)" onClick={() => void action('Opslaan…', async () => { await persist() })} disabled={!!busy}><Icon name="save" /></button>
       <span className="vt-export-wrap"><button className={`vt-icon${exportOpen ? ' on' : ''}`} aria-label="Exportinstellingen" aria-expanded={exportOpen} title="Exportinstellingen" onClick={() => setExportOpen(!exportOpen)}><Icon name="sliders" /></button>
         {exportOpen && <div className="vt-export-menu" role="dialog" aria-label="Exportinstellingen">
+          <label>Soort<select aria-label="Exportsoort" value={exportSettings.format ?? 'mp4'} onChange={e => { const next = { ...exportSettings, format: e.target.value as 'mp4' | 'prores' }; setExportSettings(next); try { localStorage.setItem('vt-export', JSON.stringify(next)) } catch { /* optional */ } }}>
+            <option value="mp4">MP4 (delen en afspelen)</option><option value="prores">ProRes (verder bewerken)</option></select></label>
           <label>Kwaliteit<select aria-label="Exportkwaliteit" value={exportSettings.quality} onChange={e => { const next = { ...exportSettings, quality: e.target.value as 'draft' | 'standard' | 'high' }; setExportSettings(next); try { localStorage.setItem('vt-export', JSON.stringify(next)) } catch { /* optional */ } }}>
             <option value="draft">Concept (klein bestand)</option><option value="standard">Standaard</option><option value="high">Hoog (groot bestand)</option></select></label>
           <label>Formaat<select aria-label="Exportformaat" value={exportSettings.outputHeight ?? 0} onChange={e => { const next = { ...exportSettings, outputHeight: Number(e.target.value) || undefined }; setExportSettings(next); try { localStorage.setItem('vt-export', JSON.stringify(next)) } catch { /* optional */ } }}>
             <option value={0}>Projectformaat ({project.width}×{project.height})</option><option value={720}>720p</option><option value={1080}>1080p</option><option value={2160}>4K (2160p)</option></select></label>
-          <p className="vt-help">MP4 · H.264 · AAC · {project.fps} fps. Een groter formaat dan het project rekent op, het wordt niet scherper.</p>
-          {encoder && <p className="vt-help">Encoder: {encoder === 'libx264' ? 'x264 (hoogste kwaliteit)' : encoder === 'h264_videotoolbox' ? 'macOS-videochip (snel, iets minder compact)' : 'basis-MPEG-4 (geen H.264 beschikbaar)'}.</p>}
+          <p className="vt-help">{exportSettings.format === 'prores' ? `MOV · ProRes 422 (${({ draft: 'LT', standard: 'standaard', high: 'HQ' })[exportSettings.quality]}) · onbewerkt geluid · groot bestand` : 'MP4 · H.264 · AAC'} · {project.fps} fps. Een groter formaat dan het project rekent op, het wordt niet scherper.</p>
+          {encoder && exportSettings.format !== 'prores' && <p className="vt-help">Encoder: {encoder === 'libx264' ? 'x264 (hoogste kwaliteit)' : encoder === 'h264_videotoolbox' ? 'macOS-videochip (snel, iets minder compact)' : 'basis-MPEG-4 (geen H.264 beschikbaar)'}.</p>}
         </div>}</span>
       <button className="vt-primary vt-icon" aria-label="Film exporteren" title={problems.length ? `Export niet mogelijk: ${problems[0]}` : 'Film exporteren'} disabled={!!busy || !!problems.length || !toolsAvailable} onClick={() => void action('Film exporteren…', async () => { setPlaying(false); await persist(); const r = await api().timeline.export(structuredClone(current.current), exportSettings); if (!r.ok && !r.canceled) throw new Error(r.error); if (r.ok) setMessage(`Film geëxporteerd: ${r.path}`) })}>{busy === 'Film exporteren…' ? '…' : <Icon name="export" />}</button>
     </header>

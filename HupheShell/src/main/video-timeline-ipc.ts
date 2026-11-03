@@ -69,9 +69,12 @@ export function registerVideoTimelineIPC(): void {
       const exports = join(directory, 'exports')
       await mkdir(exports, { recursive: true })
       const safeName = snapshot.name.replace(/[^\p{L}\p{N} _-]/gu, '').trim().slice(0, 100) || 'film'
-      const selection = await dialog.showSaveDialog({ title: 'Film exporteren', defaultPath: join(exports, `${safeName}.mp4`), filters: [{ name: 'MP4-video', extensions: ['mp4'] }] })
+      const options = parseTimelineExportOptions(settings)
+      const prores = options.format === 'prores'
+      const selection = await dialog.showSaveDialog({ title: 'Film exporteren', defaultPath: join(exports, `${safeName}.${prores ? 'mov' : 'mp4'}`),
+        filters: prores ? [{ name: 'ProRes-video', extensions: ['mov'] }] : [{ name: 'MP4-video', extensions: ['mp4'] }] })
       if (selection.canceled || !selection.filePath) return { ok: false, canceled: true }
-      return { ok: true, ...await renderTimelineProject(snapshot, { root: rootDirectory(), outputPath: selection.filePath, ...parseTimelineExportOptions(settings) }) }
+      return { ok: true, ...await renderTimelineProject(snapshot, { root: rootDirectory(), outputPath: selection.filePath, ...options }) }
     } catch (error) { return { ok: false, error: message(error) } }
   })
 }
