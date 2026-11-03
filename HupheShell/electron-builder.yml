@@ -49,6 +49,11 @@ extraResources:
       # FFmpeg voor de videotimeline: alleen meegeleverd als de bestanden in build/bin staan (zie docs/video-mvp.md, LGPL).
       - "ffmpeg"
       - "ffprobe"
+      - "lib/*.dylib"
+
+  # Licentie, broncode en herbouwinformatie van de meegeleverde FFmpeg (LGPL), aangemaakt door scripts/build-ffmpeg-lgpl.sh.
+  - from: build/licenses/ffmpeg
+    to: licenses/ffmpeg
 
   - from: src/modules/huphe-code
     to: modules/huphe-code

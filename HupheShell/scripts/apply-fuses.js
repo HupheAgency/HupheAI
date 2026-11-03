@@ -10,7 +10,7 @@
 const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses')
 const path = require('path')
 
-module.exports = async function afterSign(context) {
+async function flip(context) {
   const { appOutDir, packager } = context
   const appName = packager.appInfo.productFilename
 
@@ -38,3 +38,11 @@ module.exports = async function afterSign(context) {
 
   console.log(`[fuses] Toegepast op ${executablePath}`)
 }
+
+// Ondertekende builds (scripts/dist-mac-signed.sh) zetten de fuses al vóór het ondertekenen (apply-fuses-pack.js):
+// een wijziging ná het ondertekenen maakt de handtekening ongeldig en de notarisatie zou falen.
+module.exports = function afterSign(context) {
+  if (process.env.HUPHE_SIGNED_BUILD) return undefined
+  return flip(context)
+}
+module.exports.flip = flip
