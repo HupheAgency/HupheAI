@@ -40,6 +40,10 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const [ripple, setRipple] = useState(false)
   const [tab, setTab] = useState<'clip' | 'generate' | 'edit' | 'variants'>('clip')
   const [group, setGroup] = useState<string[]>([])
+  const [exportSettings, setExportSettings] = useState<{ quality: 'draft' | 'standard' | 'high'; outputHeight?: number }>(() => {
+    try { return { quality: 'standard', ...JSON.parse(localStorage.getItem('vt-export') ?? '{}') } } catch { return { quality: 'standard' } }
+  })
+  const [exportOpen, setExportOpen] = useState(false)
   const [renaming, setRenaming] = useState<string>()
   const [trackDrag, setTrackDrag] = useState<{ id: string; over?: string }>()
   const clipboard = useRef<TimelineClip[]>([])
@@ -880,7 +884,15 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       <select aria-label="Project openen" value="" disabled={!!generating || !!busy} onFocus={() => api().timeline.list().then((r: any) => { if (r.ok) setProjects(r.projects) })} onChange={e => { const id = e.target.value; void action('Project openen…', async () => { await persist(); const found = projects.find(p => p.id === id); if (found) openProject(found) }) }}><option value="">Project openen…</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
       <button className="vt-icon" aria-label="Nieuw project" title="Nieuw project" disabled={!!generating || !!busy} onClick={() => void action('Nieuw project…', async () => { await persist(); openProject(newTimelineProject()); await persist() })}><Icon name="newFile" /></button>
       <button className="vt-icon" aria-label="Opslaan" title="Opslaan (gebeurt ook automatisch)" onClick={() => void action('Opslaan…', async () => { await persist() })} disabled={!!busy}><Icon name="save" /></button>
-      <button className="vt-primary vt-icon" aria-label="Film exporteren" title={problems.length ? `Export niet mogelijk: ${problems[0]}` : 'Film exporteren'} disabled={!!busy || !!problems.length || !toolsAvailable} onClick={() => void action('Film exporteren…', async () => { setPlaying(false); await persist(); const r = await api().timeline.export(structuredClone(current.current)); if (!r.ok && !r.canceled) throw new Error(r.error); if (r.ok) setMessage(`Film geëxporteerd: ${r.path}`) })}>{busy === 'Film exporteren…' ? '…' : <Icon name="export" />}</button>
+      <span className="vt-export-wrap"><button className={`vt-icon${exportOpen ? ' on' : ''}`} aria-label="Exportinstellingen" aria-expanded={exportOpen} title="Exportinstellingen" onClick={() => setExportOpen(!exportOpen)}><Icon name="sliders" /></button>
+        {exportOpen && <div className="vt-export-menu" role="dialog" aria-label="Exportinstellingen">
+          <label>Kwaliteit<select aria-label="Exportkwaliteit" value={exportSettings.quality} onChange={e => { const next = { ...exportSettings, quality: e.target.value as 'draft' | 'standard' | 'high' }; setExportSettings(next); try { localStorage.setItem('vt-export', JSON.stringify(next)) } catch { /* optional */ } }}>
+            <option value="draft">Concept (klein bestand)</option><option value="standard">Standaard</option><option value="high">Hoog (groot bestand)</option></select></label>
+          <label>Formaat<select aria-label="Exportformaat" value={exportSettings.outputHeight ?? 0} onChange={e => { const next = { ...exportSettings, outputHeight: Number(e.target.value) || undefined }; setExportSettings(next); try { localStorage.setItem('vt-export', JSON.stringify(next)) } catch { /* optional */ } }}>
+            <option value={0}>Projectformaat ({project.width}×{project.height})</option><option value={720}>720p</option><option value={1080}>1080p</option><option value={2160}>4K (2160p)</option></select></label>
+          <p className="vt-help">MP4 · H.264 · AAC · {project.fps} fps. Een groter formaat dan het project rekent op, het wordt niet scherper.</p>
+        </div>}</span>
+      <button className="vt-primary vt-icon" aria-label="Film exporteren" title={problems.length ? `Export niet mogelijk: ${problems[0]}` : 'Film exporteren'} disabled={!!busy || !!problems.length || !toolsAvailable} onClick={() => void action('Film exporteren…', async () => { setPlaying(false); await persist(); const r = await api().timeline.export(structuredClone(current.current), exportSettings); if (!r.ok && !r.canceled) throw new Error(r.error); if (r.ok) setMessage(`Film geëxporteerd: ${r.path}`) })}>{busy === 'Film exporteren…' ? '…' : <Icon name="export" />}</button>
     </header>
     {(message || busy || !toolsAvailable) && <div className="vt-message" role="status">{busy || message || 'FFmpeg en FFprobe zijn nodig voor import en export. Installeer de lokale videotools.'}<button aria-label="Melding sluiten" onClick={() => setMessage('')}><Icon name="close" size={12} /></button></div>}
     {unknownJobs.length > 0 && <div className="vt-message vt-warning">Een eerdere generatie heeft een onbekende uitkomst. Bekijk de bestaande opdracht in Atelier/provider vóór een nieuwe aanvraag. Je montage en invoer zijn bewaard.</div>}

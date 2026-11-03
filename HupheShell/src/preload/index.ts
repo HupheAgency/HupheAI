@@ -88,7 +88,7 @@ contextBridge.exposeInMainWorld('api', {
     prepareReferences: (payload: unknown) => ipcRenderer.invoke('timeline:prepare-references', payload),
     extractAudio: (payload: unknown) => ipcRenderer.invoke('timeline:extract-audio', payload),
     captureTransition: (payload: unknown) => ipcRenderer.invoke('timeline:capture-transition', payload),
-    export: (project: unknown) => ipcRenderer.invoke('timeline:export', project),
+    export: (project: unknown, settings?: unknown) => ipcRenderer.invoke('timeline:export', project, settings),
     tools: () => ipcRenderer.invoke('timeline:tools'),
   },
   platform: process.platform,

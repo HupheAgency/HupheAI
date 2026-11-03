@@ -81,3 +81,4 @@
 .vt-block{overflow:hidden}.vt-wave,.vt-fade{position:absolute;top:0;height:100%;pointer-events:none}.vt-wave{left:0;width:100%}.vt-wave path{stroke:#9bd4a8;stroke-width:1;vector-effect:non-scaling-stroke;opacity:.75}
 .vt-fade.in,.vt-fade.cross{left:0}.vt-fade.out{right:0}.vt-fade path{fill:#00000066}.vt-fade.cross path{fill:none;stroke:#ffffffb0;stroke-width:1;vector-effect:non-scaling-stroke}.vt-fade.cross{background:#ffffff1a}
 .vt-block>b,.vt-block>span{position:relative;z-index:1}.vt-speed{position:absolute;right:6px;top:3px;z-index:1;font:600 10px/1 -apple-system,sans-serif;font-style:normal;padding:2px 4px;border-radius:4px;background:#000a;color:#ffd978}
+.vt-export-wrap{position:relative;display:inline-flex}.vt-export-menu{position:absolute;right:0;top:36px;z-index:50;width:260px;display:grid;gap:8px;padding:12px;border-radius:9px;background:#161a20;border:1px solid #2f3541;box-shadow:0 10px 30px rgba(0,0,0,.5)}

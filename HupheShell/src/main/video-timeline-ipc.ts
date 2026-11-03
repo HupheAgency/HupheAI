@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import { findTimelineTools, timelineExtensions } from './lib/video-timeline-media'
 import { extractTimelineAudio, importTimelineSources, listTimelineProjects, parseTimelineProject, saveTimelineProject, timelineImportSchema, timelineProjectDirectory, validateOwnedAssets } from './lib/video-timeline-storage'
-import { renderTimelineProject } from './lib/video-timeline-export'
+import { parseTimelineExportOptions, renderTimelineProject } from './lib/video-timeline-export'
 import { prepareTimelineReferences } from './lib/video-timeline-references'
 import { captureTimelineTransition } from './lib/video-timeline-transition'
 
@@ -60,7 +60,7 @@ export function registerVideoTimelineIPC(): void {
     try { return { ok: true, ...await captureTimelineTransition(rootDirectory(), input) } }
     catch (error) { return { ok: false, assets: [], error: message(error) } }
   })
-  ipcMain.handle('timeline:export', async (_event, input: unknown) => {
+  ipcMain.handle('timeline:export', async (_event, input: unknown, settings?: unknown) => {
     try {
       const snapshot = parseTimelineProject(input)
       await validateOwnedAssets(rootDirectory(), snapshot)
@@ -70,7 +70,7 @@ export function registerVideoTimelineIPC(): void {
       const safeName = snapshot.name.replace(/[^\p{L}\p{N} _-]/gu, '').trim().slice(0, 100) || 'film'
       const selection = await dialog.showSaveDialog({ title: 'Film exporteren', defaultPath: join(exports, `${safeName}.mp4`), filters: [{ name: 'MP4-video', extensions: ['mp4'] }] })
       if (selection.canceled || !selection.filePath) return { ok: false, canceled: true }
-      return { ok: true, ...await renderTimelineProject(snapshot, { root: rootDirectory(), outputPath: selection.filePath }) }
+      return { ok: true, ...await renderTimelineProject(snapshot, { root: rootDirectory(), outputPath: selection.filePath, ...parseTimelineExportOptions(settings) }) }
     } catch (error) { return { ok: false, error: message(error) } }
   })
 }

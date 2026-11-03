@@ -17,7 +17,7 @@ const ff = (...args) => run(tools.ffmpeg, ['-hide_banner', '-loglevel', 'error',
 try {
   const bundle = join(root, 'export-helper.cjs')
   await build({ entryPoints: [join(appRoot, 'src/main/lib/video-timeline-export.ts')], outfile: bundle, bundle: true, platform: 'node', format: 'cjs', logLevel: 'warning' })
-  const { renderTimelineProject } = await import(pathToFileURL(bundle).href)
+  const { renderTimelineProject, parseTimelineExportOptions } = await import(pathToFileURL(bundle).href)
   const media = {
     red: ['color=c=red:s=320x180:r=25', 'sine=frequency=440:sample_rate=48000'],
     blue: ['color=c=blue:s=320x180:r=25', 'sine=frequency=440:sample_rate=48000'],
@@ -91,4 +91,13 @@ try {
   assert.ok(Math.abs(crossings / 2 - 440) < 25, `audio keeps its pitch while playing 2× (${crossings / 2} Hz)`)
   assert.ok(rms(doubled, 1.8, 1.99) > 0.03, 'sped-up audio fills the clip')
   console.log('PASS speed (video + audio)')
+
+  // Export settings: output size follows the aspect ratio, quality changes the file size
+  const sized = join(root, 'sized.mp4')
+  await renderTimelineProject(project([clip('a', 'ramp', 0, 50)]), { root, outputPath: sized, tools, encoder: 'libx264', outputHeight: 90, quality: 'draft' })
+  const info = (await probe(sized, tools.ffprobe)).streams.find(x => x.codec_type === 'video')
+  assert.deepEqual([info.width, info.height], [160, 90], 'output is scaled to the requested height')
+  assert.deepEqual(parseTimelineExportOptions({ quality: 'bogus', outputHeight: 'x' }), { quality: 'standard', outputHeight: undefined })
+  assert.deepEqual(parseTimelineExportOptions({ quality: 'high', outputHeight: 1080 }), { quality: 'high', outputHeight: 1080 })
+  console.log('PASS export settings')
 } finally { await rm(root, { recursive: true, force: true }) }

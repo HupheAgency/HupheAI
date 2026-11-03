@@ -12,6 +12,24 @@ export interface TimelineRenderOptions {
   tools?: TimelineTools
   /** Explicit override for local test fixtures; the macOS app uses VideoToolbox. */
   encoder?: 'h264_videotoolbox' | 'libx264' | 'mpeg4'
+  quality?: TimelineExportQuality
+  /** Output height in pixels; the width follows the project's aspect ratio. Omitted = project size. */
+  outputHeight?: number
+}
+
+export type TimelineExportQuality = 'draft' | 'standard' | 'high'
+const QUALITY = {
+  draft: { bitrate: '4M', crf: '26', audio: '128k' },
+  standard: { bitrate: '12M', crf: '18', audio: '192k' },
+  high: { bitrate: '24M', crf: '14', audio: '256k' },
+} as const
+
+/** Settings arrive from the renderer, so unknown values fall back to the defaults instead of reaching FFmpeg. */
+export function parseTimelineExportOptions(input: unknown): Pick<TimelineRenderOptions, 'quality' | 'outputHeight'> {
+  const raw = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  const quality = raw.quality === 'draft' || raw.quality === 'high' ? raw.quality : 'standard'
+  const height = Number(raw.outputHeight)
+  return { quality, outputHeight: Number.isInteger(height) && height >= 144 && height <= 4320 ? height : undefined }
 }
 
 const seconds = (frames: number, fps: number) => (frames / fps).toFixed(9)
@@ -128,16 +146,20 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
     filters.push(`${composite}${layer}overlay=shortest=1:format=auto[${output}]`)
     composite = `[${output}]`
   })
-  filters.push(`${composite}format=yuv420p[vout]`)
+  // Even dimensions only: yuv420p cannot hold odd sizes.
+  const outputHeight = options.outputHeight ? Math.max(2, Math.round(options.outputHeight / 2) * 2) : undefined
+  const outputWidth = outputHeight ? Math.max(2, Math.round(project.width * outputHeight / project.height / 2) * 2) : undefined
+  filters.push(`${composite}${outputHeight && outputHeight !== project.height ? `scale=${outputWidth}:${outputHeight}:flags=lanczos,` : ''}format=yuv420p[vout]`)
   if (!audioLayers.length) filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${seconds(frames, project.fps)}[aout]`)
   else if (audioLayers.length === 1) filters.push(`${audioLayers[0]}anull[aout]`)
   // Do not automatically attenuate one track when another track is added.
   else filters.push(`${audioLayers.join('')}amix=inputs=${audioLayers.length}:duration=longest:normalize=0[aout]`)
+  const quality = QUALITY[options.quality ?? 'standard']
   const encoder = options.encoder || (process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264')
   args.push('-filter_complex_threads', '1', '-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]',
     '-frames:v', String(frames), '-t', seconds(frames, project.fps), '-r', String(project.fps), '-fps_mode', 'cfr', '-c:v', encoder,
-    ...(encoder === 'h264_videotoolbox' ? ['-b:v', '12M'] : encoder === 'libx264' ? ['-preset', 'veryfast', '-crf', '18'] : ['-q:v', '2']),
-    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', temporary)
+    ...(encoder === 'h264_videotoolbox' ? ['-b:v', quality.bitrate] : encoder === 'libx264' ? ['-preset', 'veryfast', '-crf', quality.crf] : ['-q:v', '2']),
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', quality.audio, '-ar', '48000', '-ac', '2', '-movflags', '+faststart', temporary)
   try {
     await runTimelineTool(tools.ffmpeg, args, 30 * 60_000)
     if ((await stat(temporary)).size === 0) throw new Error('De export heeft geen bestand opgeleverd.')

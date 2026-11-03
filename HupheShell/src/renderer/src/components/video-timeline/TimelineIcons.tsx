@@ -33,6 +33,7 @@ const PATHS = {
   wand: 'M5 19 16 8M14 6l4 4M17 3v3M16.5 4.5h3M6 5v2M5 6h2M20 14v2M19 15h2',
   layers: 'M12 3 3 8l9 5 9-5zM3 13l9 5 9-5M3 17.5 12 22l9-4.5',
   close: 'M6 6l12 12M18 6 6 18',
+  sliders: 'M4 7h9M17 7h3M4 17h3M11 17h9M15 4v6M9 14v6',
   grip: 'M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01',
 } as const
 
