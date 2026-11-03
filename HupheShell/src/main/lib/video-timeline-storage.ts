@@ -41,6 +41,8 @@ export const timelineProjectSchema = z.object({
   clips: z.array(z.object({ id: timelineIdSchema, track: z.enum(['video', 'audio']), label: z.string().max(300),
     trackId: timelineIdSchema.optional(), transform: z.object({ scale: finite.min(0.05).max(2), x: finite.min(0).max(1), y: finite.min(0).max(1) }).optional(),
     opacity: finite.min(0).max(1).optional(), gain: finite.min(0).max(2).optional(),
+    fadeIn: finite.int().min(0).max(90_000).optional(), fadeOut: finite.int().min(0).max(90_000).optional(),
+    crossfade: finite.int().min(0).max(90_000).optional(), speed: finite.min(0.25).max(4).optional(),
     start: finite.int().min(0).max(90_000), duration: finite.int().positive().max(90_000), activeVariantId: timelineIdSchema.optional(),
     variants: z.array(variant).max(200), generation: generation.optional(), transition: transition.optional() })).max(500),
   jobs: z.array(z.object({ id: timelineIdSchema, clipId: timelineIdSchema, createdAt: date, generation,

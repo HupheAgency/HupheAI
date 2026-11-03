@@ -1,4 +1,4 @@
-import { clipTrackId, timelineTracks, type TimelineAsset, type TimelineClip, type TimelineProject, type TimelineTrack } from '../../../../shared/video-timeline'
+import { clipTrackId, sourceSeconds, timelineTracks, type TimelineAsset, type TimelineClip, type TimelineProject, type TimelineTrack } from '../../../../shared/video-timeline'
 
 export const TIMELINE_ASSET_MIME = 'application/x-huphe-timeline-asset'
 export type TimelineEdit = Pick<TimelineProject, 'clips' | 'tracks'>
@@ -73,14 +73,14 @@ export function splitClip(project: TimelineProject, clipId: string, frame: numbe
   const ids = new Map<string, string>()
   const variants = clip.variants.flatMap(v => {
     const asset = project.assets.find(a => a.id === v.assetId)
-    const inPoint = asset?.kind === 'image' ? v.inPoint : round9(v.inPoint + offset / project.fps)
-    if (v.id !== clip.activeVariantId && asset && asset.kind !== 'image' && inPoint + rightDuration / project.fps > asset.duration + 0.00001) return []
+    const inPoint = asset?.kind === 'image' ? v.inPoint : round9(v.inPoint + sourceSeconds(clip, offset, project.fps))
+    if (v.id !== clip.activeVariantId && asset && asset.kind !== 'image' && inPoint + sourceSeconds(clip, rightDuration, project.fps) > asset.duration + 0.00001) return []
     ids.set(v.id, newId())
     return [{ ...structuredClone(v), id: ids.get(v.id)!, inPoint }]
   })
-  const right: TimelineClip = { ...structuredClone(clip), id: newId(), start: frame, duration: rightDuration,
+  const right: TimelineClip = { ...structuredClone(clip), id: newId(), start: frame, duration: rightDuration, fadeIn: undefined, crossfade: undefined,
     variants, activeVariantId: clip.activeVariantId ? ids.get(clip.activeVariantId) : undefined }
-  return { right, project: { ...project, clips: [...project.clips.map(c => c.id === clip.id ? { ...c, duration: offset } : c), right] } }
+  return { right, project: { ...project, clips: [...project.clips.map(c => c.id === clip.id ? { ...c, duration: offset, fadeOut: undefined } : c), right] } }
 }
 
 /** Frames other clips (and the playhead) offer as snap points. */

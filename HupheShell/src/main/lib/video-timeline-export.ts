@@ -1,7 +1,7 @@
 import { mkdir, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { activeMedia, clipTrackId, renderableProject, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
+import { activeMedia, clipFades, clipSpeed, clipTrackId, renderableProject, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
 import { transitionPlaybackProblems } from '../../shared/video-timeline-transition'
 import { probeTimelineMedia, requireTimelineTools, runTimelineTool, type TimelineTools } from './video-timeline-media'
 import { isWithinTimelineDirectory, parseTimelineProject, validateOwnedAssets } from './video-timeline-storage'
@@ -52,6 +52,7 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
     const segments: string[] = []
     const video = track.kind === 'video'
     let cursor = 0
+    let previous: (typeof clips)[number] | undefined
     const addGap = (length: number) => {
       if (length <= 0) return
       const label = `segment${segmentId++}`
@@ -60,20 +61,27 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
       segments.push(`[${label}]`)
     }
     for (const clip of clips) {
+      if (clip.start > cursor) previous = undefined
       addGap(clip.start - cursor)
       const { asset, variant } = activeMedia(project, clip)
       if (!asset || !variant) throw new Error('Een fragment mist zijn bronbestand.')
       if (asset.kind === 'image') args.push('-loop', '1', '-framerate', String(project.fps))
       args.push('-protocol_whitelist', 'file,pipe', '-i', asset.path)
       const label = `segment${segmentId++}`
+      const speed = asset.kind === 'image' ? 1 : clipSpeed(clip)
+      const fades = clipFades(project, clip)
       if (video) {
         const rect = visualClipRect(project, clip, asset)
         const source = asset.kind === 'image'
           ? `[${inputIndex}:v:0]trim=end_frame=${clip.duration},setpts=PTS-STARTPTS`
           // Keep the frame immediately before a fractional in-point. Rounding
           // source timestamps up implements preceding-frame sampling, also for VFR.
-          : `[${inputIndex}:v:0]setpts=PTS-STARTPTS-${variant.inPoint.toFixed(9)}/TB,fps=fps=${project.fps}:start_time=0:round=up,tpad=stop_mode=clone:stop_duration=1,trim=end_frame=${clip.duration},setpts=PTS-STARTPTS`
-        filters.push(`${source},scale=${rect.width}:${rect.height},setsar=1,format=rgba,colorchannelmixer=aa=${clip.opacity ?? 1}[${label}source]`)
+          // Speed divides the timestamps after the in-point shift, so frames are picked from the faster or slower source.
+          : `[${inputIndex}:v:0]setpts=(PTS-STARTPTS-${variant.inPoint.toFixed(9)}/TB)/${speed},fps=fps=${project.fps}:start_time=0:round=up,tpad=stop_mode=clone:stop_duration=1,trim=end_frame=${clip.duration},setpts=PTS-STARTPTS`
+        const fadeInFrames = Math.max(fades.fadeIn, fades.crossfade)
+        const fadeFilters = [fadeInFrames ? `fade=t=in:s=0:n=${fadeInFrames}:alpha=1` : '',
+          fades.fadeOut ? `fade=t=out:s=${clip.duration - fades.fadeOut}:n=${fades.fadeOut}:alpha=1` : ''].filter(Boolean)
+        filters.push(`${[source, `scale=${rect.width}:${rect.height}`, 'setsar=1', 'format=rgba', `colorchannelmixer=aa=${clip.opacity ?? 1}`, ...fadeFilters].join(',')}[${label}source]`)
         if (rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= project.width && rect.y + rect.height <= project.height) {
           filters.push(`[${label}source]pad=${project.width}:${project.height}:${rect.x}:${rect.y}:color=black@0[${label}]`)
         } else {
@@ -83,10 +91,28 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
           filters.push(`[${label}canvas][${label}source]overlay=x=${rect.x}:y=${rect.y}:shortest=1:format=auto[${label}]`)
         }
       } else {
-        filters.push(`[${inputIndex}:a:0]atrim=start=${variant.inPoint.toFixed(9)}:duration=${seconds(clip.duration, project.fps)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=${clip.gain ?? 1},apad,atrim=duration=${seconds(clip.duration, project.fps)}[${label}]`)
+        const sourceLength = (clip.duration / project.fps * speed).toFixed(9)
+        // atempo is only guaranteed between 0.5 and 2 per stage, so larger changes chain two stages.
+        const tempo = speed === 1 ? '' : speed < 0.5 ? `,atempo=0.5,atempo=${(speed / 0.5).toFixed(9)}` : speed > 2 ? `,atempo=2,atempo=${(speed / 2).toFixed(9)}` : `,atempo=${speed}`
+        const fadeSeconds = (frames: number) => seconds(frames, project.fps)
+        const audioFades = `${fades.fadeIn ? `,afade=t=in:st=0:d=${fadeSeconds(fades.fadeIn)}` : ''}${fades.fadeOut ? `,afade=t=out:st=${fadeSeconds(clip.duration - fades.fadeOut)}:d=${fadeSeconds(fades.fadeOut)}` : ''}`
+        filters.push(`[${inputIndex}:a:0]atrim=start=${variant.inPoint.toFixed(9)}:duration=${sourceLength},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo${tempo},volume=${clip.gain ?? 1},apad,atrim=duration=${seconds(clip.duration, project.fps)}${audioFades}[${label}]`)
       }
       inputIndex++
-      segments.push(`[${label}]`)
+      let outLabel = label
+      if (video && fades.crossfade && previous && cursor === clip.start && segments.length) {
+        // Dissolve in over the frozen last frame of the preceding clip; no extra source material is needed.
+        const tail = segments.pop()!
+        const name = `${label}x`
+        const n = fades.crossfade, last = previous.duration
+        filters.push(`${tail}split[${name}keep][${name}tail]`)
+        filters.push(`[${name}tail]trim=start_frame=${last - 1}:end_frame=${last},setpts=PTS-STARTPTS,loop=loop=${n - 1}:size=1:start=0,trim=end_frame=${n},setpts=PTS-STARTPTS${clip.duration > n ? `,tpad=stop_mode=add:stop_duration=${clip.duration - n}:color=black@0` : ''}[${name}under]`)
+        filters.push(`[${name}under][${label}]overlay=shortest=1:format=auto[${name}]`)
+        segments.push(`[${name}keep]`)
+        outLabel = name
+      }
+      segments.push(`[${outLabel}]`)
+      previous = clip
       cursor = clip.start + clip.duration
     }
     addGap(frames - cursor)

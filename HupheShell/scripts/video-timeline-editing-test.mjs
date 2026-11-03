@@ -13,7 +13,7 @@ try {
   const bundle = join(temporary, 'editing.mjs')
   await build({ stdin: { contents: `export * from './src/renderer/src/components/video-timeline/timeline-editing'; export * from './src/shared/video-timeline'`, resolveDir: appRoot },
     bundle: true, platform: 'node', format: 'esm', outfile: bundle, logLevel: 'silent' })
-  const { splitClip, snapSpan, nearestSnap, snapTargets, pasteClips, moveTrack, reorderTrack, trackIsLocked, renderableProject, planAssetDrop, placeAsset, assetClip, assetTrackKind, editSnapshot, mergeGesture, newTrack, timelineTracks, clipTrackId } = await import(pathToFileURL(bundle).href)
+  const { splitClip, snapSpan, nearestSnap, snapTargets, pasteClips, moveTrack, reorderTrack, clipFades, sourceSeconds, trackIsLocked, renderableProject, planAssetDrop, placeAsset, assetClip, assetTrackKind, editSnapshot, mergeGesture, newTrack, timelineTracks, clipTrackId } = await import(pathToFileURL(bundle).href)
   const now = '2026-11-02T12:00:00.000Z'
   const video = { id: 'video-source', kind: 'video', name: 'Film.mp4', path: '/test/film.mp4', src: 'huphe://file/test', duration: 2.4, width: 1920, height: 1080 }
   const image = { id: 'logo-source', kind: 'image', name: 'Logo.png', path: '/test/logo.png', src: 'huphe://file/logo', duration: 0, width: 400, height: 200 }
@@ -197,6 +197,10 @@ try {
     assert.deepEqual(reorderTrack(long, 'video-1', 'video-2').map(t => t.id).filter(id => id.startsWith('video')), ['video-2', 'video-1'])
     assert.equal(reorderTrack(long, 'video-1', 'audio-1'), undefined, 'video and audio tracks never mix')
     assert.equal(reorderTrack(long, 'audio-1', 'video-2'), undefined)
+    const fx = { ...long, clips: [{ id: 'p', track: 'video', trackId: 'video-1', label: 'p', start: 0, duration: 50, variants: [] }, { id: 'q', track: 'video', trackId: 'video-1', label: 'q', start: 50, duration: 30, variants: [], crossfade: 99, fadeIn: 10, fadeOut: 99 }, { id: 'r', track: 'video', trackId: 'video-1', label: 'r', start: 90, duration: 10, variants: [], crossfade: 5, speed: 2 }] }
+    assert.deepEqual(clipFades(fx, fx.clips[1]), { fadeIn: 10, fadeOut: 20, crossfade: 30 }, 'fades are clamped to the clip, crossfade to the clip before it')
+    assert.equal(clipFades(fx, fx.clips[2]).crossfade, 0, 'no crossfade without a directly preceding clip')
+    assert.equal(sourceSeconds(fx.clips[2], 25, 25), 2, 'speed multiplies the source consumed')
     checks++
     const mixed = { ...long, tracks: long.tracks.map(t => t.id === 'video-2' ? { ...t, hidden: true } : t.id === 'audio-1' ? { ...t, muted: true } : t) }
     assert.deepEqual(renderableProject(mixed).clips.map(c => c.id).sort(), ['first', 'second'])

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from 'react'
-import { activeMedia, clipTrackId, renderableProject, newTimelineProject, timelineTracks, timelineEnd, timelineProblems, type TimelineAsset, type TimelineClip, type TimelineGeneration, type TimelineProject, type TimelineVariant, type TimelineTrack } from '../../../shared/video-timeline'
+import { activeMedia, clipTrackId, renderableProject, sourceSeconds, newTimelineProject, timelineTracks, timelineEnd, timelineProblems, type TimelineAsset, type TimelineClip, type TimelineGeneration, type TimelineProject, type TimelineVariant, type TimelineTrack } from '../../../shared/video-timeline'
 import { assetClip, assetTrackKind, editSnapshot, mergeGesture, moveTrack, reorderTrack, newTrack, nearestSnap, pasteClips, placeAsset, planAssetDrop, snapSpan, snapTargets, splitClip, trackIsLocked, TIMELINE_ASSET_MIME, type TimelineDrop, type TimelineEdit } from '../components/video-timeline/timeline-editing'
 import { TimelineGenerationControls, type TimelineReferenceTarget } from '../components/video-timeline/TimelineGenerationControls'
 import { generationDurations, timelineGenerationCredits, timelineGenerationState, timelineFinalizeCredits } from '../components/video-timeline/timeline-generation'
@@ -7,6 +7,8 @@ import { TimelinePreview } from '../components/video-timeline/TimelinePreview'
 import { TimelineScrubber } from '../components/video-timeline/TimelineScrubber'
 import { TimelineLane, type TimelineDrawRange } from '../components/video-timeline/TimelineLane'
 import { TimelineEditControls, TIMELINE_EDIT_TOOLS, type TimelineEditState } from '../components/video-timeline/TimelineEditControls'
+import { TimelineBlockDecor } from '../components/video-timeline/TimelineBlockDecor'
+import { TimelineEffectsControls } from '../components/video-timeline/TimelineEffectsControls'
 import { Icon } from '../components/video-timeline/TimelineIcons'
 import { TimelineTooltip } from '../components/video-timeline/TimelineTooltip'
 import { TimelineRifeControls } from '../components/video-timeline/TimelineRifeControls'
@@ -210,7 +212,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     const delta = frame - clip.start
     const adjust = !clip.transition && media?.asset && media.asset.kind !== 'image' && !media.variant?.transition
     patchClip({ start: frame, duration: clip.duration - delta,
-      variants: adjust ? clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: Number((v.inPoint + delta / project.fps).toFixed(9)) } : v) : clip.variants })
+      variants: adjust ? clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: Number((v.inPoint + sourceSeconds(clip, delta, project.fps)).toFixed(9)) } : v) : clip.variants, fadeIn: undefined, crossfade: undefined })
   }
 
   function copySelected(): boolean {
@@ -568,7 +570,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     const asset = project.assets.find(a => a.id === variant.assetId)!
     const outputProblem = variant.transition ? transitionOutputProblem(project, clip, variant) : undefined
     if (outputProblem) { setMessage(outputProblem); return }
-    if (asset.kind !== 'image' && variant.inPoint + clip.duration / project.fps > asset.duration + 0.00001) {
+    if (asset.kind !== 'image' && variant.inPoint + sourceSeconds(clip, clip.duration, project.fps) > asset.duration + 0.00001) {
       setMessage(`Deze variant heeft ${seconds(asset.duration - variant.inPoint)} s beschikbaar. Maak het blok eerst korter.`); return
     }
     patchClip({ activeVariantId: id }); setMessage(''); setPosition(clip.start / project.fps)
@@ -628,7 +630,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       const snappedStart = threshold ? nearestSnap(d.targets, d.clip.start + delta, threshold) : undefined
       const wanted = snappedStart === undefined ? delta : snappedStart - d.clip.start
       const bounded = Math.min(d.clip.duration - 1, Math.max(-d.clip.start, variant ? -Math.floor(variant.inPoint * fps) : -d.clip.start, wanted))
-      patch = { start: d.clip.start + bounded, duration: d.clip.duration - bounded, variants: d.clip.variants.map(v => v.id === variant?.id ? { ...v, inPoint: Math.max(0, v.inPoint + bounded / fps) } : v) }
+      patch = { start: d.clip.start + bounded, duration: d.clip.duration - bounded, variants: d.clip.variants.map(v => v.id === variant?.id ? { ...v, inPoint: Math.max(0, v.inPoint + sourceSeconds(d.clip, bounded, fps)) } : v), ...(bounded > 0 ? { fadeIn: undefined, crossfade: undefined } : {}) }
     }
     apply(mergeGesture(current.current, changedClip(d.project, d.clip.id, patch)), false)
     if (patch.start !== undefined) setPosition(patch.start / fps)
@@ -856,7 +858,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       const asset: TimelineAsset = result.asset
       const base = { ...current.current, assets: [...current.current.assets, asset] }
       apply(base, false)
-      if (variant.inPoint + target.duration / project.fps > asset.duration + 0.00001) throw new Error('Het geluid is korter dan het blok. Pas eerst de uitsnede aan; de audio staat in Projectmedia.')
+      if (variant.inPoint + sourceSeconds(target, target.duration, project.fps) > asset.duration + 0.00001) throw new Error('Het geluid is korter dan het blok. Pas eerst de uitsnede aan; de audio staat in Projectmedia.')
       const existing = timelineTracks(base).filter(t => t.kind === 'audio').find(t => !base.clips.some(c => clipTrackId(c) === t.id && c.start < target.start + target.duration && c.start + c.duration > target.start))
       if (!existing && timelineTracks(base).length >= 32) throw new Error('Het project heeft al 32 sporen. Maak ruimte op een audiospoor; het geluid staat in Projectmedia.')
       const track = existing ?? newTrack(base, 'audio')
@@ -901,6 +903,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
         {!clip ? <div className="vt-inspector-body"><h2>Jouw film begint hier</h2><p>Selecteer een fragment of maak een leeg blok voor een nieuwe scène.</p><button className="vt-primary" onClick={() => addEmpty()}>＋ Leeg videoblok</button><label>Richtduur (seconden)<input type="number" min="1" max="3600" value={project.targetDuration} onChange={e => apply({ ...project, targetDuration: Math.max(1, Math.min(3600, Number(e.target.value))) }, false)} /></label><label>Filmformaat<select value={`${project.width}x${project.height}`} onChange={e => { const [width, height] = e.target.value.split('x').map(Number); apply({ ...project, width, height }, false) }}><option value="1920x1080">Liggend · 1920 × 1080</option><option value="1080x1920">Staand · 1080 × 1920</option><option value="1080x1080">Vierkant · 1080 × 1080</option></select></label><p className="vt-help">De richtduur groeit mee met je montage. Video’s worden passend in beeld gezet; eventuele lege randen blijven zichtbaar.</p></div> : <div className="vt-inspector-body">
           {tab === 'clip' && <><h2>{clip.track === 'audio' ? 'Audiofragment' : 'Videofragment'}</h2><label>Naam<input value={clip.label} onChange={e => patchClip({ label: e.target.value })} /></label><div className="vt-field-row"><label>Start op tijdlijn (s)<input aria-label="Start fragment" type="number" min="0" step={1 / project.fps} value={seconds(clip.start / project.fps)} onChange={e => patchClip({ start: Math.max(0, Math.round(Number(e.target.value) * project.fps)) })} /></label><label>Lengte op tijdlijn (s)<input aria-label="Lengte fragment" type="number" min={1 / project.fps} step={1 / project.fps} value={seconds(clip.duration / project.fps)} onChange={e => patchClip({ duration: Math.max(1, Math.round(Number(e.target.value) * project.fps)) })} /></label></div>
           {!clip.transition && !media?.variant?.transition && media?.asset && media.asset.kind !== 'image' && <><label>Begin in bron (s)<input aria-label="Begin in bron" type="number" min="0" step={0.01} value={seconds(media.variant!.inPoint)} onChange={e => patchClip({ variants: clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: Math.max(0, Number(e.target.value)) } : v) })} /></label><p className="vt-help">Volledige bron: {seconds(media.asset.duration)} s. Alles buiten de uitsnede blijft bewaard.</p><button onClick={() => patchClip({ duration: Math.max(1, Math.floor(media.asset!.duration * project.fps)), variants: clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: 0 } : v) })}>Volledige bron gebruiken</button></>}
+          {!media?.variant?.transition && <TimelineEffectsControls project={project} clip={clip} asset={media?.asset} inPoint={media?.variant?.inPoint ?? 0} disabled={!!busy || generating === clip.id} onChange={patchClip} />}
           <label>Spoor<select aria-label="Spoor fragment" value={clipTrackId(clip)} onChange={e => moveToTrack(e.target.value)}>{visibleTracks.filter(t => t.kind === clip.track).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
           {!clip.transition && !media?.variant?.transition && clip.track === 'video' && media?.asset && <div className="vt-layer-controls"><h3>Beeld op de film</h3>
             <p className="vt-help">Een hoger videospoor ligt bovenop de sporen eronder. Gebruik een PNG met transparantie voor een vrijstaand logo.</p>
@@ -986,7 +989,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
           <TimelineLane track={track.kind} trackId={track.id} clips={project.clips} fps={project.fps} zoom={zoom} disabled={!active || !!busy}
             onDrawStart={() => { setPlaying(false); setSelectedTrack(track.id); root.current?.focus({ preventScroll: true }) }} onCreate={range => addEmpty(range, track.id)} onDeselect={() => { setSelected(undefined); setSelectedTrack(track.id) }}
             onDragOver={e => assetDrop(e, track)} onDragLeave={leaveAssetDrop} onDrop={e => assetDrop(e, track, true)}>
-            {project.clips.filter(c => clipTrackId(c) === track.id).map(c => { const a = activeMedia(project, c); return <div role="button" tabIndex={0} aria-label={`${c.label}, ${seconds(c.duration / project.fps)} seconden`} data-clip-id={c.id} data-transition-kind={c.transition?.kind} key={c.id} className={`vt-block ${c.transition ? 'vt-rife-block' : ''} ${selectedIds.includes(c.id) ? 'selected' : ''} ${trackIsLocked(project, c) ? 'locked' : ''} ${!a.asset ? 'empty' : ''}`} style={{ left: c.start / project.fps * zoom, width: Math.max(6, c.duration / project.fps * zoom) }} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter') { setPlaying(false); setSelected(c.id); setSelectedTrack(track.id); setPosition(c.start / project.fps) } }} onPointerDown={e => pointerDown(e, c, 'move')}><div className="vt-handle left" aria-label="Begin trimmen" onPointerDown={e => pointerDown(e, c, 'left')} /><b>{generating === c.id ? '◌ ' : ''}{c.label}</b><span>{seconds(c.duration / project.fps)} s{c.variants.length > 1 ? ` · ${c.variants.length} varianten` : ''}</span><div className="vt-handle right" aria-label="Einde trimmen" onPointerDown={e => pointerDown(e, c, 'right')} /></div> })}
+            {project.clips.filter(c => clipTrackId(c) === track.id).map(c => { const a = activeMedia(project, c); return <div role="button" tabIndex={0} aria-label={`${c.label}, ${seconds(c.duration / project.fps)} seconden`} data-clip-id={c.id} data-transition-kind={c.transition?.kind} key={c.id} className={`vt-block ${c.transition ? 'vt-rife-block' : ''} ${selectedIds.includes(c.id) ? 'selected' : ''} ${trackIsLocked(project, c) ? 'locked' : ''} ${!a.asset ? 'empty' : ''}`} style={{ left: c.start / project.fps * zoom, width: Math.max(6, c.duration / project.fps * zoom) }} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter') { setPlaying(false); setSelected(c.id); setSelectedTrack(track.id); setPosition(c.start / project.fps) } }} onPointerDown={e => pointerDown(e, c, 'move')}><TimelineBlockDecor project={project} clip={c} asset={a.asset} inPoint={a.variant?.inPoint ?? 0} width={c.duration / project.fps * zoom} /><div className="vt-handle left" aria-label="Begin trimmen" onPointerDown={e => pointerDown(e, c, 'left')} /><b>{generating === c.id ? '◌ ' : ''}{c.label}</b><span>{seconds(c.duration / project.fps)} s{c.variants.length > 1 ? ` · ${c.variants.length} varianten` : ''}</span><div className="vt-handle right" aria-label="Einde trimmen" onPointerDown={e => pointerDown(e, c, 'right')} /></div> })}
             {dropPreview?.trackId === track.id && <div className={`vt-drop-preview ${dropPreview.valid ? '' : 'invalid'}`} style={{ left: dropPreview.start / project.fps * zoom, width: Math.max(6, dropPreview.duration / project.fps * zoom) }}><b>{!dropPreview.valid ? 'Geen vrije ruimte' : dropPreview.insert ? 'Invoegen · volgende schuiven mee' : 'Hier plaatsen'}</b><span>{seconds(dropPreview.start / project.fps)} s · {seconds(dropPreview.duration / project.fps)} s</span></div>}
           </TimelineLane>
         </div>)}

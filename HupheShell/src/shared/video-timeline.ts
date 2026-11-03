@@ -74,6 +74,13 @@ export interface TimelineClip {
   transform?: { scale: number; x: number; y: number }
   opacity?: number
   gain?: number
+  /** Fade from/to transparent (video) or silence (audio), in project frames. */
+  fadeIn?: number
+  fadeOut?: number
+  /** Video: dissolve in from the frozen last frame of the directly preceding clip, in project frames. */
+  crossfade?: number
+  /** Playback speed, 1 = normal. The clip keeps its timeline length and consumes duration * speed of source. */
+  speed?: number
 }
 
 export interface TimelineTrack {
@@ -123,6 +130,20 @@ export function activeMedia(project: TimelineProject, clip: TimelineClip) {
   const variant = clip.variants.find(v => v.id === clip.activeVariantId)
   const asset = project.assets.find(a => a.id === variant?.assetId)
   return { variant, asset }
+}
+
+export const clipSpeed = (clip: TimelineClip) => clip.speed && clip.speed > 0 ? clip.speed : 1
+
+/** Seconds of source material a number of timeline frames consume. */
+export const sourceSeconds = (clip: TimelineClip, frames: number, fps: number) => frames / fps * clipSpeed(clip)
+
+/** Fade and crossfade lengths clamped to what the clip can show; the crossfade needs a directly preceding clip. */
+export function clipFades(project: TimelineProject, clip: TimelineClip): { fadeIn: number; fadeOut: number; crossfade: number } {
+  const limit = (n: number | undefined, max: number) => Math.max(0, Math.min(Math.floor(n ?? 0), max))
+  const previous = project.clips.find(c => clipTrackId(c) === clipTrackId(clip) && c.start + c.duration === clip.start)
+  const crossfade = clip.track === 'video' && previous ? limit(clip.crossfade, Math.min(clip.duration, previous.duration)) : 0
+  const fadeIn = limit(clip.fadeIn, clip.duration)
+  return { fadeIn, fadeOut: limit(clip.fadeOut, clip.duration - Math.min(fadeIn, clip.duration)), crossfade }
 }
 
 export function timelineEnd(project: TimelineProject): number {
@@ -178,7 +199,7 @@ export function timelineProblems(project: TimelineProject): string[] {
       if (!asset || !variant) errors.push(`${clip.label}: kies eerst een variant.`)
       else if (asset.kind !== clip.track && !(clip.track === 'video' && asset.kind === 'image'))
         errors.push(`${clip.label}: het gekozen bestand past niet op dit spoor.`)
-      else if (asset.kind === 'image' ? variant.inPoint !== 0 : variant.inPoint < 0 || variant.inPoint + clip.duration / project.fps > asset.duration + 0.00001)
+      else if (asset.kind === 'image' ? variant.inPoint !== 0 : variant.inPoint < 0 || variant.inPoint + sourceSeconds(clip, clip.duration, project.fps) > asset.duration + 0.00001)
         errors.push(`${clip.label}: de uitsnede is langer dan de bron.`)
       if (i && clips[i - 1].start + clips[i - 1].duration > clip.start)
         errors.push(`${clip.label}: overlap op spoor ${track.name}.`)

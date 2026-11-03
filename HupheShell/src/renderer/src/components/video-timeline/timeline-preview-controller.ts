@@ -1,4 +1,4 @@
-import { activeMedia, clipTrackId, timelineEnd, timelineTracks, visualClipRect, type TimelineProject } from '../../../../shared/video-timeline'
+import { activeMedia, clipFades, clipSpeed, clipTrackId, timelineEnd, timelineTracks, visualClipRect, type TimelineProject } from '../../../../shared/video-timeline'
 
 export interface PreviewCallbacks {
   onPosition: (seconds: number) => void
@@ -16,6 +16,22 @@ interface VideoSegment {
   inPoint: number
   rect: { x: number; y: number; width: number; height: number }
   opacity: number
+  speed: number
+  /** Fade lengths in seconds; the crossfade dissolves over the previous clip's last frame. */
+  fadeIn: number
+  fadeOut: number
+  crossfade: number
+  holdForNext: boolean
+}
+
+/** Source time shown at a timeline position. */
+const sourceAt = (segment: VideoSegment, position: number) => segment.inPoint + (position - segment.start) * segment.speed
+
+/** Opacity of a clip at a timeline position, from its own opacity and fades. */
+export function fadeLevel(position: number, start: number, end: number, fadeIn: number, fadeOut: number): number {
+  const up = fadeIn > 0 ? (position - start) / fadeIn : 1
+  const down = fadeOut > 0 ? (end - position) / fadeOut : 1
+  return Math.max(0, Math.min(1, up, down))
 }
 
 interface ImageResource {
@@ -57,8 +73,15 @@ export function previewAudioSchedule(project: TimelineProject, position: number)
     const end = (clip.start + clip.duration) / project.fps
     if (!asset || !variant || end <= position || clip.duration <= 0) return []
     const elapsed = Math.max(0, position - start)
-    return [{ src: asset.src, offset: variant.inPoint + elapsed,
-      delay: Math.max(0, start - position), duration: end - Math.max(position, start), gain: clip.gain ?? 1 }]
+    const speed = clipSpeed(clip)
+    const fades = clipFades(project, clip)
+    const fadeIn = fades.fadeIn / project.fps, fadeOut = fades.fadeOut / project.fps
+    const first = Math.max(position, start)
+    // Gain breakpoints (timeline seconds) from the playback start onward; the gain ramps linearly between them.
+    const ramp = [first, start + fadeIn, end - fadeOut, end].filter((p, i, all) => p >= first && (i === 0 || p >= all[i - 1]))
+      .map(at => ({ at, level: fadeLevel(at, start, end, fadeIn, fadeOut) }))
+    return [{ src: asset.src, offset: variant.inPoint + elapsed * speed, rate: speed,
+      delay: Math.max(0, start - position), duration: end - first, gain: clip.gain ?? 1, ramp }]
   })
 }
 
@@ -88,6 +111,7 @@ export class TimelinePreviewController {
   private emittedPositions: number[] = []
   private lastPublishedFrame = -1
   private activeSlots = new Set<VideoSlot>()
+  private holds = new Map<string, HTMLCanvasElement>()
 
   constructor(private canvas: HTMLCanvasElement, videos: [HTMLVideoElement, HTMLVideoElement], callbacks: PreviewCallbacks) {
     this.callbacks = callbacks
@@ -104,14 +128,18 @@ export class TimelinePreviewController {
     this.project = project
     if (signature === this.projectSignature) return
     this.projectSignature = signature
+    this.holds.clear()
     this.freeze()
     this.segments = project.clips.filter(clip => clip.track === 'video').flatMap(clip => {
       const { asset, variant } = activeMedia(project, clip)
       if (!asset || !variant || (asset.kind !== 'video' && asset.kind !== 'image') || clip.duration <= 0) return []
-      return [{ key: `${clip.id}:${variant.id}:${(asset.previewSrc ?? asset.src)}:${variant.inPoint}`, src: asset.previewSrc ?? asset.src,
+      const fades = clipFades(project, clip)
+      return [{ key: `${clip.id}:${variant.id}:${(asset.previewSrc ?? asset.src)}:${variant.inPoint}:${clipSpeed(clip)}`, src: asset.previewSrc ?? asset.src,
         trackId: clipTrackId(clip), kind: asset.kind,
         start: clip.start / project.fps, end: (clip.start + clip.duration) / project.fps, inPoint: variant.inPoint,
-        rect: visualClipRect(project, clip, asset), opacity: clip.opacity ?? 1 }]
+        rect: visualClipRect(project, clip, asset), opacity: clip.opacity ?? 1, speed: asset.kind === 'image' ? 1 : clipSpeed(clip),
+        fadeIn: fades.fadeIn / project.fps, fadeOut: fades.fadeOut / project.fps, crossfade: fades.crossfade / project.fps,
+        holdForNext: project.clips.some(other => clipTrackId(other) === clipTrackId(clip) && other.start === clip.start + clip.duration && clipFades(project, other).crossfade > 0) }]
     }).sort((a, b) => a.start - b.start)
     this.reconcileTracks(timelineTracks(project).filter(track => track.kind === 'video').map(track => track.id))
     const imageUrls = new Set(this.segments.filter(segment => segment.kind === 'image').map(segment => segment.src))
@@ -194,12 +222,16 @@ export class TimelinePreviewController {
       this.anchorPosition = this.position
       this.anchorContextTime = context.currentTime + 0.04
       for (const item of decoded) {
-        const duration = Math.min(item.duration, item.buffer.duration - item.offset)
+        const duration = Math.min(item.duration * item.rate, item.buffer.duration - item.offset)
         if (duration <= 0) continue
         const source = context.createBufferSource()
         const gain = context.createGain()
         source.buffer = item.buffer
-        gain.gain.value = item.gain
+        // Preview limitation: playbackRate also shifts pitch; the export keeps the pitch.
+        source.playbackRate.value = item.rate
+        const when = (at: number) => this.anchorContextTime + (at - this.anchorPosition)
+        gain.gain.setValueAtTime(item.gain * item.ramp[0].level, when(item.ramp[0].at))
+        for (const point of item.ramp.slice(1)) gain.gain.linearRampToValueAtTime(item.gain * point.level, when(point.at))
         source.connect(gain)
         gain.connect(context.destination)
         source.onended = () => { this.audioSources.delete(source); source.disconnect(); gain.disconnect() }
@@ -253,7 +285,7 @@ export class TimelinePreviewController {
       return
     }
     for (const { segment, slot } of layers) if (slot && this.audibleContextTime() >= this.anchorContextTime) {
-      const desired = segment.inPoint + this.position - segment.start
+      const desired = sourceAt(segment, this.position)
       const drift = desired - slot.video.currentTime
       const now = performance.now()
       if (!slot.video.seeking && Math.abs(drift) > 0.16 && now - slot.lastCorrection > 750) {
@@ -261,7 +293,7 @@ export class TimelinePreviewController {
         // A bounded correction, never currentTime assignment on every frame.
         this.seekSlot(slot, desired)
       } else if (!slot.video.seeking) {
-        slot.video.playbackRate = Math.abs(drift) > 0.02 ? Math.max(0.95, Math.min(1.05, 1 + drift * 0.5)) : 1
+        slot.video.playbackRate = Math.abs(drift) > 0.02 ? segment.speed * Math.max(0.95, Math.min(1.05, 1 + drift * 0.5)) : segment.speed
       }
       this.playSlot(slot)
     }
@@ -377,8 +409,8 @@ export class TimelinePreviewController {
         active = slots.find(slot => slot.key === current.key)
           ?? slots.find(slot => slot.key !== next?.key) ?? slots[0]
         const changed = active.key !== current.key
-        if (changed) this.assign(active, current, current.inPoint + position - current.start)
-        else if (seek) this.seekSlot(active, current.inPoint + position - current.start)
+        if (changed) this.assign(active, current, sourceAt(current, position))
+        else if (seek) this.seekSlot(active, sourceAt(current, position))
         activeSlots.add(active)
       }
       if (current) layers.push({ segment: current, slot: active, image: current.kind === 'image' ? this.images.get(current.src) ?? null : null })
@@ -560,9 +592,25 @@ export class TimelinePreviewController {
       context.fillStyle = '#000'
       context.fillRect(0, 0, width, height)
       for (const layer of layers) if (layer.source && !layer.error) {
-        const { x, y, width: drawWidth, height: drawHeight } = layer.segment.rect
-        context.globalAlpha = layer.segment.opacity
+        const { segment } = layer
+        const { x, y, width: drawWidth, height: drawHeight } = segment.rect
+        const fadeFrom = Math.max(segment.fadeIn, segment.crossfade)
+        const level = fadeLevel(this.position, segment.start, segment.end, fadeFrom, segment.fadeOut)
+        const hold = this.holds.get(segment.trackId)
+        // The dissolve shows the previous clip's last frame, kept from when that clip was drawn.
+        if (segment.crossfade > 0 && this.position < segment.start + segment.crossfade && hold) {
+          context.globalAlpha = 1
+          context.drawImage(hold, 0, 0, width, height)
+        }
+        context.globalAlpha = segment.opacity * level
         context.drawImage(layer.source, x, y, drawWidth, drawHeight)
+        if (segment.holdForNext) {
+          const copy = this.holds.get(segment.trackId) ?? Object.assign(document.createElement('canvas'), { width, height })
+          copy.width = width; copy.height = height
+          const target = copy.getContext('2d')
+          if (target) { target.clearRect(0, 0, width, height); target.drawImage(layer.source, x, y, drawWidth, drawHeight) }
+          this.holds.set(segment.trackId, copy)
+        }
       }
       context.globalAlpha = 1
     }
@@ -571,7 +619,7 @@ export class TimelinePreviewController {
     const videoLayers = layers.filter(layer => layer.slot)
     this.canvas.dataset.mediaTime = videoLayers[0]?.slot?.mediaTime?.toFixed(6) ?? ''
     const drifts = videoLayers.flatMap(({ segment, slot }) => slot?.mediaTime != null
-      ? [(segment.inPoint + this.position - segment.start - slot.mediaTime) * 1000] : [])
+      ? [(sourceAt(segment, this.position) - slot.mediaTime) * 1000] : [])
     this.canvas.dataset.videoDriftMs = drifts.length ? drifts.reduce((a, b) => Math.abs(a) > Math.abs(b) ? a : b).toFixed(1) : ''
     this.canvas.dataset.layerCount = String(layers.length)
     this.canvas.dataset.audioSourceCount = String(this.audioSources.size)
