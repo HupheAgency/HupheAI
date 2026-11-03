@@ -80,6 +80,14 @@ export interface TimelineTrack {
   id: string
   kind: 'video' | 'audio'
   name: string
+  /** Audio tracks: silent in preview and export. */
+  muted?: boolean
+  /** Audio tracks: when any track is solo, only solo tracks sound. */
+  solo?: boolean
+  /** Video tracks: not shown in preview or export. */
+  hidden?: boolean
+  /** Clips on a locked track cannot be edited. */
+  locked?: boolean
 }
 
 export interface TimelineProject {
@@ -123,6 +131,15 @@ export function timelineEnd(project: TimelineProject): number {
 
 export function timelineTracks(project: TimelineProject): TimelineTrack[] {
   return project.tracks ?? [{ id: 'video-1', kind: 'video', name: 'Video 1' }, { id: 'audio-1', kind: 'audio', name: 'Audio 1' }]
+}
+
+/** The project as it is seen and heard: hidden video tracks and silenced audio tracks leave no clips. */
+export function renderableProject(project: TimelineProject): TimelineProject {
+  const tracks = timelineTracks(project)
+  const soloing = tracks.some(t => t.kind === 'audio' && t.solo)
+  const dropped = new Set(tracks.filter(t => t.kind === 'video' ? t.hidden : t.muted || (soloing && !t.solo)).map(t => t.id))
+  if (!dropped.size) return project
+  return { ...project, clips: project.clips.filter(c => !dropped.has(clipTrackId(c))) }
 }
 
 export function clipTrackId(clip: TimelineClip): string { return clip.trackId ?? `${clip.track}-1` }

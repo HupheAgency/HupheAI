@@ -7,7 +7,7 @@ import { probeTimelineMedia, type TimelineTools } from './video-timeline-media'
 import { loadTimelineProject, timelineIdSchema } from './video-timeline-storage'
 
 export const timelineReferencesSchema = z.object({ projectId: timelineIdSchema,
-  assetIds: z.array(timelineIdSchema).max(50), modelId: z.enum([SEEDANCE, VEO, WAN, KLING]).optional(), task: z.enum(['auto', 'reference', 'editing', 'extension']).optional(), accessToken: z.string().min(10).max(10_000) })
+  assetIds: z.array(timelineIdSchema).max(50), modelId: z.enum([SEEDANCE, VEO, WAN, KLING]).optional(), task: z.enum(['auto', 'reference', 'editing', 'extension']).optional(), edit: z.boolean().optional(), accessToken: z.string().min(10).max(10_000) })
 
 export interface TimelineReferenceUrls { imageUrls: string[]; videoUrls: string[]; audioUrls: string[] }
 export type TimelineReferenceUploader = (input: { buffer: Buffer; contentType: string; fileName: string; accessToken: string }) => Promise<string>
@@ -28,8 +28,10 @@ export async function prepareTimelineReferences(root: string, input: unknown, up
     if (!asset) throw new Error('Een referentie behoort niet tot het opgeslagen project.')
     return asset
   })
-  const modelRules = REFERENCE_RULES[request.modelId ?? SEEDANCE]
-  const modelCounts = request.modelId === WAN ? { image: 0, video: 0, audio: 1 }
+  // Bewerkingen op een bestaand fragment (omgeving, motion control, achtergrond) kennen eigen
+  // fal-limieten; de server controleert ze. Hier alleen de algemene grootte- en formaatcontrole.
+  const modelRules = request.edit ? undefined : REFERENCE_RULES[request.modelId ?? SEEDANCE]
+  const modelCounts = request.edit ? { image: 10, video: 1, audio: 0 } : request.modelId === WAN ? { image: 0, video: 0, audio: 1 }
     : request.modelId === VEO ? request.task === 'extension' ? { image: 0, video: 1, audio: 0 } : { image: 3, video: 0, audio: 0 }
     : request.modelId === KLING ? { image: 0, video: 0, audio: 0 } : { image: 30, video: 10, audio: 10 }
   const counts = { image: 0, video: 0, audio: 0 }

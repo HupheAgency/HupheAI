@@ -22,7 +22,7 @@ const audioVideoFile=join(work,'source-C-with-audio.mp4');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const js=code=>window.webContents.executeJavaScript(code,true);
 async function until(code,label,timeout=15000){const start=Date.now();while(Date.now()-start<timeout){if(await js(code))return;await sleep(70)}throw Error('Timeout: '+label+' '+await js('document.body.innerText.slice(0,1800)'));}
-async function click(text){const pos=await js(`(()=>{const el=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===${JSON.stringify(text)}&&e.getClientRects().length);if(!el)throw Error('Button missing '+${JSON.stringify(text)});if(el.disabled)throw Error('Button disabled '+${JSON.stringify(text)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...pos});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...pos});await sleep(150);}
+async function click(text){const pos=await js(`(()=>{const el=[...document.querySelectorAll('button')].find(e=>(e.textContent.trim()||e.getAttribute('aria-label'))===${JSON.stringify(text)}&&e.getClientRects().length);if(!el)throw Error('Button missing '+${JSON.stringify(text)});if(el.disabled)throw Error('Button disabled '+${JSON.stringify(text)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...pos});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...pos});await sleep(150);}
 async function input(selector,value){await js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw Error('Input missing '+${JSON.stringify(selector)});const proto=el instanceof HTMLSelectElement?HTMLSelectElement.prototype:el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,${JSON.stringify(String(value))});el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));})()`);await sleep(120);}
 async function selectClip(index){await js(`(()=>{const el=document.querySelectorAll('[data-clip-id]')[${index}];el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));})()`);await click('Fragment');}
 async function dragClip(index, handle, pixels) {
@@ -47,7 +47,7 @@ async function drawEmptyBlocks() {
  const release=async end=>{window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...end});await sleep(150);};
  const selected=async(start,duration)=>{
   await until("!!document.querySelector('[data-clip-id].selected') && !document.querySelector('.vt-block-draft')",'newly drawn block selected');
-  assert.equal(await js("document.querySelector('.vt-tabs button.active').textContent.trim()"),'Genereren','Na tekenen staat direct de generatiezijbalk klaar');
+  assert.equal(await js("document.querySelector('.vt-tabs button.active').getAttribute('aria-label')"),'Genereren','Na tekenen staat direct de generatiezijbalk klaar');
   assert.match(await js("document.querySelector('[data-testid=timeline-block-duration]').textContent"),new RegExp(`\\b${String(duration).replace('.', '[.,]')}\\s*s\\b`),'De generatiezijbalk toont de getekende montageduur apart');
   const actual=await js("(()=>{const el=document.querySelector('[data-clip-id].selected'),zoom=Number(document.querySelector('[aria-label=\"Tijdlijnzoom\"]').value);return {start:parseFloat(el.style.left)/zoom,duration:parseFloat(el.style.width)/zoom}})()");
   assert.deepEqual(actual,{start,duration},'Getekend blok gebruikt de gekozen begin- en eindtijd');
@@ -204,14 +204,14 @@ async function legacyGenerationDuration(projectId,clipId) {
 async function generationSettingsParity(projectId,clipId) {
  const projectPath=join(process.env.HUPHE_TIMELINE_ROOT,projectId,'project.json');
  const readProject=async()=>JSON.parse(await readFile(projectPath,'utf8'));
- const saveProject=async()=>{await until("[...document.querySelectorAll('.vt button')].some(e=>e.textContent.trim()==='Opslaan'&&!e.disabled)",'media action completed before save');await click('Opslaan');return readProject();};
+ const saveProject=async()=>{await until("[...document.querySelectorAll('.vt button')].some(e=>(e.textContent.trim()||e.getAttribute('aria-label'))==='Opslaan'&&!e.disabled)",'media action completed before save');await click('Opslaan');return readProject();};
  const selectedClip=p=>p.clips.find(c=>c.id===clipId);
  const selectVideo=async()=>{await js(`document.querySelector('[data-clip-id="${clipId}"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);await click('Genereren');};
  const setSwitch=async(label,value)=>{
   await js(`(()=>{const e=document.querySelector('.vt [role="switch"][aria-label="${label}"]');if(!e)throw Error('Switch ontbreekt: ${label}');if(e.checked!==${value}){if(e.disabled)throw Error('Switch disabled: ${label}');e.click();}})()`);await sleep(120);
  };
  const openAdvanced=async()=>{await js("(()=>{const e=[...document.querySelectorAll('.vt summary')].find(e=>e.textContent.trim()==='Geavanceerd');if(!e)throw Error('Geavanceerd ontbreekt');if(!e.parentElement.open)e.click();})()");await sleep(80);};
- const variantAction=async(id,label)=>{await js(`(()=>{const card=document.querySelector('[data-variant-id="${id}"]');const button=[...card.querySelectorAll('button')].find(e=>e.textContent.trim()===${JSON.stringify(label)});if(!button||button.disabled)throw Error('Variantactie niet beschikbaar: '+${JSON.stringify(label)});button.click();})()`);await sleep(150);};
+ const variantAction=async(id,label)=>{await js(`(()=>{const card=document.querySelector('[data-variant-id="${id}"]');const button=[...card.querySelectorAll('button')].find(e=>(e.textContent.trim()||e.getAttribute('aria-label'))===${JSON.stringify(label)});if(!button||button.disabled)throw Error('Variantactie niet beschikbaar: '+${JSON.stringify(label)});button.click();})()`);await sleep(150);};
  const awaitVariants=async count=>until(`document.querySelectorAll('.vt-inspector [data-variant-id]').length===${count}`,'new variant visible');
  await selectVideo();const before=await saveProject(),beforeClip=structuredClone(selectedClip(before));
  await js("document.querySelector('[aria-label=\"Automatische generatieduur\"]').click()");await sleep(120);
@@ -354,7 +354,7 @@ async function multitrackEditing() {
 }
 async function deleteTimelineTracks() {
  const projectId=await js("localStorage.getItem('huphe:timeline:last-project')");
- const save=async()=>{await until("[...document.querySelectorAll('.vt button')].some(e=>e.textContent.trim()==='Opslaan'&&!e.disabled)",'track deletion ready to save');await click('Opslaan');return JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,projectId,'project.json'),'utf8'));};
+ const save=async()=>{await until("[...document.querySelectorAll('.vt button')].some(e=>(e.textContent.trim()||e.getAttribute('aria-label'))==='Opslaan'&&!e.disabled)",'track deletion ready to save');await click('Opslaan');return JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,projectId,'project.json'),'utf8'));};
  const key=clip=>clip.trackId??`${clip.track}-1`;
  const edit=project=>({tracks:project.tracks,clips:project.clips});
  const select=async id=>{await js(`document.querySelector('[data-clip-id="${id}"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);await click('Fragment');};

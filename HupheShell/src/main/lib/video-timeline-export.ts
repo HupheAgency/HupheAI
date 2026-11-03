@@ -1,7 +1,7 @@
 import { mkdir, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { activeMedia, clipTrackId, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
+import { activeMedia, clipTrackId, renderableProject, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
 import { transitionPlaybackProblems } from '../../shared/video-timeline-transition'
 import { probeTimelineMedia, requireTimelineTools, runTimelineTool, type TimelineTools } from './video-timeline-media'
 import { isWithinTimelineDirectory, parseTimelineProject, validateOwnedAssets } from './video-timeline-storage'
@@ -18,7 +18,7 @@ const seconds = (frames: number, fps: number) => (frames / fps).toFixed(9)
 
 export async function renderTimelineProject(input: TimelineProject, options: TimelineRenderOptions): Promise<{ path: string; duration: number; frames: number }> {
   // Zod creates a separate snapshot before the first asynchronous operation.
-  const project = parseTimelineProject(input)
+  const project = renderableProject(parseTimelineProject(input))
   const tools = await requireTimelineTools(options.tools)
   await validateOwnedAssets(options.root, project)
   const used = new Set(project.clips.flatMap(clip => clip.variants.filter(v => v.id === clip.activeVariantId).map(v => v.assetId)))

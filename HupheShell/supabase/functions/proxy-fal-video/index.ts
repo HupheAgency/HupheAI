@@ -75,7 +75,7 @@ interface VideoModelCapability {
   // Taakfamilie voor de 5 "bewerk-bestaande-video"-tools (Remove/Edit Object, Restyle,
   // Enhance, Interpolate). Ontbreekt (undefined) = bestaand Generate-Video/Seedance-pad
   // (text/image/reference-to-video, user-gekozen duration) -- ongewijzigd gedrag.
-  family?: 'remove_object' | 'edit_object' | 'restyle' | 'enhance' | 'interpolate'
+  family?: 'remove_object' | 'edit_object' | 'restyle' | 'enhance' | 'interpolate' | 'edit_scene' | 'motion_control' | 'remove_background'
   // Prijsmodel voor family-modellen: 'flat_per_video' slaat resolveRatePerSecond over
   // (VOID), 'per_second' (default wanneer family gezet is) gebruikt output_duration_source.
   pricing_model?: 'per_second' | 'flat_per_video' | 'compute_second'
@@ -287,6 +287,67 @@ const CAPABILITIES: Record<string, VideoModelCapability> = {
       target_fps: { type: 'number', label: 'Doel-fps (optioneel)', min: 16, max: 120 },
     },
   },
+  'kling/v4/video-to-video/edit': {
+    model_id: 'kling/v4/video-to-video/edit',
+    supported_durations: [],
+    supported_resolutions: ['original'],
+    supported_aspect_ratios: ['original'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: {},
+    family: 'edit_scene',
+    pricing_model: 'per_second',
+    output_duration_source: 'source_video',
+    // fal rekent $0.094/s (720p) of $0.141/s (1080p) over invoer + uitvoer, minimaal 2x de
+    // uitvoer. Zie resolveFamilyBaseCostUsd: we reserveren de 2x-bovengrens.
+    extra_fields: {
+      resolution: { type: 'select', label: 'Resolutie', options: ['720p', '1080p'], default: '1080p' },
+    },
+  },
+  'fal-ai/kling-video/v3/pro/motion-control': {
+    model_id: 'fal-ai/kling-video/v3/pro/motion-control',
+    supported_durations: [],
+    supported_resolutions: ['original'],
+    supported_aspect_ratios: ['original'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: { duration_seconds: '0.168' },
+    family: 'motion_control',
+    pricing_model: 'per_second',
+    output_duration_source: 'source_video',
+    prompt_optional: true,
+    extra_fields: {
+      character_orientation: { type: 'select', label: 'Oriëntatie karakter volgt', options: ['video', 'image'], default: 'video' },
+      keep_original_sound: { type: 'boolean', label: 'Geluid referentievideo behouden', default: true },
+    },
+  },
+  'bria/video/background-removal/v3': {
+    model_id: 'bria/video/background-removal/v3',
+    supported_durations: [],
+    supported_resolutions: ['original'],
+    supported_aspect_ratios: ['original'],
+    generate_audio: false,
+    seed: false,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: false,
+    pricing_skus: { duration_seconds: '0.05' },
+    family: 'remove_background',
+    pricing_model: 'per_second',
+    output_duration_source: 'source_video',
+    prompt_optional: true,
+    extra_fields: {
+      background_color: { type: 'select', label: 'Achtergrond', options: ['Transparent', 'Black', 'White', 'Gray', 'Red', 'Green', 'Blue', 'Yellow', 'Cyan', 'Magenta', 'Orange'], default: 'Transparent' },
+      output_container_and_codec: { type: 'select', label: 'Formaat', options: ['webm_vp9', 'mov_proresks', 'mp4_h264', 'mp4_h265', 'mov_h265', 'mkv_vp9', 'gif'], default: 'webm_vp9' },
+      preserve_audio: { type: 'boolean', label: 'Audio behouden', default: true },
+    },
+  },
   'topaz/interpolate/video': {
     model_id: 'topaz/interpolate/video',
     supported_durations: [],
@@ -361,6 +422,9 @@ const ENDPOINTS: Record<string, {
   'fal-ai/void-video-inpainting': {
     edit: 'fal-ai/void-video-inpainting',
   },
+  'kling/v4/video-to-video/edit': { edit: 'kling/v4/video-to-video/edit' },
+  'fal-ai/kling-video/v3/pro/motion-control': { edit: 'fal-ai/kling-video/v3/pro/motion-control' },
+  'bria/video/background-removal/v3': { edit: 'bria/video/background-removal/v3' },
   'fal-ai/kling-video/o1/video-to-video/edit': {
     edit: 'fal-ai/kling-video/o1/video-to-video/edit',
   },
@@ -459,6 +523,22 @@ function buildFamilyFalBody(
       if (imageUrls[0]) body.image_url = imageUrls[0]
       if (extraParams.mode) body.mode = extraParams.mode
       break
+    case 'edit_scene':
+      // v4 verwacht dat de bronvideo in de prompt als @Video1 wordt genoemd.
+      body.prompt = /@Video1/.test(prompt ?? '') ? prompt : `Edit @Video1: ${prompt ?? ''}`.trim()
+      if (imageUrls.length) body.image_urls = imageUrls
+      if (extraParams.resolution) body.resolution = extraParams.resolution
+      break
+    case 'motion_control':
+      body.character_orientation = extraParams.character_orientation ?? 'video'
+      if (extraParams.keep_original_sound != null) body.keep_original_sound = extraParams.keep_original_sound
+      body.image_url = imageUrls[0]
+      break
+    case 'remove_background':
+      if (extraParams.background_color) body.background_color = extraParams.background_color
+      if (extraParams.output_container_and_codec) body.output_container_and_codec = extraParams.output_container_and_codec
+      if (extraParams.preserve_audio != null) body.preserve_audio = extraParams.preserve_audio
+      break
     case 'enhance':
       if (extraParams.model) body.model = extraParams.model
       if (extraParams.upscale_factor != null) body.upscale_factor = extraParams.upscale_factor
@@ -487,6 +567,11 @@ function resolveFamilyBaseCostUsd(
     if (extraParams.enable_pass2_refinement === true) flat += 0.05
     if (!extraParams.mask_prompt) flat += 0.05 // SAM3 auto-mask zonder mask_prompt
     return flat
+  }
+
+  if (capability.family === 'edit_scene') {
+    const rate = extraParams.resolution === '720p' ? 0.094 : 0.141
+    return rate * 2 * sourceDurationSeconds
   }
 
   if (capability.resolution_tiers) {
@@ -636,6 +721,13 @@ Deno.serve(async (req: Request) => {
           return json({ error: 'video_urls[0] (bronvideo) is verplicht', code: 'invalid_params' }, 400)
         }
         const familyImageUrls: string[] = Array.isArray(image_urls) ? image_urls.filter(Boolean) : []
+
+        if (capability.family === 'motion_control' && !familyImageUrls[0]) {
+          return json({ error: 'Een karakterafbeelding is verplicht voor motion control', code: 'invalid_params' }, 400)
+        }
+        if (capability.family === 'edit_scene' && !prompt) {
+          return json({ error: 'prompt is verplicht', code: 'invalid_params' }, 400)
+        }
 
         const extraParamsResult = resolveExtraParams(capability, extra_params)
         if ('error' in extraParamsResult) {

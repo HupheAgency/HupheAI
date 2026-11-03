@@ -13,7 +13,7 @@ try {
   const bundle = join(temporary, 'editing.mjs')
   await build({ stdin: { contents: `export * from './src/renderer/src/components/video-timeline/timeline-editing'; export * from './src/shared/video-timeline'`, resolveDir: appRoot },
     bundle: true, platform: 'node', format: 'esm', outfile: bundle, logLevel: 'silent' })
-  const { planAssetDrop, placeAsset, assetClip, assetTrackKind, editSnapshot, mergeGesture, newTrack, timelineTracks, clipTrackId } = await import(pathToFileURL(bundle).href)
+  const { splitClip, snapSpan, nearestSnap, snapTargets, pasteClips, moveTrack, reorderTrack, trackIsLocked, renderableProject, planAssetDrop, placeAsset, assetClip, assetTrackKind, editSnapshot, mergeGesture, newTrack, timelineTracks, clipTrackId } = await import(pathToFileURL(bundle).href)
   const now = '2026-11-02T12:00:00.000Z'
   const video = { id: 'video-source', kind: 'video', name: 'Film.mp4', path: '/test/film.mp4', src: 'huphe://file/test', duration: 2.4, width: 1920, height: 1080 }
   const image = { id: 'logo-source', kind: 'image', name: 'Logo.png', path: '/test/logo.png', src: 'huphe://file/logo', duration: 0, width: 400, height: 200 }
@@ -161,5 +161,49 @@ try {
   assert.equal(merged.clips.some(clip => clip.id === 'overlay'), false, 'an old gesture cannot resurrect a clip deleted from live state')
   assert.deepEqual(live, liveBefore); assert.deepEqual(gesture, gestureBefore)
   checks++
+  // Split, snap, paste, track order, hidden/muted tracks.
+  {
+    const long = { ...structuredClone(project), assets: [{ ...video, duration: 10 }, image, audio] }
+    const split = splitClip(long, 'first', 40)
+    assert.ok(split, 'a clip is split inside its range')
+    const left = split.project.clips.find(c => c.id === 'first'), right = split.right
+    assert.equal(left.duration, 40); assert.equal(right.start, 40); assert.equal(right.duration, 60)
+    assert.equal(right.variants[0].inPoint, 0.2 + 40 / 25, 'the right half starts later in the same source')
+    assert.notEqual(right.variants[0].id, left.variants[0].id); assert.equal(right.activeVariantId, right.variants[0].id)
+    assert.equal(left.start + left.duration, right.start, 'no gap or overlap appears')
+    assert.equal(splitClip(long, 'first', 0), undefined); assert.equal(splitClip(long, 'first', 100), undefined)
+    assert.equal(splitClip({ ...long, clips: [{ ...long.clips[0], transition: { kind: 'rife' } }] }, 'first', 40), undefined)
+    assert.equal(long.clips[0].duration, 100, 'splitting does not mutate its input')
+    checks++
+    const targets = snapTargets(long, new Set(['overlay']), 33)
+    assert.equal(nearestSnap(targets, 98, 3), 100); assert.equal(nearestSnap(targets, 60, 3), undefined)
+    assert.equal(snapSpan(targets, 31, 131, 3), 2, 'the start snaps to the playhead')
+    assert.equal(snapSpan(targets, 10, 60, 3), 0)
+    checks++
+    const pasted = pasteClips(long, [long.clips[0]], 0, 'video-1')
+    assert.ok(!('error' in pasted)); assert.equal(pasted.clips[0].start, 200, 'a paste over occupied space moves to the first free frame')
+    assert.notEqual(pasted.clips[0].id, 'first'); assert.notEqual(pasted.clips[0].variants[0].id, 'first')
+    assert.equal(pasted.clips[0].activeVariantId, pasted.clips[0].variants[0].id)
+    const free = pasteClips(long, [long.clips[0]], 500, 'video-1')
+    assert.equal(free.clips[0].start, 500)
+    const locked = { ...long, tracks: long.tracks.map(t => t.kind === 'video' ? { ...t, locked: true } : t) }
+    assert.ok('error' in pasteClips(locked, [long.clips[0]], 500, 'video-1'), 'pasting never lands on locked tracks')
+    assert.ok(trackIsLocked(locked, locked.clips[0]))
+    checks++
+    const up = moveTrack(long, 'video-1', true)
+    assert.deepEqual(up.map(t => t.id), ['video-2', 'video-1', 'audio-1', 'audio-2'])
+    assert.equal(moveTrack(long, 'video-2', true), undefined); assert.equal(moveTrack(long, 'audio-2', false), undefined)
+    assert.deepEqual(moveTrack(long, 'audio-1', false).map(t => t.id), ['video-1', 'video-2', 'audio-2', 'audio-1'])
+    assert.deepEqual(reorderTrack(long, 'video-1', 'video-2').map(t => t.id).filter(id => id.startsWith('video')), ['video-2', 'video-1'])
+    assert.equal(reorderTrack(long, 'video-1', 'audio-1'), undefined, 'video and audio tracks never mix')
+    assert.equal(reorderTrack(long, 'audio-1', 'video-2'), undefined)
+    checks++
+    const mixed = { ...long, tracks: long.tracks.map(t => t.id === 'video-2' ? { ...t, hidden: true } : t.id === 'audio-1' ? { ...t, muted: true } : t) }
+    assert.deepEqual(renderableProject(mixed).clips.map(c => c.id).sort(), ['first', 'second'])
+    const solo = { ...long, tracks: long.tracks.map(t => t.id === 'audio-2' ? { ...t, solo: true } : t) }
+    assert.equal(renderableProject(solo).clips.some(c => c.track === 'audio'), false, 'with a solo track, the others fall silent')
+    assert.equal(renderableProject(long), long)
+    checks++
+  }
   console.log(`PASS: ${checks} timeline editing scenarios — boundary insertion, target-track isolation, occupied/free space, media type, image defaults, audio overlap, legacy/new tracks, undo snapshots, duration limit and concurrent generation preservation.`)
 } finally { await rm(temporary, { recursive: true, force: true }) }
