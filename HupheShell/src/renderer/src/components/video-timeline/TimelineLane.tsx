@@ -73,9 +73,10 @@ export function TimelineLane({ track, trackId, clips, fps, zoom, disabled, onDra
       suppressClick.current = true
       stop()
     }
-    window.addEventListener('keydown', cancel)
+    // Capture phase: the page's own Escape handler (clear selection) must not swallow the key while a block is being drawn.
+    window.addEventListener('keydown', cancel, true)
     return () => {
-      window.removeEventListener('keydown', cancel)
+      window.removeEventListener('keydown', cancel, true)
       if (animation.current !== null) cancelAnimationFrame(animation.current)
       gesture.current = null
     }

@@ -29,8 +29,10 @@ async function until(code: string, label: string, timeout = 20_000) {
   while (Date.now() - start < timeout) { if (await js(code)) return; await sleep(70) }
   throw new Error(`Timeout: ${label}\n${await js('document.body.innerText')}`)
 }
+const LABELS: Record<string, string> = { '⏮': 'Naar begin', '▶': 'Afspelen', '＋ Videospoor': 'Videospoor toevoegen', '＋ Audiospoor': 'Audiospoor toevoegen', '＋ Leeg blok': 'Leeg blok', '＋ Video toevoegen': 'Video toevoegen', '♫ Audio toevoegen': 'Audio toevoegen', '＋ Afbeelding toevoegen': 'Afbeelding toevoegen', Nieuw: 'Nieuw project', 'Exporteer film ↗': 'Film exporteren' }
 async function click(text: string) {
-  const point = await js(`(()=>{const e=[...document.querySelectorAll('button')].find(e=>(e.textContent.trim()||e.getAttribute('aria-label'))===${JSON.stringify(text)}&&e.getClientRects().length);if(!e)throw Error('Button missing: '+${JSON.stringify(text)});if(e.disabled)throw Error('Button disabled: '+${JSON.stringify(text)});e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`)
+  text = LABELS[text] || text.replace(/^Varianten \(\d+\)$/, 'Varianten')
+  const point = await js(`(()=>{const e=[...document.querySelectorAll('button')].find(e=>(e.textContent.trim()===${JSON.stringify(text)}||e.getAttribute('aria-label')===${JSON.stringify(text)})&&e.getClientRects().length);if(!e)throw Error('Button missing: '+${JSON.stringify(text)});if(e.disabled)throw Error('Button disabled: '+${JSON.stringify(text)});e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`)
   window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
   window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
   await sleep(130)

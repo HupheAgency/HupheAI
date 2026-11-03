@@ -20,9 +20,10 @@ const currentCaps=[SEEDANCE,VEO,WAN,KLING].map(id=>enhanceVideoCapability({model
  supports_auto_duration:id===SEEDANCE,supports_draft:id===SEEDANCE,draft_rate_per_second:0.005,draft_finalize_rate_per_second:0.01,pricing_skus:{duration_seconds:'0.01'}}));
 const audioVideoFile=join(work,'source-C-with-audio.mp4');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const js=code=>window.webContents.executeJavaScript(code,true);
+const js=code=>window.webContents.executeJavaScript(code,true).catch(e=>{console.error("JS-FOUT in:",String(code).slice(0,260));throw e;});
 async function until(code,label,timeout=15000){const start=Date.now();while(Date.now()-start<timeout){if(await js(code))return;await sleep(70)}throw Error('Timeout: '+label+' '+await js('document.body.innerText.slice(0,1800)'));}
-async function click(text){const pos=await js(`(()=>{const el=[...document.querySelectorAll('button')].find(e=>(e.textContent.trim()||e.getAttribute('aria-label'))===${JSON.stringify(text)}&&e.getClientRects().length);if(!el)throw Error('Button missing '+${JSON.stringify(text)});if(el.disabled)throw Error('Button disabled '+${JSON.stringify(text)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...pos});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...pos});await sleep(150);}
+const LABELS={'⏮':'Naar begin','▶':'Afspelen','＋ Videospoor':'Videospoor toevoegen','＋ Audiospoor':'Audiospoor toevoegen','＋ Leeg blok':'Leeg blok','＋ Video toevoegen':'Video toevoegen','♫ Audio toevoegen':'Audio toevoegen','＋ Afbeelding toevoegen':'Afbeelding toevoegen','Nieuw':'Nieuw project','Exporteer film ↗':'Film exporteren'};
+async function click(text){let scope='';if(text.includes(' › ')){[scope,text]=text.split(' › ')}text=LABELS[text]||text.replace(/^Varianten \(\d+\)$/,'Varianten');const pos=await js(`(()=>{const el=[...document.querySelectorAll(${JSON.stringify(scope?`[aria-label="${scope}"] button`:'button')})].find(e=>(e.textContent.trim()===${JSON.stringify(text)}||e.getAttribute('aria-label')===${JSON.stringify(text)})&&e.getClientRects().length);if(!el)throw Error('Button missing '+${JSON.stringify(text)});if(el.disabled)throw Error('Button disabled '+${JSON.stringify(text)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...pos});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...pos});await sleep(150);}
 async function input(selector,value){await js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw Error('Input missing '+${JSON.stringify(selector)});const proto=el instanceof HTMLSelectElement?HTMLSelectElement.prototype:el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,${JSON.stringify(String(value))});el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));})()`);await sleep(120);}
 async function selectClip(index){await js(`(()=>{const el=document.querySelectorAll('[data-clip-id]')[${index}];el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));})()`);await click('Fragment');}
 async function dragClip(index, handle, pixels) {
@@ -35,7 +36,7 @@ async function dragClip(index, handle, pixels) {
 async function drawEmptyBlocks() {
  const count=()=>js("document.querySelectorAll('[data-clip-id]').length");
  const geometry=()=>js("[...document.querySelectorAll('[data-clip-id]')].map(e=>({id:e.dataset.clipId,left:e.style.left,width:e.style.width}))");
- const history=async redo=>{await js(`document.querySelector('[title="${redo ? 'Opnieuw' : 'Ongedaan maken'}"]').click()`);await sleep(120);};
+ const history=async redo=>{await js(`document.querySelector('[aria-label="${redo ? 'Opnieuw' : 'Ongedaan maken'}"]').click()`);await sleep(120);};
  const point=async seconds=>js(`(()=>{const r=document.querySelector('.vt-lane[data-track="video"]').getBoundingClientRect();return {x:Math.round(r.left+${seconds}*Number(document.querySelector('[aria-label="Tijdlijnzoom"]').value)),y:Math.round(r.top+r.height/2)}})()`);
  const begin=async(from,to)=>{
   await click('⏮'); // Keep the separate playhead drag handle away from the drawing gesture.
@@ -245,7 +246,7 @@ async function generationSettingsParity(projectId,clipId) {
  assert.equal(clip.generation.referenceAssetIds.length,3,'Beeld-, video- en audioreferentie zijn gekoppeld aan dit blok');assert.deepEqual(saved.clips.map(c=>({id:c.id,start:c.start,duration:c.duration})),montageBeforeRefs,'Referenties toevoegen maakt geen montageblokken');
  assert.equal(clip.generation.referenceAssetId,beforeClip.generation.referenceAssetId,'Startbeeld blijft bewaard naast referenties');assert.equal(clip.generation.endImageAssetId,beforeClip.generation.endImageAssetId,'Eindbeeld blijft bewaard naast referenties');
  assert.equal(await js("document.querySelector('.vt [role=switch][aria-label=Draft]').disabled"),true,'Draft is niet beschikbaar met referentie-media');
- await click('Bewerken');await openAdvanced();await input('[aria-label="Seed"]',42);await input('[aria-label="Bitrate"]','high');await input('[aria-label="Codec"]','H265');
+ await click('Generatiemodus › Bewerken');await openAdvanced();await input('[aria-label="Seed"]',42);await input('[aria-label="Bitrate"]','high');await input('[aria-label="Codec"]','H265');
  expectedGenerationSettings={duration:'auto',aspectRatio:'auto',generateAudio:true,draft:false,seed:42,bitrateMode:'high',codec:'H265'};expectedReferenceTask='editing';
  await click('Genereer nieuwe variant');await awaitVariants(beforeClip.variants.length+3);assert.equal(generated,3);
  saved=await saveProject();clip=selectedClip(saved);let latest=clip.variants.at(-1);
@@ -270,7 +271,7 @@ async function assertEmptyGapClearsPreview() {
  const rect=await js("(()=>{const r=document.querySelector('.vt canvas').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2),width:1,height:1}})()");
  const pixel=(await window.webContents.capturePage(rect)).toBitmap();
  assert.ok(Math.max(pixel[0],pixel[1],pixel[2])<8,'Een echt leeg interval wordt wel zwart; het vorige bronbeeld blijft daar niet hangen');
- await js("document.querySelector('[title=\"Ongedaan maken\"]').click()");await sleep(120);await click('⏮');
+ await js("document.querySelector('[aria-label=\"Ongedaan maken\"]').click()");await sleep(120);await click('⏮');
 }
 async function multitrackEditing() {
  await click('Nieuw');await until("document.querySelectorAll('[data-clip-id]').length===0",'new multitrack project');
@@ -278,7 +279,7 @@ async function multitrackEditing() {
  const projectId=await js("localStorage.getItem('huphe:timeline:last-project')");
  const save=async()=>{await click('Opslaan');return JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,projectId,'project.json'),'utf8'));};
  const select=async id=>{await js(`document.querySelector('[data-clip-id="${id}"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);await click('Fragment');};
- const undo=async redo=>{await js(`document.querySelector('[title="${redo?'Opnieuw':'Ongedaan maken'}"]').click()`);await sleep(120);};
+ const undo=async redo=>{await js(`document.querySelector('[aria-label="${redo?'Opnieuw':'Ongedaan maken'}"]').click()`);await sleep(120);};
  const drop=async(assetId,track,seconds,{fresh=false,valid=true}={})=>{
   const selector=fresh?`[data-new-track="${track}"]`:`.vt-lane[data-track-id="${track}"]`;
   const feedback=await js(`(()=>{
@@ -342,7 +343,7 @@ async function multitrackEditing() {
  await undo(false);p=await save();assert.equal(p.clips.find(c=>c.id===source.id).trackId,'video-1');
  await select(source.id);await input('[aria-label="Spoor fragment"]',top.id);p=await save();assert.equal(p.clips.find(c=>c.id===source.id).trackId,top.id);
  await input('[aria-label="Spoor fragment"]','video-1');
- await js(`document.querySelector('.vt-track-label[title="Selecteer ${top.name}"]').click()`);await sleep(100);
+ await js(`document.querySelector('.vt-track-label[title="Selecteer ${top.name}"],.vt-track-label[data-tip="Selecteer ${top.name}"]').click()`);await sleep(100);
  await js(`document.querySelector('[data-asset-id="${a.id}"]').click()`);p=await save();assert.ok(p.clips.some(c=>c.trackId===top.id),'Klikken blijft achteraan op het gekozen spoor plaatsen');
  passes.push('Bestaande clips tussen sporen slepen met doorlopende pointercapture, spoorselectie en klikken om media te plaatsen');
  const expected=structuredClone({tracks:p.tracks,clips:p.clips});await click('⏮');
@@ -358,7 +359,7 @@ async function deleteTimelineTracks() {
  const key=clip=>clip.trackId??`${clip.track}-1`;
  const edit=project=>({tracks:project.tracks,clips:project.clips});
  const select=async id=>{await js(`document.querySelector('[data-clip-id="${id}"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);await click('Fragment');};
- const undo=async redo=>{await js(`document.querySelector('[title="${redo?'Opnieuw':'Ongedaan maken'}"]').click()`);await sleep(150);};
+ const undo=async redo=>{await js(`document.querySelector('[aria-label="${redo?'Opnieuw':'Ongedaan maken'}"]').click()`);await sleep(150);};
  const remove=async track=>{
   const point=await js(`(()=>{const button=document.querySelector('[data-delete-track="${track.id}"]');if(!button)throw Error('Delete-track button missing');if(button.disabled)throw Error('Delete-track button disabled');if(button.getAttribute('aria-label')!==${JSON.stringify(track.name+' verwijderen')})throw Error('Delete-track accessible name missing');button.scrollIntoView({block:'nearest'});const r=button.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);
   window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...point});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...point});
@@ -574,12 +575,12 @@ async function modelCapabilityControls(){
  await importFile('audio','baseline.wav');await until("document.querySelectorAll('[data-clip-id]').length===3",'3 clips');passes.push('Import A/B/audio en niet-destructief trimmen via zijbalk');
  await selectClip(0);await dragClip(0,'left',40);
  assert.equal(await js("Number(document.querySelector('[aria-label=\"Begin in bron\"]').value)"),3,'De trimrand blijft bereikbaar naast de afspeellijn');
- await js("document.querySelector('[title=\"Ongedaan maken\"]').click()");await sleep(120);
+ await js("document.querySelector('[aria-label=\"Ongedaan maken\"]').click()");await sleep(120);
  await dragClip(0,'right',-40);assert.equal(await js("Number(document.querySelector('[aria-label=\"Lengte fragment\"]').value)"),2);
- await js("document.querySelector('[title=\"Ongedaan maken\"]').click()");await sleep(120);assert.equal(await js("Number(document.querySelector('[aria-label=\"Lengte fragment\"]').value)"),3);
- await js("document.querySelector('.vt-ripple input').click()");await dragClip(0,'right',40);await selectClip(1);assert.equal(await js("Number(document.querySelector('[aria-label=\"Start fragment\"]').value)"),4);
- await js("document.querySelector('[title=\"Ongedaan maken\"]').click()");await sleep(120);await js("document.querySelector('.vt-ripple input').click()");
- await dragClip(1,null,40);assert.equal(await js("Number(document.querySelector('[aria-label=\"Start fragment\"]').value)"),4);await js("document.querySelector('[title=\"Ongedaan maken\"]').click()");await sleep(120);
+ await js("document.querySelector('[aria-label=\"Ongedaan maken\"]').click()");await sleep(120);assert.equal(await js("Number(document.querySelector('[aria-label=\"Lengte fragment\"]').value)"),3);
+ await js("document.querySelector('.vt-ripple').click()");await dragClip(0,'right',40);await selectClip(1);assert.equal(await js("Number(document.querySelector('[aria-label=\"Start fragment\"]').value)"),4);
+ await js("document.querySelector('[aria-label=\"Ongedaan maken\"]').click()");await sleep(120);await js("document.querySelector('.vt-ripple').click()");
+ await dragClip(1,null,40);assert.equal(await js("Number(document.querySelector('[aria-label=\"Start fragment\"]').value)"),4);await js("document.querySelector('[aria-label=\"Ongedaan maken\"]').click()");await sleep(120);
  passes.push('Trim slepen, verplaatsen, meeschuiven en undo via echte muisinteractie');
 
  const clipGeometry=()=>js("[...document.querySelectorAll('[data-clip-id]')].map(e=>({id:e.dataset.clipId,left:e.style.left,width:e.style.width}))");
@@ -606,7 +607,7 @@ async function modelCapabilityControls(){
  await selectClip(0);await js("window.__videoEvents=[];document.querySelectorAll('.vt video').forEach((v,i)=>['seeking','seeked','waiting','playing','pause'].forEach(name=>v.addEventListener(name,()=>window.__videoEvents.push({i,name,t:Number(document.querySelector('.vt canvas').dataset.timelineTime),source:v.currentTime,ready:v.readyState}))));window.__previewSamples=[];window.__sampleTimer=setInterval(()=>{const d=document.querySelector('.vt canvas').dataset;window.__previewSamples.push({t:Number(d.timelineTime),drift:Number(d.videoDriftMs),seek:Number(d.seekMs),state:d.previewState})},20);document.querySelector('[aria-label=Afspelen]').click()");await until("Number(document.querySelector('.vt canvas').dataset.timelineTime)>3.3",'preview across cut',12000);await js("document.querySelector('[aria-label=Pauzeren]').click()");await js('clearInterval(window.__sampleTimer)');const previewSamples=await js('window.__previewSamples');const videoEvents=await js('window.__videoEvents');const rebufferCount=await js("Number(document.querySelector('.vt canvas').dataset.rebufferCount||0)");assert.equal(rebufferCount,0,'Volgende clip moet na trim/undo op het inpunt klaarstaan');passes.push('Preview speelt over de knip met los audiospoor, zonder herbuffering na trim/undo');
  await click('Exporteer film ↗');await until("document.body.innerText.includes('Film geëxporteerd:')",'native export',90000);passes.push('Export via echte UI en FFmpeg');
  await window.webContents.reload();await until("document.querySelector('input[placeholder=\"Beschrijf je video…\"]')",'generator after reload');await click('Timeline');await until("document.querySelectorAll('[data-clip-id]').length===3",'reopen');passes.push('Heropenen via Timeline bewaart montage, bron en actieve varianten');
- await selectClip(0);queue.push(join(fixtures,'source-C.mp4'));await click('Andere versie importeren');await until("document.body.innerText.includes('Varianten (2)')",'second variant');await click('Varianten (2)');await click('Gebruik deze variant');await click('Opslaan');saved=JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,id,'project.json'),'utf8'));assert.equal(saved.clips[0].activeVariantId,saved.clips[0].variants[1].id);passes.push('Variant toevoegen en expliciet actief kiezen');
+ await selectClip(0);queue.push(join(fixtures,'source-C.mp4'));await click('Andere versie importeren');await until("document.querySelector('[aria-label=\"Varianten\"] small')?.textContent==='2'",'second variant');await click('Varianten (2)');await click('Gebruik deze variant');await click('Opslaan');saved=JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,id,'project.json'),'utf8'));assert.equal(saved.clips[0].activeVariantId,saved.clips[0].variants[1].id);passes.push('Variant toevoegen en expliciet actief kiezen');
  await click('＋ Leeg blok');await until("!document.querySelector('[aria-label=Videomodel]')?.disabled && !!document.querySelector('[aria-label=Videomodel] option[value=\"bytedance/seedance-2.5\"]')",'video models available automatically');
  await generationDurationControls(id);passes.push('Schuifbalk met geldige modelduren en pijltoetsen, montage trimmen op frames, aanvraagduur en model wisselen zonder het blok te verlengen');
  queue.push(join(fixtures,'reference.png'));await click('＋ Startbeeld kiezen');await until("!!document.querySelector('.vt-reference')",'reference image');queue.push(join(fixtures,'reference.png'));await click('＋ Eindbeeld kiezen');await until("document.querySelectorAll('.vt-reference').length===2",'end image');await input('.vt textarea','Een lokaal testfragment, zonder providerverzoek.');await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'local generation');assert.equal(generated,1);passes.push('Generatieadapter en jobsnapshot vragen met start/eindbeeld 4 seconden aan voor een montageblok van 3.52 seconden (uitsluitend lokale simulator)');
