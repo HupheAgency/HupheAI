@@ -4413,6 +4413,22 @@ function setupAutoUpdater(): void {
   setInterval(() => autoUpdater.checkForUpdatesAndNotify(), 4 * 60 * 60 * 1000)
 }
 
+/** Menu accelerators swallow the keystroke before the page sees it, so the page gets the first chance (the video timeline) and text fields keep the native behaviour. */
+function editItem(action: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll', label: string, accelerator: string): Electron.MenuItemConstructorOptions {
+  return {
+    label, accelerator,
+    registerAccelerator: true,
+    click: async (_item, win) => {
+      const target = win ?? BrowserWindow.getFocusedWindow()
+      const wc = target && 'webContents' in target ? target.webContents : undefined
+      if (!wc || wc.isDestroyed()) return
+      let handled = false
+      try { handled = (await wc.executeJavaScript(`window.__hupheEdit ? window.__hupheEdit(${JSON.stringify(action)}) : false`)) === true } catch { /* native fallback */ }
+      if (!handled && !wc.isDestroyed()) wc[action]()
+    },
+  }
+}
+
 function buildApplicationMenu(): Menu {
   const name = app.getName()
   const isMac = process.platform === 'darwin'
@@ -4438,14 +4454,14 @@ function buildApplicationMenu(): Menu {
     {
       label: 'Bewerken',
       submenu: [
-        { role: 'undo' as const, label: 'Ongedaan maken' },
-        { role: 'redo' as const, label: 'Opnieuw' },
+        editItem('undo', 'Ongedaan maken', 'CmdOrCtrl+Z'),
+        editItem('redo', 'Opnieuw', 'Shift+CmdOrCtrl+Z'),
         { type: 'separator' as const },
-        { role: 'cut' as const, label: 'Knippen' },
-        { role: 'copy' as const, label: 'Kopiëren' },
-        { role: 'paste' as const, label: 'Plakken' },
+        editItem('cut', 'Knippen', 'CmdOrCtrl+X'),
+        editItem('copy', 'Kopiëren', 'CmdOrCtrl+C'),
+        editItem('paste', 'Plakken', 'CmdOrCtrl+V'),
         { role: 'pasteAndMatchStyle' as const, label: 'Plakken zonder opmaak' },
-        { role: 'selectAll' as const, label: 'Alles selecteren' },
+        editItem('selectAll', 'Alles selecteren', 'CmdOrCtrl+A'),
         ...(isMac ? [
           { type: 'separator' as const },
           {

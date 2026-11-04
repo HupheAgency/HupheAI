@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from 'react'
-import { activeMedia, clipTrackId, renderableProject, sourceSeconds, newTimelineProject, timelineTracks, timelineEnd, timelineProblems, type TimelineAsset, type TimelineClip, type TimelineGeneration, type TimelineProject, type TimelineVariant, type TimelineTrack } from '../../../shared/video-timeline'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from 'react'
+import { activeMedia, clipTrackId, renderableProject, sourceSeconds, newTimelineProject, timelineTracks, timelineEnd, timelineIssues, type TimelineAsset, type TimelineClip, type TimelineGeneration, type TimelineProject, type TimelineVariant, type TimelineTrack } from '../../../shared/video-timeline'
 import { assetClip, assetTrackKind, editSnapshot, mergeGesture, moveTrack, reorderTrack, newTrack, nearestSnap, pasteClips, placeAsset, planAssetDrop, snapSpan, snapTargets, splitClip, trackIsLocked, TIMELINE_ASSET_MIME, type TimelineDrop, type TimelineEdit } from '../components/video-timeline/timeline-editing'
 import { TimelineGenerationControls, type TimelineReferenceTarget } from '../components/video-timeline/TimelineGenerationControls'
 import { generationDurations, timelineGenerationCredits, timelineGenerationState, timelineFinalizeCredits } from '../components/video-timeline/timeline-generation'
@@ -12,7 +12,7 @@ import { TimelineEffectsControls } from '../components/video-timeline/TimelineEf
 import { Icon } from '../components/video-timeline/TimelineIcons'
 import { TimelineTooltip } from '../components/video-timeline/TimelineTooltip'
 import { TimelineRifeControls } from '../components/video-timeline/TimelineRifeControls'
-import { RIFE_MODEL, transitionCaptureIsCurrent, transitionOutputProblem, transitionPlaybackProblems, transitionSourceSignature, transitionVariantIsCurrent, validateTransitionRange } from '../../../shared/video-timeline-transition'
+import { RIFE_MODEL, transitionCaptureIsCurrent, transitionOutputProblem, transitionPlaybackIssues, transitionSourceSignature, transitionVariantIsCurrent, validateTransitionRange } from '../../../shared/video-timeline-transition'
 import { loadAtelierMediaProjects, type AtelierVideoCapability } from '../hooks/useAtelierMedia'
 import { loadModuleModels } from '../lib/atelier-module-config'
 import { supabase } from '../lib/supabase'
@@ -22,6 +22,11 @@ const api = () => (window as any).api
 const uid = () => crypto.randomUUID()
 const seconds = (n: number) => Number(n.toFixed(3))
 const timeLabel = (n: number) => `${Math.floor(n / 60).toString().padStart(2, '0')}:${(n % 60).toFixed(2).padStart(5, '0')}`
+
+const MIN_ZOOM = 6
+const MAX_ZOOM = 1000 // pixels per second: about 40 px per frame at 25 fps
+const zoomToSlider = (zoom: number) => 100 * Math.log(zoom / MIN_ZOOM) / Math.log(MAX_ZOOM / MIN_ZOOM)
+const sliderToZoom = (value: number) => Math.round(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, value / 100) * 1000) / 1000
 
 export default function VideoTimelinePage({ active = true }: { active?: boolean }) {
   const root = useRef<HTMLDivElement>(null)
@@ -37,6 +42,8 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const [position, setPosition] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [zoom, setZoom] = useState(40)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const zoomAnchor = useRef<{ time: number; offset: number } | null>(null)
   const [ripple, setRipple] = useState(false)
   const [tab, setTab] = useState<'clip' | 'generate' | 'edit' | 'variants'>('clip')
   const [group, setGroup] = useState<string[]>([])
@@ -74,7 +81,10 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const media = clip ? activeMedia(project, clip) : undefined
   const duration = timelineEnd(project) / project.fps
   const extent = Math.max(project.targetDuration, duration + 2, 10)
-  const problems = [...timelineProblems(project), ...transitionPlaybackProblems(project)]
+  const issues = [...timelineIssues(project), ...transitionPlaybackIssues(project)]
+  const problems = issues.map(issue => issue.message)
+  const badClips = new Map<string, string>()
+  for (const issue of issues) if (issue.clipId) badClips.set(issue.clipId, [badClips.get(issue.clipId), issue.message].filter(Boolean).join('\n'))
   const selectedIds = selected ? (group.includes(selected) ? group.filter(id => project.clips.some(c => c.id === id)) : [selected]) : []
   const previewProject = useMemo(() => ({ ...renderableProject(project), clips: renderableProject(project).clips.map(c => {
     const variant = c.variants.find(v => v.id === c.activeVariantId)
@@ -262,11 +272,64 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     if (next !== undefined) { setPlaying(false); setPosition(next / project.fps) }
   }
 
+  /** Zoom around a point of the scroll area (default: the playhead) so what you are looking at stays under the pointer. */
+  function zoomTo(next: number, clientX?: number) {
+    const scroll = scrollRef.current
+    const value = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next))
+    if (scroll && value !== zoom) {
+      const bounds = scroll.getBoundingClientRect()
+      const offset = clientX === undefined ? Math.min(bounds.width - 96, Math.max(0, position * zoom + 96 - scroll.scrollLeft) - 96) : clientX - bounds.left - 96
+      zoomAnchor.current = { time: (offset + scroll.scrollLeft) / zoom, offset }
+    }
+    setZoom(value)
+  }
+  useLayoutEffect(() => {
+    const anchor = zoomAnchor.current, scroll = scrollRef.current
+    zoomAnchor.current = null
+    if (anchor && scroll) scroll.scrollLeft = Math.max(0, anchor.time * zoom - anchor.offset)
+  }, [zoom])
+  const zoomRef = useRef(zoomTo)
+  zoomRef.current = zoomTo
+  const zoomValue = useRef(zoom)
+  zoomValue.current = zoom
+  useEffect(() => {
+    const scroll = scrollRef.current
+    if (!scroll) return
+    // A trackpad pinch arrives as a wheel event with ctrlKey set; it must not zoom the whole window.
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return
+      event.preventDefault()
+      zoomRef.current(zoomValue.current * Math.exp(-event.deltaY * (event.deltaMode === 1 ? 0.05 : 0.012)), event.clientX)
+    }
+    scroll.addEventListener('wheel', wheel, { passive: false })
+    return () => scroll.removeEventListener('wheel', wheel)
+  }, [])
+
   function togglePlay() {
     if (!duration) return
     if (position >= duration) setPosition(0)
     setPlaying(!playing)
   }
+
+  /** The application menu forwards ⌘Z/⇧⌘Z/⌘X/⌘C/⌘V/⌘A here first; returning false leaves the native behaviour (text fields) alone. */
+  const menuEdit = useRef<(action: string) => boolean>(() => false)
+  menuEdit.current = action => {
+    if (!active) return false
+    const target = document.activeElement
+    if (target instanceof HTMLElement && (target.isContentEditable || target.closest('input, textarea, select, [role="textbox"]'))) return false
+    if (action === 'undo' || action === 'redo') { undo(action === 'redo'); return true }
+    if (action === 'copy') { if (!selectedIds.length) return false; copySelected(); return true }
+    if (action === 'cut') { if (!selectedIds.length || !copySelected()) return false; deleteSelectedClip(); return true }
+    if (action === 'paste') { if (!clipboard.current.length) return false; pasteClipboard(); return true }
+    if (action === 'selectAll') { const ids = project.clips.map(c => c.id); if (!ids.length) return false; setGroup(ids); setSelected(ids[0]); return true }
+    return false
+  }
+  useEffect(() => {
+    const w = window as unknown as { __hupheEdit?: (action: string) => boolean }
+    const handler = (action: string) => menuEdit.current(action)
+    w.__hupheEdit = handler
+    return () => { if (w.__hupheEdit === handler) delete w.__hupheEdit }
+  }, [])
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (!active || event.defaultPrevented || event.nativeEvent.isComposing) return
@@ -982,8 +1045,8 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
         <button className="vt-icon" aria-label="Ongedaan maken" title="Ongedaan maken (⌘Z)" disabled={!!busy || !!generating || !history.current.undo.length} onClick={() => undo()}><Icon name="undo" /></button>
         <button className="vt-icon" aria-label="Opnieuw" title="Opnieuw (⇧⌘Z)" disabled={!!busy || !!generating || !history.current.redo.length} onClick={() => undo(true)}><Icon name="redo" /></button>
         <button className={`vt-icon vt-ripple${ripple ? ' on' : ''}`} aria-label="Volgende blokken meeschuiven" aria-pressed={ripple} title={ripple ? 'Volgende blokken schuiven mee: aan' : 'Volgende blokken schuiven mee: uit'} onClick={() => setRipple(!ripple)}><Icon name="ripple" /></button>
-        <span className="vt-spacer" /><span className="vt-zoom" title="Zoom"><Icon name="zoom" size={14} /><input aria-label="Tijdlijnzoom" type="range" min="12" max="100" value={zoom} onChange={e => setZoom(Number(e.target.value))} /></span></div>
-      <div className="vt-scroll"><div className="vt-tracks" style={{ width: Math.max(650, extent * zoom + 96) }}>
+        <span className="vt-spacer" /><span className="vt-zoom" title="Zoom"><Icon name="zoom" size={14} /><input aria-label="Tijdlijnzoom" type="range" min="0" max="100" step="any" data-zoom={zoom} value={zoomToSlider(zoom)} onChange={e => zoomTo(sliderToZoom(Number(e.target.value)))} /></span></div>
+      <div className="vt-scroll" ref={scrollRef}><div className="vt-tracks" style={{ width: Math.max(650, extent * zoom + 96), ['--vt-frame' as string]: `${zoom / project.fps}px` }} data-frames={zoom / project.fps >= 6 ? 'on' : undefined}>
         <TimelineScrubber position={position} duration={duration} extent={extent} zoom={zoom} fps={project.fps} onSeek={next => { setPlaying(false); setPosition(next) }} />
         {visibleTracks.map(track => <div className={`vt-track ${track.kind}${trackDrag?.id === track.id ? ' dragging' : ''}${trackDrag?.over === track.id && trackDropOk(track.id) ? ' drop-target' : ''}`} key={`${project.id}:${track.id}`}>
           <div className={`vt-track-heading ${selectedTrack === track.id ? 'active' : ''}`} draggable={!busy && renaming !== track.id} title={track.kind === 'video' ? 'Sleep om dit videospoor te verplaatsen' : 'Sleep om dit audiospoor te verplaatsen'}
@@ -1012,7 +1075,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
           <TimelineLane track={track.kind} trackId={track.id} clips={project.clips} fps={project.fps} zoom={zoom} disabled={!active || !!busy}
             onDrawStart={() => { setPlaying(false); setSelectedTrack(track.id); root.current?.focus({ preventScroll: true }) }} onCreate={range => addEmpty(range, track.id)} onDeselect={() => { setSelected(undefined); setSelectedTrack(track.id) }}
             onDragOver={e => assetDrop(e, track)} onDragLeave={leaveAssetDrop} onDrop={e => assetDrop(e, track, true)}>
-            {project.clips.filter(c => clipTrackId(c) === track.id).map(c => { const a = activeMedia(project, c); return <div role="button" tabIndex={0} aria-label={`${c.label}, ${seconds(c.duration / project.fps)} seconden`} data-clip-id={c.id} data-transition-kind={c.transition?.kind} key={c.id} className={`vt-block ${c.transition ? 'vt-rife-block' : ''} ${selectedIds.includes(c.id) ? 'selected' : ''} ${trackIsLocked(project, c) ? 'locked' : ''} ${!a.asset ? 'empty' : ''}`} style={{ left: c.start / project.fps * zoom, width: Math.max(6, c.duration / project.fps * zoom) }} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter') { setPlaying(false); setSelected(c.id); setSelectedTrack(track.id); setPosition(c.start / project.fps) } }} onPointerDown={e => pointerDown(e, c, 'move')}><TimelineBlockDecor project={project} clip={c} asset={a.asset} inPoint={a.variant?.inPoint ?? 0} width={c.duration / project.fps * zoom} /><div className="vt-handle left" aria-label="Begin trimmen" onPointerDown={e => pointerDown(e, c, 'left')} /><b>{generating === c.id ? '◌ ' : ''}{c.label}</b><span>{seconds(c.duration / project.fps)} s{c.variants.length > 1 ? ` · ${c.variants.length} varianten` : ''}</span><div className="vt-handle right" aria-label="Einde trimmen" onPointerDown={e => pointerDown(e, c, 'right')} /></div> })}
+            {project.clips.filter(c => clipTrackId(c) === track.id).map(c => { const a = activeMedia(project, c); return <div role="button" tabIndex={0} aria-label={`${c.label}, ${seconds(c.duration / project.fps)} seconden`} data-clip-id={c.id} data-transition-kind={c.transition?.kind} key={c.id} className={`vt-block ${c.transition ? 'vt-rife-block' : ''} ${selectedIds.includes(c.id) ? 'selected' : ''} ${trackIsLocked(project, c) ? 'locked' : ''} ${!a.asset ? 'empty' : ''} ${badClips.has(c.id) ? 'invalid' : ''}`} title={badClips.get(c.id)} style={{ left: c.start / project.fps * zoom, width: Math.max(6, c.duration / project.fps * zoom) }} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter') { setPlaying(false); setSelected(c.id); setSelectedTrack(track.id); setPosition(c.start / project.fps) } }} onPointerDown={e => pointerDown(e, c, 'move')}><TimelineBlockDecor project={project} clip={c} asset={a.asset} inPoint={a.variant?.inPoint ?? 0} width={c.duration / project.fps * zoom} /><div className="vt-handle left" aria-label="Begin trimmen" onPointerDown={e => pointerDown(e, c, 'left')} /><b>{generating === c.id ? '◌ ' : ''}{c.label}</b><span>{seconds(c.duration / project.fps)} s{c.variants.length > 1 ? ` · ${c.variants.length} varianten` : ''}</span><div className="vt-handle right" aria-label="Einde trimmen" onPointerDown={e => pointerDown(e, c, 'right')} /></div> })}
             {dropPreview?.trackId === track.id && <div className={`vt-drop-preview ${dropPreview.valid ? '' : 'invalid'}`} style={{ left: dropPreview.start / project.fps * zoom, width: Math.max(6, dropPreview.duration / project.fps * zoom) }}><b>{!dropPreview.valid ? 'Geen vrije ruimte' : dropPreview.insert ? 'Invoegen · volgende schuiven mee' : 'Hier plaatsen'}</b><span>{seconds(dropPreview.start / project.fps)} s · {seconds(dropPreview.duration / project.fps)} s</span></div>}
           </TimelineLane>
         </div>)}

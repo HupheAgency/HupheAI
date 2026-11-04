@@ -37,7 +37,7 @@ async function drawEmptyBlocks() {
  const count=()=>js("document.querySelectorAll('[data-clip-id]').length");
  const geometry=()=>js("[...document.querySelectorAll('[data-clip-id]')].map(e=>({id:e.dataset.clipId,left:e.style.left,width:e.style.width}))");
  const history=async redo=>{await js(`document.querySelector('[aria-label="${redo ? 'Opnieuw' : 'Ongedaan maken'}"]').click()`);await sleep(120);};
- const point=async seconds=>js(`(()=>{const r=document.querySelector('.vt-lane[data-track="video"]').getBoundingClientRect();return {x:Math.round(r.left+${seconds}*Number(document.querySelector('[aria-label="Tijdlijnzoom"]').value)),y:Math.round(r.top+r.height/2)}})()`);
+ const point=async seconds=>js(`(()=>{const r=document.querySelector('.vt-lane[data-track="video"]').getBoundingClientRect();return {x:Math.round(r.left+${seconds}*Number(document.querySelector('[aria-label="Tijdlijnzoom"]').dataset.zoom)),y:Math.round(r.top+r.height/2)}})()`);
  const begin=async(from,to)=>{
   await click('⏮'); // Keep the separate playhead drag handle away from the drawing gesture.
   const start=await point(from),end=await point(to);
@@ -50,7 +50,7 @@ async function drawEmptyBlocks() {
   await until("!!document.querySelector('[data-clip-id].selected') && !document.querySelector('.vt-block-draft')",'newly drawn block selected');
   assert.equal(await js("document.querySelector('.vt-tabs button.active').getAttribute('aria-label')"),'Genereren','Na tekenen staat direct de generatiezijbalk klaar');
   assert.match(await js("document.querySelector('[data-testid=timeline-block-duration]').textContent"),new RegExp(`\\b${String(duration).replace('.', '[.,]')}\\s*s\\b`),'De generatiezijbalk toont de getekende montageduur apart');
-  const actual=await js("(()=>{const el=document.querySelector('[data-clip-id].selected'),zoom=Number(document.querySelector('[aria-label=\"Tijdlijnzoom\"]').value);return {start:parseFloat(el.style.left)/zoom,duration:parseFloat(el.style.width)/zoom}})()");
+  const actual=await js("(()=>{const el=document.querySelector('[data-clip-id].selected'),zoom=Number(document.querySelector('[aria-label=\"Tijdlijnzoom\"]').dataset.zoom);return {start:parseFloat(el.style.left)/zoom,duration:parseFloat(el.style.width)/zoom}})()");
   assert.deepEqual(actual,{start,duration},'Getekend blok gebruikt de gekozen begin- en eindtijd');
  };
  assert.equal(await count(),0);
@@ -77,9 +77,9 @@ async function drawEmptyBlocks() {
  await history(false);await history(false);assert.equal(await count(),0);
  end=await begin(8,12);assert.equal(await js("!!document.querySelector('.vt-block-draft')"),true,'Annuleren wordt tijdens een actief tekengebaar getest');window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'});window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'});await release(end);
  assert.equal(await count(),0,'Escape annuleert het getekende voorstel');assert.equal(await js("!!document.querySelector('.vt-block-draft')"),false);
- await input('[aria-label="Tijdlijnzoom"]',80);await js("document.querySelector('.vt-scroll').scrollLeft=160");await sleep(100);assert.equal(await js("document.querySelector('.vt-scroll').scrollLeft"),160);
+ await input('[aria-label="Tijdlijnzoom"]',100*Math.log(80/6)/Math.log(1000/6));await js("document.querySelector('.vt-scroll').scrollLeft=160");await sleep(100);assert.equal(await js("document.querySelector('.vt-scroll').scrollLeft"),160);
  end=await begin(8,12);await release(end);await selected(8,4);await history(false);
- await input('[aria-label="Tijdlijnzoom"]',40);await js("document.querySelector('.vt-scroll').scrollLeft=0");await sleep(100);
+ await input('[aria-label="Tijdlijnzoom"]',100*Math.log(40/6)/Math.log(1000/6));await js("document.querySelector('.vt-scroll').scrollLeft=0");await sleep(100);
  end=await begin(8,12);await release(end);const existing=(await geometry())[0];
  end=await begin(6,14);await release(end);await selected(6,2);
  assert.deepEqual((await geometry()).find(e=>e.id===existing.id),existing,'Een bestaand blok blijft staan als de tekening zijn grens raakt');await history(false);
@@ -88,7 +88,7 @@ async function drawEmptyBlocks() {
  assert.equal(await count(),0,'De tekentest laat een lege montage achter');await click('⏮');
 }
 async function scrub(startSeconds,endSeconds,fromPlayhead=false) {
- const points=await js(`(()=>{const ruler=document.querySelector('.vt-ruler').getBoundingClientRect();const zoom=Number(document.querySelector('[aria-label="Tijdlijnzoom"]').value);const head=document.querySelector('.vt-playhead').getBoundingClientRect();return {start:{x:Math.round(${fromPlayhead} ? head.x+head.width/2 : ruler.left+${startSeconds}*zoom),y:Math.round(${fromPlayhead} ? ruler.bottom+30 : ruler.top+ruler.height/2)},end:{x:Math.round(ruler.left+${endSeconds}*zoom),y:Math.round(ruler.bottom+95)}}})()`);
+ const points=await js(`(()=>{const ruler=document.querySelector('.vt-ruler').getBoundingClientRect();const zoom=Number(document.querySelector('[aria-label="Tijdlijnzoom"]').dataset.zoom);const head=document.querySelector('.vt-playhead').getBoundingClientRect();return {start:{x:Math.round(${fromPlayhead} ? head.x+head.width/2 : ruler.left+${startSeconds}*zoom),y:Math.round(${fromPlayhead} ? ruler.bottom+30 : ruler.top+ruler.height/2)},end:{x:Math.round(ruler.left+${endSeconds}*zoom),y:Math.round(ruler.bottom+95)}}})()`);
  window.webContents.sendInputEvent({type:'mouseMove',...points.start});
  window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...points.start});
  for(let i=1;i<=6;i++){window.webContents.sendInputEvent({type:'mouseMove',x:Math.round(points.start.x+(points.end.x-points.start.x)*i/6),y:Math.round(points.start.y+(points.end.y-points.start.y)*i/6),modifiers:['leftbuttondown']});await sleep(35)}
@@ -115,7 +115,7 @@ async function rapidScrubPixels() {
   let barcode=0;for(let bit=0;bit<16;bit++){if(strip[Math.floor((bit+0.5)*width/16)*4]>128)barcode|=1<<bit;}
   samples.push({t:Date.now(),rgb:[pixel[2],pixel[1],pixel[0],pixel[3]],source:barcode>>8,frame:barcode&255});
  });
- const points=await js(`(()=>{const ruler=document.querySelector('.vt-ruler').getBoundingClientRect();const zoom=Number(document.querySelector('[aria-label="Tijdlijnzoom"]').value);return {left:ruler.left,zoom,y:Math.round(ruler.top+ruler.height/2)}})()`);
+ const points=await js(`(()=>{const ruler=document.querySelector('.vt-ruler').getBoundingClientRect();const zoom=Number(document.querySelector('[aria-label="Tijdlijnzoom"]').dataset.zoom);return {left:ruler.left,zoom,y:Math.round(ruler.top+ruler.height/2)}})()`);
  const pointer=seconds=>({x:Math.round(points.left+seconds*points.zoom),y:points.y});
  const start=pointer(1.2);
  window.webContents.sendInputEvent({type:'mouseMove',...start});
@@ -264,7 +264,7 @@ async function generationSettingsParity(projectId,clipId) {
 }
 async function assertEmptyGapClearsPreview() {
  await selectClip(1);await input('[aria-label="Start fragment"]',4);
- const point=await js("(()=>{const r=document.querySelector('.vt-ruler').getBoundingClientRect();return {x:Math.round(r.left+3.4*Number(document.querySelector('[aria-label=\"Tijdlijnzoom\"]').value)),y:Math.round(r.top+r.height/2)}})()");
+ const point=await js("(()=>{const r=document.querySelector('.vt-ruler').getBoundingClientRect();return {x:Math.round(r.left+3.4*Number(document.querySelector('[aria-label=\"Tijdlijnzoom\"]').dataset.zoom)),y:Math.round(r.top+r.height/2)}})()");
  window.webContents.sendInputEvent({type:'mouseMove',...point});window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...point});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...point});
  await until("Math.abs(Number(document.querySelector('.vt canvas').dataset.timelineTime)-3.4)<0.001 && document.querySelector('.vt canvas').dataset.mediaTime===''",'seek to empty interval');
  await sleep(200); // A late seek/decode completion must not repaint the previous clip here.
@@ -286,7 +286,7 @@ async function multitrackEditing() {
    const source=document.querySelector('[data-asset-id="${assetId}"]'),target=document.querySelector(${JSON.stringify(selector)}),dataTransfer=new DataTransfer();
    if(!source.draggable)throw Error('Projectmedia card is not draggable');target.scrollIntoView({block:'nearest'});
    source.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer}));
-   const r=target.getBoundingClientRect(),x=${fresh?'r.left+r.width/2':`r.left+${seconds}*Number(document.querySelector('[aria-label=Tijdlijnzoom]').value)`},y=r.top+r.height/2;
+   const r=target.getBoundingClientRect(),x=${fresh?'r.left+r.width/2':`r.left+${seconds}*Number(document.querySelector('[aria-label=Tijdlijnzoom]').dataset.zoom)`},y=r.top+r.height/2;
    target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer,clientX:x,clientY:y}));
    window.__dropFixture={source,target,dataTransfer,x,y};return dataTransfer.getData('application/x-huphe-timeline-asset');
   })()`);
@@ -424,7 +424,7 @@ async function scrubAdditionalSource(file) {
  queue.push(resolve(file));await click('＋ Video toevoegen');
  await until("document.querySelectorAll('[data-clip-id]').length===1 && document.querySelector('.vt canvas').dataset.mediaTime!==''",'diagnostic source imported');
  await sleep(200);
- const layout=await js("(()=>{const c=document.querySelector('.vt canvas').getBoundingClientRect();const r=document.querySelector('.vt-ruler').getBoundingClientRect();return {canvas:{x:c.x,y:c.y,width:c.width,height:c.height},viewportWidth:innerWidth,left:r.left,zoom:Number(document.querySelector('[aria-label=\"Tijdlijnzoom\"]').value),y:Math.round(r.top+r.height/2)}})()");
+ const layout=await js("(()=>{const c=document.querySelector('.vt canvas').getBoundingClientRect();const r=document.querySelector('.vt-ruler').getBoundingClientRect();return {canvas:{x:c.x,y:c.y,width:c.width,height:c.height},viewportWidth:innerWidth,left:r.left,zoom:Number(document.querySelector('[aria-label=\"Tijdlijnzoom\"]').dataset.zoom),y:Math.round(r.top+r.height/2)}})()");
  const samples=[];
  window.webContents.beginFrameSubscription(false,image=>{
   const scale=image.getSize().width/layout.viewportWidth,c=layout.canvas;
@@ -587,15 +587,28 @@ async function modelCapabilityControls(){
  const beforeScrub=await clipGeometry();await click('⏮');await click('▶');await until("document.querySelector('.vt canvas').dataset.previewState==='playing'",'play before scrubbing');
  await scrub(0.8,4.2);await scrub(4.2,2.28,true);
  assert.deepEqual(await clipGeometry(),beforeScrub,'De afspeellijn sleept geen fragmenten mee');
- await input('[aria-label="Tijdlijnzoom"]',80);await js("document.querySelector('.vt-scroll').scrollLeft=120");await sleep(100);
+ await input('[aria-label="Tijdlijnzoom"]',100*Math.log(80/6)/Math.log(1000/6));await js("document.querySelector('.vt-scroll').scrollLeft=120");await sleep(100);
  assert.equal(await js("document.querySelector('.vt-scroll').scrollLeft"),120,'De horizontaal verschoven tijdlijn wordt werkelijk getest');
  await scrub(3.2,4.4);
+ {
+  const zoomNow=()=>js("Number(document.querySelector('[aria-label=\"Tijdlijnzoom\"]').dataset.zoom)");
+  const pinch=async dy=>{await js(`(()=>{const e=new WheelEvent('wheel',{ctrlKey:true,deltaY:${dy},clientX:420,clientY:360,bubbles:true,cancelable:true});window.__pinchPrevented=!document.querySelector('.vt-scroll').dispatchEvent(e)})()`);await sleep(60);};
+  const before=await zoomNow();await pinch(-150);
+  assert.ok(await zoomNow()>before,'Pinch naar buiten zoomt in');assert.equal(await js('window.__pinchPrevented'),true,'Pinch zoomt niet het hele venster');
+  for(let i=0;i<12;i++)await pinch(-150);
+  assert.ok(await zoomNow()>=500,'Verder inzoomen komt op beeldniveau');
+  assert.ok(await js("[...document.querySelectorAll('.vt-ruler>span')].some(e=>/\\d+f$/.test(e.textContent))"),'Ingezoomd toont de liniaal losse frames');
+  for(let i=0;i<30;i++)await pinch(150);
+  assert.ok(await zoomNow()<=before,'Pinch naar binnen zoomt weer uit');
+  await input('[aria-label="Tijdlijnzoom"]',100*Math.log(80/6)/Math.log(1000/6));await js("document.querySelector('.vt-scroll').scrollLeft=120");await sleep(100);
+  passes.push('Pinch-zoom op de tijdlijn: van seconden tot losse frames en terug');
+ }
  await js("document.querySelector('.vt-playhead').focus()");
  for(const [key,expected] of [['Right',4.44],['Left',4.4]]){
   window.webContents.sendInputEvent({type:'keyDown',keyCode:key});window.webContents.sendInputEvent({type:'keyUp',keyCode:key});
   await until(`Math.abs(Number(document.querySelector('.vt-playhead').getAttribute('aria-valuenow'))-${expected})<0.001`,'one-frame keyboard seek');
  }
- await input('[aria-label="Tijdlijnzoom"]',40);await js("document.querySelector('.vt-scroll').scrollLeft=0");await click('⏮');
+ await input('[aria-label="Tijdlijnzoom"]',100*Math.log(40/6)/Math.log(1000/6));await js("document.querySelector('.vt-scroll').scrollLeft=0");await click('⏮');
  assert.deepEqual(await clipGeometry(),beforeScrub,'Scrubben, zoomen en pijltoetsen veranderen geen fragmenten');
  passes.push('Afspeellijn en liniaal slepen met live preview, achteruit over de knip, loslaten buiten de liniaal, horizontaal scrollen en één frame per pijltoets');
 

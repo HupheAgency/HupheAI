@@ -185,26 +185,33 @@ export function newTimelineProject(name = 'Nieuwe film'): TimelineProject {
     tracks: [{ id: 'video-1', kind: 'video', name: 'Video 1' }, { id: 'audio-1', kind: 'audio', name: 'Audio 1' }] }
 }
 
-export function timelineProblems(project: TimelineProject): string[] {
-  const errors: string[] = []
+export interface TimelineIssue { clipId?: string; message: string }
+
+/** Every reason the timeline cannot be exported, with the blocks that cause it so the editor can mark them. */
+export function timelineIssues(project: TimelineProject): TimelineIssue[] {
+  const errors: TimelineIssue[] = []
   const tracks = timelineTracks(project)
   for (const clip of project.clips) {
     const track = tracks.find(t => t.id === clipTrackId(clip))
-    if (!track || track.kind !== clip.track) errors.push(`${clip.label}: het gekozen spoor bestaat niet of heeft een ander type.`)
+    if (!track || track.kind !== clip.track) errors.push({ clipId: clip.id, message: `${clip.label}: het gekozen spoor bestaat niet of heeft een ander type.` })
   }
   for (const track of tracks) {
     const clips = project.clips.filter(c => clipTrackId(c) === track.id).sort((a, b) => a.start - b.start)
     clips.forEach((clip, i) => {
       const { asset, variant } = activeMedia(project, clip)
-      if (!asset || !variant) errors.push(`${clip.label}: kies eerst een variant.`)
+      if (!asset || !variant) errors.push({ clipId: clip.id, message: `${clip.label}: kies eerst een variant.` })
       else if (asset.kind !== clip.track && !(clip.track === 'video' && asset.kind === 'image'))
-        errors.push(`${clip.label}: het gekozen bestand past niet op dit spoor.`)
+        errors.push({ clipId: clip.id, message: `${clip.label}: het gekozen bestand past niet op dit spoor.` })
       else if (asset.kind === 'image' ? variant.inPoint !== 0 : variant.inPoint < 0 || variant.inPoint + sourceSeconds(clip, clip.duration, project.fps) > asset.duration + 0.00001)
-        errors.push(`${clip.label}: de uitsnede is langer dan de bron.`)
-      if (i && clips[i - 1].start + clips[i - 1].duration > clip.start)
-        errors.push(`${clip.label}: overlap op spoor ${track.name}.`)
+        errors.push({ clipId: clip.id, message: `${clip.label}: de uitsnede is langer dan de bron.` })
+      if (i && clips[i - 1].start + clips[i - 1].duration > clip.start) {
+        errors.push({ clipId: clip.id, message: `${clip.label}: overlap op spoor ${track.name}.` })
+        errors.push({ clipId: clips[i - 1].id, message: `${clips[i - 1].label}: overlap op spoor ${track.name}.` })
+      }
     })
   }
-  if (!project.clips.some(c => c.track === 'video')) errors.push('Plaats eerst een videofragment.')
+  if (!project.clips.some(c => c.track === 'video')) errors.push({ message: 'Plaats eerst een videofragment.' })
   return errors
 }
+
+export const timelineProblems = (project: TimelineProject): string[] => timelineIssues(project).map(issue => issue.message)

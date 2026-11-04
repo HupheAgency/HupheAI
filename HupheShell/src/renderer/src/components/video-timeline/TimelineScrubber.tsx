@@ -1,5 +1,20 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react'
 
+/** Label steps in frames, from whole minutes down to single frames, so zooming in goes from seconds to frames. */
+const RULER_STEPS = [1, 2, 5, 10, 25, 50, 125, 250, 750, 1500, 3000]
+
+export function rulerTicks(extent: number, zoom: number, fps: number): { frame: number; label: string }[] {
+  const perFrame = zoom / fps
+  const unit = fps / 25
+  const step = Math.max(1, Math.round(RULER_STEPS.map(n => n * unit).find(n => n * perFrame >= 64) ?? RULER_STEPS[RULER_STEPS.length - 1] * unit))
+  const out: { frame: number; label: string }[] = []
+  for (let frame = 0; frame <= extent * fps; frame += step) {
+    const whole = Math.floor(frame / fps), rest = frame - whole * fps
+    out.push({ frame, label: rest === 0 ? `${whole}s` : step < fps ? `${whole}s ${rest}f` : `${(frame / fps).toFixed(1)}s` })
+  }
+  return out
+}
+
 interface TimelineScrubberProps {
   position: number
   duration: number
@@ -93,7 +108,7 @@ export function TimelineScrubber({ position, duration, extent, zoom, fps, onSeek
 
   return <>
     <div ref={ruler} className={`vt-ruler${scrubbing ? ' scrubbing' : ''}`} style={{ marginLeft: 96 }} {...pointerHandlers}>
-      {Array.from({ length: Math.ceil(extent) + 1 }, (_, i) => i % (zoom < 25 ? 5 : 1) === 0 && <span key={i} style={{ left: i * zoom }}>{i}s</span>)}
+      {rulerTicks(extent, zoom, fps).map(({ frame, label }) => <span key={frame} style={{ left: frame / fps * zoom }}>{label}</span>)}
     </div>
     <div className={`vt-playhead${scrubbing ? ' scrubbing' : ''}`} style={{ left: 96 + position * zoom }}
       role="slider" tabIndex={0} aria-label="Afspeelpositie" aria-orientation="horizontal"

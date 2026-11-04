@@ -71,7 +71,7 @@ async function prepareProject() {
 
 async function drawEmpty(trackId: string, from: number, to: number) {
   await click('⏮') // Keep the playhead handle outside the drawing gesture.
-  const points = await js(`(()=>{const lane=document.querySelector('.vt-lane[data-track-id=${JSON.stringify(trackId)}]');lane.scrollIntoView({block:'nearest'});const r=lane.getBoundingClientRect(),zoom=Number(document.querySelector('[aria-label="Tijdlijnzoom"]').value);return{start:{x:Math.round(r.left+${from}*zoom),y:Math.round(r.top+r.height/2)},end:{x:Math.round(r.left+${to}*zoom),y:Math.round(r.top+r.height/2)}}})()`)
+  const points = await js(`(()=>{const lane=document.querySelector('.vt-lane[data-track-id=${JSON.stringify(trackId)}]');lane.scrollIntoView({block:'nearest'});const r=lane.getBoundingClientRect(),zoom=Number(document.querySelector('[aria-label="Tijdlijnzoom"]').dataset.zoom);return{start:{x:Math.round(r.left+${from}*zoom),y:Math.round(r.top+r.height/2)},end:{x:Math.round(r.left+${to}*zoom),y:Math.round(r.top+r.height/2)}}})()`)
   assert.equal(await js(`!!document.elementFromPoint(${points.start.x},${points.start.y}).closest('[data-clip-id]')`), false, 'drawing begins on the empty upper track')
   assert.equal(await js(`!!document.elementFromPoint(${points.end.x},${points.end.y}).closest('[data-clip-id]')`), false, 'drawing ends on the empty upper track')
   window.webContents.sendInputEvent({ type: 'mouseMove', ...points.start })
@@ -122,7 +122,7 @@ async function rifeFrameControls(project: TimelineProject, id: string): Promise<
     await sleep(120)
   }
   const geometry = async (frames: number) => {
-    const actual = await js(`(()=>{const e=document.querySelector('[data-clip-id=${JSON.stringify(id)}]'),zoom=Number(document.querySelector('[aria-label="Tijdlijnzoom"]').value);return {left:parseFloat(e.style.left),width:parseFloat(e.style.width),zoom,frames:Number(document.querySelector(${JSON.stringify(selector)}).value)}})()`)
+    const actual = await js(`(()=>{const e=document.querySelector('[data-clip-id=${JSON.stringify(id)}]'),zoom=Number(document.querySelector('[aria-label="Tijdlijnzoom"]').dataset.zoom);return {left:parseFloat(e.style.left),width:parseFloat(e.style.width),zoom,frames:Number(document.querySelector(${JSON.stringify(selector)}).value)}})()`)
     assert.equal(actual.frames, frames)
     assert.equal(actual.left, original.start / project.fps * actual.zoom, 'changing frame count preserves the left edge')
     assert.equal(actual.width, Math.max(6, frames / project.fps * actual.zoom), 'timeline width follows the slider immediately')

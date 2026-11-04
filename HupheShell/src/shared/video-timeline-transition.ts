@@ -116,7 +116,7 @@ export function transitionOutputProblem(project: TimelineProject, clip: Timeline
     return 'De gemaakte overgang heeft een ander aantal frames dan de balk. Het resultaat blijft bewaard bij Varianten.'
 }
 
-export function transitionPlaybackProblems(project: TimelineProject): string[] {
+export function transitionPlaybackIssues(project: TimelineProject): { clipId: string; message: string }[] {
   return project.clips.flatMap(clip => {
     const variant = clip.variants.find(item => item.id === clip.activeVariantId)
     // Changing the model prepares the next job; active variants retain their own provenance.
@@ -129,6 +129,8 @@ export function transitionPlaybackProblems(project: TimelineProject): string[] {
       const outputProblem = transitionOutputProblem(project, clip, variant)
       if (outputProblem) errors.push(`${clip.label}: ${outputProblem}`)
     }
-    return errors
+    return errors.map(message => ({ clipId: clip.id, message }))
   })
 }
+
+export const transitionPlaybackProblems = (project: TimelineProject): string[] => transitionPlaybackIssues(project).map(issue => issue.message)
