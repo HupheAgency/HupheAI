@@ -118,3 +118,16 @@
 .vt .vt-time-input:hover{border-color:rgba(255,255,255,.14)}
 .vt-strip{position:absolute;inset:0;display:flex;pointer-events:none;opacity:.55}
 .vt-strip img{flex:1 1 0;min-width:0;height:100%;object-fit:cover;display:block}
+
+.vt-versions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.vt-versions>span{font-size:10px;color:rgba(255,255,255,.45);margin-right:2px}
+.vt .vt-versions button{position:relative;width:52px;height:34px;padding:0;overflow:hidden;border-radius:8px;background:#0f0f0f}
+.vt .vt-versions button.on{border-color:#facc15;box-shadow:0 0 0 1px #facc15}
+.vt-versions img,.vt-versions video{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
+.vt-versions i{position:absolute;left:3px;bottom:2px;font:600 9px/1 -apple-system,sans-serif;color:#fff;text-shadow:0 0 3px #000}
+
+.vt-menu-backdrop{position:fixed;inset:0;z-index:50}
+.vt-menu{position:fixed;min-width:210px;padding:6px;border-radius:14px;background:#1c1c1c;border:1px solid rgba(255,255,255,.1);box-shadow:0 12px 32px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:2px}
+.vt .vt-menu button{text-align:left;border:0;background:transparent;border-radius:9px;padding:8px 10px;white-space:normal}
+.vt .vt-menu button:hover:not(:disabled){background:#262626}
+.vt-more>summary{cursor:pointer;color:rgba(255,255,255,.6)}

@@ -23,7 +23,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const js=code=>window.webContents.executeJavaScript(code,true).catch(e=>{console.error("JS-FOUT in:",String(code).slice(0,260));throw e;});
 async function until(code,label,timeout=15000){const start=Date.now();while(Date.now()-start<timeout){if(await js(code))return;await sleep(70)}throw Error('Timeout: '+label+' '+await js('document.body.innerText.slice(0,1800)'));}
 const LABELS={'⏮':'Naar begin','▶':'Afspelen','＋ Videospoor':'Videospoor toevoegen','＋ Audiospoor':'Audiospoor toevoegen','＋ Leeg blok':'Leeg blok','＋ Video toevoegen':'Video toevoegen','♫ Audio toevoegen':'Audio toevoegen','＋ Afbeelding toevoegen':'Afbeelding toevoegen','Nieuw':'Nieuw project','Exporteer film ↗':'Film exporteren'};
-async function click(text){let scope='';if(text.includes(' › ')){[scope,text]=text.split(' › ')}text=LABELS[text]||text.replace(/^Varianten \(\d+\)$/,'Varianten');const pos=await js(`(()=>{const el=[...document.querySelectorAll(${JSON.stringify(scope?`[aria-label="${scope}"] button`:'button')})].find(e=>(e.textContent.trim()===${JSON.stringify(text)}||e.getAttribute('aria-label')===${JSON.stringify(text)})&&e.getClientRects().length);if(!el)throw Error('Button missing '+${JSON.stringify(text)});if(el.disabled)throw Error('Button disabled '+${JSON.stringify(text)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...pos});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...pos});await sleep(150);}
+async function click(text){await js("document.querySelectorAll('.vt-more').forEach(d=>d.open=true)");let scope='';if(text.includes(' › ')){[scope,text]=text.split(' › ')}text=LABELS[text]||text.replace(/^Varianten \(\d+\)$/,'Varianten');const pos=await js(`(()=>{const el=[...document.querySelectorAll(${JSON.stringify(scope?`[aria-label="${scope}"] button`:'button')})].find(e=>(e.textContent.trim()===${JSON.stringify(text)}||e.getAttribute('aria-label')===${JSON.stringify(text)})&&e.getClientRects().length);if(!el)throw Error('Button missing '+${JSON.stringify(text)});if(el.disabled)throw Error('Button disabled '+${JSON.stringify(text)});el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...pos});window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...pos});await sleep(150);}
 async function input(selector,value){await js(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw Error('Input missing '+${JSON.stringify(selector)});const proto=el instanceof HTMLSelectElement?HTMLSelectElement.prototype:el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,${JSON.stringify(String(value))});el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));})()`);await sleep(120);}
 async function selectClip(index){await js(`(()=>{const el=document.querySelectorAll('[data-clip-id]')[${index}];el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));})()`);await click('Fragment');}
 async function dragClip(index, handle, pixels) {
@@ -191,7 +191,7 @@ async function legacyGenerationDuration(projectId,clipId) {
  await until("!document.querySelector('[aria-label=Videomodel]')?.disabled",'legacy capabilities loaded');
  assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').getAttribute('aria-valuetext')"),'Kies een generatieduur','Een oude ongeldige duur vraagt om een expliciete nieuwe keuze');
  assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').getAttribute('aria-invalid')"),'true','De schuifbalk markeert de oude aanvraag als ongeldig');
- assert.equal(await js("[...document.querySelectorAll('.vt button')].find(e=>e.textContent.trim()==='Genereer nieuwe variant').disabled"),true,'Een ongeldige oude duur kan niet ongemerkt worden verstuurd');
+ assert.equal(await js("[...document.querySelectorAll('.vt button')].find(e=>e.textContent.trim()==='Genereer').disabled"),true,'Een ongeldige oude duur kan niet ongemerkt worden verstuurd');
  assert.equal(JSON.parse(await readFile(path,'utf8')).clips.find(c=>c.id===clipId).generation.requestedDuration,3.52,'Heropenen vervangt de oude aanvraagduur niet stilzwijgend');
  await generationDurationKey('Home');
  assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').getAttribute('aria-valuetext')"),'4 seconden','Ook de eerste schuifpositie kan expliciet gekozen worden wanneer de knop daar al staat');
@@ -224,18 +224,18 @@ async function generationSettingsParity(projectId,clipId) {
  await input('[aria-label="Bitrate"]','high');await input('[aria-label="Codec"]','H265');
  expectedGenerationSettings={duration:4,resolution:'480p',generateAudio:true,draft:true,bitrateMode:'high',codec:'H265'};
  await writeFile(join(work,'artifacts','generation-settings.png'),(await window.webContents.capturePage()).toPNG());
- await click('Genereer nieuwe variant');await awaitVariants(beforeClip.variants.length+1);assert.equal(generated,2);
+ await click('Genereer');await awaitVariants(beforeClip.variants.length+1);assert.equal(generated,2);
  let saved=await saveProject(),clip=selectedClip(saved),draft=clip.variants.find(v=>v.draftId==='fixture-draft-1');
  assert.ok(draft,'De draft wordt als een eigen variant bewaard');assert.equal(draft.draftDuration,4);assert.equal(draft.generation.resolution,'480p');assert.equal(draft.generation.draft,true);
- assert.equal(clip.duration,88);assert.equal(clip.activeVariantId,beforeClip.activeVariantId);assert.deepEqual(clip.variants.slice(0,beforeClip.variants.length),beforeClip.variants,'Een draft toevoegen bewaart alle bestaande varianten');
+ assert.equal(clip.duration,88);assert.equal(clip.activeVariantId,draft.id,'Een nieuw resultaat wordt direct het actieve fragment');assert.deepEqual(clip.variants.slice(0,beforeClip.variants.length),beforeClip.variants,'Een draft toevoegen bewaart alle bestaande varianten');
  const immutableDraft=structuredClone(draft);
  await variantAction(draft.id,'Render naar 1080p');await awaitVariants(beforeClip.variants.length+2);assert.equal(finalized,1);
  saved=await saveProject();clip=selectedClip(saved);const final=clip.variants.find(v=>v.finalizedFromVariantId===draft.id);
  assert.ok(final,'Finaliseren voegt een gekoppelde eindvariant toe');assert.equal(final.generation.resolution,'1080p');assert.equal(final.generation.draft,false);
- assert.deepEqual(clip.variants.find(v=>v.id===draft.id),immutableDraft,'Finaliseren overschrijft de draft niet');assert.equal(clip.activeVariantId,beforeClip.activeVariantId,'De eindvariant wordt pas actief na expliciet kiezen');assert.equal(clip.duration,88);
+ assert.deepEqual(clip.variants.find(v=>v.id===draft.id),immutableDraft,'Finaliseren overschrijft de draft niet');assert.equal(clip.activeVariantId,final.id,'De eindvariant wordt direct actief');assert.equal(clip.duration,88);
  await writeFile(join(work,'artifacts','draft-final-variants.png'),(await window.webContents.capturePage()).toPNG());
  passes.push('Volledige video-instellingen, 480p-draft en aparte 1080p-eindvariant met behoud van draft, snapshot en actieve montage');
- await variantAction(final.id,'Gebruik deze variant');await variantAction(final.id,'Geluid op audiospoor');
+ await variantAction(final.id,'Geluid op audiospoor');
  saved=await saveProject();clip=selectedClip(saved);const addedAudio=saved.clips.filter(c=>c.track==='audio'&&!before.clips.some(old=>old.id===c.id));
  assert.equal(addedAudio.length,1,'Generatiegeluid wordt als een apart monteerbaar audiospoor toegevoegd');assert.equal(addedAudio[0].start,clip.start);assert.equal(addedAudio[0].duration,clip.duration);assert.equal(addedAudio[0].variants[0].inPoint,final.inPoint);
  const audioAsset=saved.assets.find(a=>a.id===addedAudio[0].variants[0].assetId);assert.equal(audioAsset.kind,'audio');assert.ok(audioAsset.duration>=3.52);assert.ok((await readFile(resolve(process.env.HUPHE_TIMELINE_ROOT,projectId,audioAsset.path))).byteLength>100,'Audio-extractie schrijft een echt lokaal mediabestand');
@@ -248,11 +248,11 @@ async function generationSettingsParity(projectId,clipId) {
  assert.equal(await js("document.querySelector('.vt [role=switch][aria-label=Draft]').disabled"),true,'Draft is niet beschikbaar met referentie-media');
  await click('Generatiemodus › Bewerken');await openAdvanced();await input('[aria-label="Seed"]',42);await input('[aria-label="Bitrate"]','high');await input('[aria-label="Codec"]','H265');
  expectedGenerationSettings={duration:'auto',aspectRatio:'auto',generateAudio:true,draft:false,seed:42,bitrateMode:'high',codec:'H265'};expectedReferenceTask='editing';
- await click('Genereer nieuwe variant');await awaitVariants(beforeClip.variants.length+3);assert.equal(generated,3);
+ await click('Genereer');await awaitVariants(beforeClip.variants.length+3);assert.equal(generated,3);
  saved=await saveProject();clip=selectedClip(saved);let latest=clip.variants.at(-1);
  assert.equal(latest.generation.task,'editing');assert.equal(latest.generation.requestedDuration,'auto');assert.equal(latest.generation.aspectRatio,'auto');assert.equal(latest.generation.seed,42);assert.equal(latest.generation.referenceAssetIds.length,3);assert.equal(clip.activeVariantId,final.id);
  await selectVideo();await click('Verlengen');expectedReferenceTask='extension';
- await click('Genereer nieuwe variant');await awaitVariants(beforeClip.variants.length+4);assert.equal(generated,4);
+ await click('Genereer');await awaitVariants(beforeClip.variants.length+4);assert.equal(generated,4);
  saved=await saveProject();clip=selectedClip(saved);latest=clip.variants.at(-1);assert.equal(latest.generation.task,'extension');assert.equal(latest.generation.requestedDuration,'auto');assert.equal(clip.duration,88);assert.equal(clip.activeVariantId,final.id);assert.deepEqual(clip.variants.find(v=>v.id===draft.id),immutableDraft);
  assert.equal(preparedReferenceCalls.length,2,'Referenties worden pas bij de twee expliciete aanvragen voorbereid');
  passes.push('Beeld/video/audio-referenties, Bewerken/Verlengen, Auto en geavanceerde opties gaan met lokale asset-IDs en exacte snapshots naar de simulator');
@@ -402,7 +402,7 @@ async function deleteTimelineTracks() {
  await click('＋ Audiospoor');p=await save();const removable=p.tracks.filter(track=>track.kind==='audio').at(-1);
  await select(generationClip.id);await click('Genereren');await until("!document.querySelector('[aria-label=Videomodel]').disabled",'model selection for protected track');await input('[aria-label=Videomodel]','bytedance/seedance-2.5');await input('.vt textarea','Lokale test voor spoorbescherming.');
  trackDeletionGeneration={projectId,clipId:generationClip.id,release:undefined};
- await click('Genereer nieuwe variant');
+ await click('Genereer');
  await until(`document.querySelector('[data-delete-track="${generationTrack.id}"]')?.disabled`,'generating track cannot be removed');
  const title=await js(`document.querySelector('[data-delete-track="${generationTrack.id}"]').title`);assert.match(title,/gener|render/i,'De knop legt uit waarom het spoor tijdelijk niet kan worden verwijderd');
  await js(`document.querySelector('[data-delete-track="${generationTrack.id}"]').click()`);assert.equal(await js(`!!document.querySelector('[data-track-id="${generationTrack.id}"]')`),true);
@@ -464,24 +464,24 @@ async function modelCapabilityControls(){
  await set('[aria-label=Resolutie]','4k');assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').getAttribute('aria-valuetext')"),'8 seconden');
  await set('[aria-label="Veo-uitvoering"]','fast');await set('[aria-label="Negatieve prompt"]','tekst in beeld');
  queue.push(join(fixtures,'reference.png'));await click('＋ Startbeeld kiezen');await until("!!document.querySelector('.vt img.vt-reference') && !document.querySelector('.vt-generation-controls').disabled",'start image ready');queue.push(join(fixtures,'reference.png'));await click('＋ Eindbeeld kiezen');await until("document.querySelectorAll('.vt img.vt-reference').length===2 && !document.querySelector('.vt-generation-controls').disabled",'end image ready');
- await set(prompt(),'Een papieren boot op een meer');await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'Veo simulated generation');
+ await set(prompt(),'Een papieren boot op een meer');await click('Genereer');await until("document.body.innerText.includes('Het resultaat staat in je film')",'Veo simulated generation');
  assert.equal(contractRequests.at(-1).endpoint,'fal-ai/veo3.1/fast/first-last-frame-to-video');assert.equal(contractRequests.at(-1).body.duration,'8s');assert.equal(contractRequests.at(-1).body.resolution,'4k');
  passes.push('Veo Fast, eerste/laatste beeld en 4K dwingen 8 s af en gaan via de juiste aanvraagroute');
  await click('Genereren');await choose(KLING);assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').max"),'12');await set('[aria-label=Generatieduur]',5);await set(prompt(),'');
  await click('＋ Shot');await set('[aria-label="Shot 1 prompt"]','De boot vaart');await click('＋ Shot');await set('[aria-label="Shot 2 prompt"]','De camera komt dichterbij');await set('[aria-label="Shot 2 duur"]',5);
  await click('＋ Personage of object');await set('[aria-label="Element 1 hoofdbeeld"]','https://fixture.invalid/front.png');await set('[aria-label="Element 1 aanzichten"]','https://fixture.invalid/side.png');await set('[aria-label="Prompt volgen"]',0.7);
- await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'Kling simulated generation');
+ await click('Genereer');await until("document.body.innerText.includes('Het resultaat staat in je film')",'Kling simulated generation');
  assert.equal(contractRequests.at(-1).endpoint,'fal-ai/kling-video/v3/pro/image-to-video');assert.equal(contractRequests.at(-1).body.multi_prompt.length,2);assert.equal(contractRequests.at(-1).body.elements.length,1);
  await click('Opslaan');const projectId=await js("localStorage.getItem('huphe:timeline:last-project')");const saved=JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,projectId,'project.json'),'utf8'));
  assert.equal(saved.clips[0].variants.at(-1).generation.extraParams.multi_prompt[1].duration,'5');assert.equal(saved.clips[0].generation.extraParams.cfg_scale,0.7);
  passes.push('Kling 3: 3–15 s, twee shots en een personage gaan mee met de aanvraag en blijven in de variant opgeslagen');
  await click('Genereren');await choose(WAN);await set(prompt(),'Een papieren boot op een meer');queue.push(join(fixtures,'baseline.wav'));await click('＋ Audioreferentie');await until("document.querySelectorAll('.vt-reference-item').length===1 && !document.querySelector('.vt-generation-controls').disabled",'audio reference ready');await set('[aria-label="Negatieve prompt"]','onscherp');await js("document.querySelector('.vt [aria-label=\"Prompt uitbreiden\"]').click()");
  assert.equal(await js("!!document.querySelector('.vt [aria-label=\"Audio genereren\"]')"),false);assert.equal(await js("!!document.querySelector('.vt [aria-label=\"Seed\"]').disabled"),false);
- await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'Wan simulated generation');
+ await click('Genereer');await until("document.body.innerText.includes('Het resultaat staat in je film')",'Wan simulated generation');
  assert.equal(contractRequests.at(-1).endpoint,'fal-ai/wan-25-preview/image-to-video');assert.ok(contractRequests.at(-1).body.audio_url);assert.equal(contractRequests.at(-1).body.enable_prompt_expansion,false);
  passes.push('Wan: startbeeld plus eigen audio, negatieve prompt en promptuitbreiding worden samen doorgegeven');
  await click('Genereren');await choose(SEEDANCE);await js("document.querySelector('.vt [aria-label=Draft]').click()");assert.equal(await js("document.querySelector('.vt [aria-label=Draft]').disabled"),false);
- await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'Seedance reference draft simulation');
+ await click('Genereer');await until("document.body.innerText.includes('Het resultaat staat in je film')",'Seedance reference draft simulation');
  assert.equal(contractRequests.at(-1).endpoint,'bytedance/seedance-2.5/us/reference-to-video');assert.equal(contractRequests.at(-1).body.draft,true);assert.equal(contractRequests.at(-1).body.resolution,'480p');
  passes.push('Seedance: draft met referenties blijft beschikbaar en gebruikt de US-referentieroute');
  await click('Genereren');await writeFile(join(work,'artifacts','model-capabilities.png'),(await window.webContents.capturePage()).toPNG());
@@ -623,8 +623,8 @@ async function modelCapabilityControls(){
  await selectClip(0);queue.push(join(fixtures,'source-C.mp4'));await click('Andere versie importeren');await until("document.querySelector('[aria-label=\"Varianten\"] small')?.textContent==='2'",'second variant');await click('Varianten (2)');await click('Gebruik deze variant');await click('Opslaan');saved=JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,id,'project.json'),'utf8'));assert.equal(saved.clips[0].activeVariantId,saved.clips[0].variants[1].id);passes.push('Variant toevoegen en expliciet actief kiezen');
  await click('＋ Leeg blok');await until("!document.querySelector('[aria-label=Videomodel]')?.disabled && !!document.querySelector('[aria-label=Videomodel] option[value=\"bytedance/seedance-2.5\"]')",'video models available automatically');
  await generationDurationControls(id);passes.push('Schuifbalk met geldige modelduren en pijltoetsen, montage trimmen op frames, aanvraagduur en model wisselen zonder het blok te verlengen');
- queue.push(join(fixtures,'reference.png'));await click('＋ Startbeeld kiezen');await until("!!document.querySelector('.vt-reference')",'reference image');queue.push(join(fixtures,'reference.png'));await click('＋ Eindbeeld kiezen');await until("document.querySelectorAll('.vt-reference').length===2",'end image');await input('.vt textarea','Een lokaal testfragment, zonder providerverzoek.');await click('Genereer nieuwe variant');await until("document.body.innerText.includes('De nieuwe variant staat klaar')",'local generation');assert.equal(generated,1);passes.push('Generatieadapter en jobsnapshot vragen met start/eindbeeld 4 seconden aan voor een montageblok van 3.52 seconden (uitsluitend lokale simulator)');
- await click('Gebruik deze variant');await click('Opslaan');
+ queue.push(join(fixtures,'reference.png'));await click('＋ Startbeeld kiezen');await until("!!document.querySelector('.vt-reference')",'reference image');queue.push(join(fixtures,'reference.png'));await click('＋ Eindbeeld kiezen');await until("document.querySelectorAll('.vt-reference').length===2",'end image');await input('.vt textarea','Een lokaal testfragment, zonder providerverzoek.');await click('Genereer');await until("document.body.innerText.includes('Het resultaat staat in je film')",'local generation');assert.equal(generated,1);passes.push('Generatieadapter en jobsnapshot vragen met start/eindbeeld 4 seconden aan voor een montageblok van 3.52 seconden (uitsluitend lokale simulator)');
+ await click('Opslaan');
  saved=JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,id,'project.json'),'utf8'));
  const generatedClip=saved.clips.find(c=>c.id===expectedGenerationClip.id);assert.equal(generatedClip.duration,88);assert.equal(generatedClip.generation.requestedDuration,4);assert.equal(generatedClip.variants.at(-1).generation.requestedDuration,4);assert.equal(generatedClip.activeVariantId,generatedClip.variants.at(-1).id,'De nieuwe variant gebruikt de bestaande montageuitsnede');
  await legacyGenerationDuration(id,expectedGenerationClip.id);passes.push('Oude fractionele aanvraagduur heropenen blokkeert generatie tot een expliciete geldige keuze, zonder montagewijziging');

@@ -19,6 +19,10 @@ import { loadModuleModels } from '../lib/atelier-module-config'
 import { supabase } from '../lib/supabase'
 import './video-timeline.css'
 
+/** A freshly generated result becomes the active version straight away, unless it is too short for the block. */
+function newestFits(clip: TimelineClip, variant: TimelineVariant, asset: TimelineAsset, fps: number) {
+  return asset.kind === 'image' || variant.inPoint + sourceSeconds(clip, clip.duration, fps) <= asset.duration + 0.00001
+}
 const api = () => (window as any).api
 const uid = () => crypto.randomUUID()
 const seconds = (n: number) => Number(n.toFixed(3))
@@ -47,6 +51,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const zoomAnchor = useRef<{ time: number; offset: number } | null>(null)
   const [ripple, setRipple] = useState(false)
   const [snapOn, setSnapOn] = useState(true)
+  const [menu, setMenu] = useState<{ x: number; y: number; clipId: string } | null>(null)
   const [loop, setLoop] = useState(false)
   const [timeField, setTimeField] = useState<string>()
   const viewerRef = useRef<HTMLElement>(null)
@@ -373,6 +378,15 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     else void element.requestFullscreen?.().catch(() => setMessage('Schermvullend tonen lukt hier niet.'))
   }
 
+  /** Right-click on a block: hand its image to the images environment (the app shell listens for this event). */
+  function openInAtelier(clipId: string) {
+    const target = current.current.clips.find(c => c.id === clipId)
+    const asset = target && activeMedia(current.current, target).asset
+    setMenu(null)
+    if (!asset || asset.kind !== 'image') return
+    void persist().finally(() => window.dispatchEvent(new CustomEvent('huphe:open-in-atelier', { detail: { path: asset.path } })))
+  }
+
   // Herhalen: aan het eind van het bereik (of de film) terug naar het begin en doorspelen.
   const wasPlaying = useRef(false)
   useEffect(() => {
@@ -433,6 +447,10 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     else if (key === 's' && !event.shiftKey) splitAtPlayhead()
     else if (key === 'q') trimToPlayhead(false)
     else if (key === 'w') trimToPlayhead(true)
+    else if ((key === '[' || key === ']') && clip && clip.variants.length > 1) {
+      const at = Math.max(0, clip.variants.findIndex(v => v.id === clip.activeVariantId))
+      chooseVariant(clip.variants[(at + (key === ']' ? 1 : clip.variants.length - 1)) % clip.variants.length].id)
+    }
     else if (key === 'k') setPlaying(false)
     else if (key === 'l' && !event.shiftKey) { if (!playing) togglePlay() }
     else if (key === 'j' || key === 'l') { setPlaying(false); setPosition(Math.max(0, Math.min(duration, position + (key === 'j' ? -1 : 1) * (event.shiftKey ? 5 : 1)))) }
@@ -696,10 +714,10 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       const asset: TimelineAsset = imported.assets[0]
       const variant: TimelineVariant = { id: uid(), assetId: asset.id, createdAt: new Date().toISOString(), inPoint: 0, generation: snapshot, transition: capture, requestId }
       apply({ ...current.current, assets: [...current.current.assets, asset],
-        clips: current.current.clips.map(c => c.id === target.id ? { ...c, variants: [...c.variants, variant] } : c),
+        clips: current.current.clips.map(c => c.id === target.id ? { ...c, variants: [...c.variants, variant], activeVariantId: newestFits(c, variant, asset, project.fps) ? variant.id : c.activeVariantId } : c),
         jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: 'completed', assetId: asset.id } : j) }, false)
-      await persist(); setSelected(target.id); setTab('variants')
-      setMessage('De overgang staat als nieuwe variant klaar. Kies ‘Gebruik deze variant’ om hem in je film te zien.')
+      await persist(); setSelected(target.id)
+      setMessage('De overgang staat in je film. Eerdere versies vind je terug bij het fragment.')
     } catch (e: any) {
       apply({ ...current.current, jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: submitted ? 'unknown' : 'failed', error: e.message } : j) }, false)
       await persist().catch(() => {})
@@ -897,8 +915,8 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       const variant: TimelineVariant = { id: uid(), assetId: asset.id, createdAt: new Date().toISOString(), inPoint: finalize?.inPoint ?? 0, generation: snapshot, requestId,
         draftId: result.draftId ?? undefined, draftDuration: result.draftId && Number.isFinite(result.resolvedDuration) ? result.resolvedDuration : undefined,
         finalizedFromVariantId: finalize?.id }
-      apply({ ...current.current, assets: [...current.current.assets, asset], clips: current.current.clips.map(c => c.id === id ? { ...c, variants: [...c.variants, variant] } : c), jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: 'completed', assetId: asset.id } : j) }, false)
-      await persist(); setSelected(id); setTab('variants'); setMessage(finalize ? 'De 1080p-versie staat als nieuwe variant klaar. Je draft blijft bewaard.' : 'De nieuwe variant staat klaar. Kies ‘Gebruik’ om hem op de tijdlijn te zetten.')
+      apply({ ...current.current, assets: [...current.current.assets, asset], clips: current.current.clips.map(c => c.id === id ? { ...c, variants: [...c.variants, variant], activeVariantId: newestFits(c, variant, asset, project.fps) ? variant.id : c.activeVariantId } : c), jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: 'completed', assetId: asset.id } : j) }, false)
+      await persist(); setSelected(id); setMessage(finalize ? 'De 1080p-versie staat in je film. Je draft blijft bewaard.' : 'Het resultaat staat in je film. Eerdere versies vind je terug bij het fragment.')
     } catch (e: any) {
       apply({ ...current.current, jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: submitted ? 'unknown' : 'failed', error: e.message } : j) }, false)
       await persist().catch(() => {})
@@ -963,8 +981,8 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       if (!imported.ok || !imported.assets?.[0]) throw new Error(imported.error ?? 'De video is gemaakt maar kon nog niet in het project worden opgeslagen.')
       const asset: TimelineAsset = imported.assets[0]
       const variant: TimelineVariant = { id: uid(), assetId: asset.id, createdAt: new Date().toISOString(), inPoint, generation: snapshot, requestId }
-      apply({ ...current.current, assets: [...current.current.assets, asset], clips: current.current.clips.map(c => c.id === id ? { ...c, variants: [...c.variants, variant] } : c), jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: 'completed', assetId: asset.id } : j) }, false)
-      await persist(); setSelected(id); setTab('variants'); setMessage('Het resultaat staat als nieuwe variant klaar. Kies ‘Gebruik deze variant’ om hem op de tijdlijn te zetten.')
+      apply({ ...current.current, assets: [...current.current.assets, asset], clips: current.current.clips.map(c => c.id === id ? { ...c, variants: [...c.variants, variant], activeVariantId: newestFits(c, variant, asset, project.fps) ? variant.id : c.activeVariantId } : c), jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: 'completed', assetId: asset.id } : j) }, false)
+      await persist(); setSelected(id); setMessage('Het resultaat staat in je film. Eerdere versies vind je terug bij het fragment.')
     } catch (e: any) {
       apply({ ...current.current, jobs: current.current.jobs?.map(j => j.id === requestId ? { ...j, status: submitted ? 'unknown' : 'failed', error: e.message } : j) }, false)
       await persist().catch(() => {})
@@ -1029,7 +1047,9 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const modelLabel = (id: string) => loadModuleModels('video').find(m => m.model === id || m.id === id)?.label ?? id
   const libraryItems = library ? loadAtelierMediaProjects().flatMap(p => p.type === 'video' || p.type === 'audio' ? (p.assets?.length ? p.assets.map(a => ({ src: a.src, name: p.title, kind: (a.assetKind ?? p.type) as 'video' | 'audio' })) : [{ src: p.src, name: p.title, kind: p.type as 'video' | 'audio' }]) : []).filter(a => /^(huphe:|file:|\/)/.test(a.src)) : []
 
-  return <div ref={root} className={`vt${assetDragging ? ' vt-asset-dragging' : ''}`} data-testid="video-timeline" tabIndex={-1} onKeyDown={handleKeyDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}>
+  return <div ref={root} className={`vt${assetDragging ? ' vt-asset-dragging' : ''}`} data-testid="video-timeline" tabIndex={-1} onKeyDown={handleKeyDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}>{menu && (() => { const target = project.clips.find(c => c.id === menu.clipId); const asset = target && activeMedia(project, target).asset; return <div className="vt-menu-backdrop" onPointerDown={() => setMenu(null)} onContextMenu={e => { e.preventDefault(); setMenu(null) }}><div className="vt-menu" role="menu" style={{ left: Math.min(menu.x, window.innerWidth - 230), top: Math.min(menu.y, window.innerHeight - 140) }} onPointerDown={e => e.stopPropagation()}>
+      {asset?.kind === 'image' ? <button role="menuitem" onClick={() => openInAtelier(menu.clipId)}>Bewerken in Afbeeldingen</button> : <button role="menuitem" disabled>{asset ? 'Alleen afbeeldingen kunnen in Afbeeldingen worden geopend' : 'Nog geen media in dit blok'}</button>}
+      <button role="menuitem" onClick={() => { setMenu(null); setSelected(menu.clipId); deleteSelectedClip() }}>Verwijderen</button></div></div> })()}
     <TimelineTooltip root={root} />
     <header className="vt-header">
       <div className="vt-title"><span>VIDEOMONTAGE</span><input aria-label="Projectnaam" value={project.name} onChange={e => apply({ ...project, name: e.target.value }, false)} /></div>
@@ -1100,7 +1120,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
             <p className="vt-help">Titels liggen altijd boven alle video. Twee titels tegelijk? Zet ze op een eigen spoor.</p>
             <label>Spoor<select aria-label="Spoor fragment" value={clipTrackId(clip)} onChange={e => moveToTrack(e.target.value)}>{visibleTracks.filter(t => t.kind === 'video').map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
             <button className="vt-danger" onClick={deleteSelectedClip} title="Titel verwijderen (Backspace)">Titel verwijderen</button></>}
-          {tab === 'clip' && !clip.text && <><h2>{clip.track === 'audio' ? 'Audiofragment' : 'Videofragment'}</h2><label>Naam<input value={clip.label} onChange={e => patchClip({ label: e.target.value })} /></label><div className="vt-field-row"><label>Start op tijdlijn (s)<input aria-label="Start fragment" type="number" min="0" step={1 / project.fps} value={seconds(clip.start / project.fps)} onChange={e => patchClip({ start: Math.max(0, Math.round(Number(e.target.value) * project.fps)) })} /></label><label>Lengte op tijdlijn (s)<input aria-label="Lengte fragment" type="number" min={1 / project.fps} step={1 / project.fps} value={seconds(clip.duration / project.fps)} onChange={e => patchClip({ duration: Math.max(1, Math.round(Number(e.target.value) * project.fps)) })} /></label></div>
+          {tab === 'clip' && !clip.text && <><h2>{clip.track === 'audio' ? 'Audiofragment' : 'Videofragment'}</h2>{clip.variants.length > 1 && <div className="vt-versions" role="radiogroup" aria-label="Versies van dit fragment"><span>Versie</span>{clip.variants.map((v, i) => { const a = project.assets.find(x => x.id === v.assetId); const on = v.id === clip.activeVariantId; return <button key={v.id} role="radio" aria-checked={on} className={on ? 'on' : ''} title={`Versie ${i + 1}${v.generation?.modelId ? ` · ${v.generation.modelId}` : ''}`} disabled={!!busy} onClick={() => chooseVariant(v.id)}>{a?.kind === 'image' ? <img src={a.src} alt="" /> : a?.kind === 'video' ? <video src={`${a.previewSrc ?? a.src}#t=0.1`} muted preload="metadata" /> : null}<i>{i + 1}</i></button> })}</div>}<label>Naam<input value={clip.label} onChange={e => patchClip({ label: e.target.value })} /></label><div className="vt-field-row"><label>Start op tijdlijn (s)<input aria-label="Start fragment" type="number" min="0" step={1 / project.fps} value={seconds(clip.start / project.fps)} onChange={e => patchClip({ start: Math.max(0, Math.round(Number(e.target.value) * project.fps)) })} /></label><label>Lengte op tijdlijn (s)<input aria-label="Lengte fragment" type="number" min={1 / project.fps} step={1 / project.fps} value={seconds(clip.duration / project.fps)} onChange={e => patchClip({ duration: Math.max(1, Math.round(Number(e.target.value) * project.fps)) })} /></label></div>
           {!clip.transition && !media?.variant?.transition && media?.asset && media.asset.kind !== 'image' && <><label>Begin in bron (s)<input aria-label="Begin in bron" type="number" min="0" step={0.01} value={seconds(media.variant!.inPoint)} onChange={e => patchClip({ variants: clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: Math.max(0, Number(e.target.value)) } : v) })} /></label><p className="vt-help">Volledige bron: {seconds(media.asset.duration)} s. Alles buiten de uitsnede blijft bewaard.</p><button onClick={() => patchClip({ duration: Math.max(1, Math.floor(media.asset!.duration * project.fps)), variants: clip.variants.map(v => v.id === clip.activeVariantId ? { ...v, inPoint: 0 } : v) })}>Volledige bron gebruiken</button></>}
           {!media?.variant?.transition && <TimelineEffectsControls project={project} clip={clip} asset={media?.asset} inPoint={media?.variant?.inPoint ?? 0} disabled={!!busy || generating === clip.id} onChange={patchClip} />}
           <label>Spoor<select aria-label="Spoor fragment" value={clipTrackId(clip)} onChange={e => moveToTrack(e.target.value)}>{visibleTracks.filter(t => t.kind === clip.track).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
@@ -1119,12 +1139,12 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
             </select></label>
             {clip.transition ? <TimelineRifeControls project={project} clip={clip} capability={rifeCapability} loading={capLoading} busy={!!busy} generating={generating === clip.id} generationBlocked={!!generating || !!unknownJobs.length} onFramesChange={frames => patchClip({ duration: frames })} onCapture={() => void captureTransition(clip.id)} onGenerate={() => void generateTransition()} onReload={() => void loadModels()} /> : <>
             <h2>Genereer dit fragment</h2>
-            <p className="vt-help">Gebruik je bestaande videomodellen. Iedere generatie wordt een nieuwe variant.</p>
+            <p className="vt-help">Beschrijf wat je wilt zien. Het resultaat komt direct in je film; eerdere versies blijven bewaard.</p>
             {capError && <><p role="alert">{capError}</p><button disabled={capLoading} onClick={() => void loadModels()}>Opnieuw proberen</button></>}
             <TimelineGenerationControls project={project} clip={clip} generation={generation ?? defaultGeneration(clip)} capability={capability} loading={capLoading} disabled={!!busy}
               onPatch={patchGeneration} onImport={(kind, target) => void importGenerationReference(kind, target)} onUseReference={useReference} onTrim={() => setTab('clip')} />
             <div className="vt-price">{estimate != null ? `Geschat: ${estimate.toLocaleString('nl-NL')} credits` : generationState?.errors[0] ?? (capability ? 'Prijsindicatie niet beschikbaar' : 'Kies een model voor een prijsindicatie')}<small>Via de bestaande rekeninginstellingen van je account.</small></div>
-            <button className="vt-primary" disabled={!!generating || !!busy || !generationState?.promptReady || estimate == null || !!generationState?.errors.length || !!unknownJobs.length} onClick={() => void generate()}>{generating === clip.id ? 'Bezig met genereren…' : 'Genereer nieuwe variant'}</button>
+            <button className="vt-primary" disabled={!!generating || !!busy || !generationState?.promptReady || estimate == null || !!generationState?.errors.length || !!unknownJobs.length} onClick={() => void generate()}>{generating === clip.id ? 'Bezig met genereren…' : 'Genereer'}</button>
             </>}
           </>)}
           {tab === 'edit' && !clip.text && (clip.track === 'audio' || clip.transition ? <p>Bewerken werkt op videofragmenten.</p> : <TimelineEditControls project={project} clip={clip} capabilities={editCapabilities} state={editState} loading={capLoading} disabled={!!busy || !!generating}
@@ -1193,7 +1213,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
           <TimelineLane track={track.kind} trackId={track.id} clips={project.clips} fps={project.fps} zoom={zoom} disabled={!active || !!busy}
             onDrawStart={() => { setPlaying(false); setSelectedTrack(track.id); root.current?.focus({ preventScroll: true }) }} onCreate={range => addEmpty(range, track.id)} onDeselect={() => { setSelected(undefined); setSelectedTrack(track.id) }}
             onDragOver={e => assetDrop(e, track)} onDragLeave={leaveAssetDrop} onDrop={e => assetDrop(e, track, true)}>
-            {project.clips.filter(c => clipTrackId(c) === track.id).map(c => { const a = activeMedia(project, c); return <div role="button" tabIndex={0} aria-label={`${c.label}, ${seconds(c.duration / project.fps)} seconden`} data-clip-id={c.id} data-transition-kind={c.transition?.kind} key={c.id} className={`vt-block ${c.transition ? 'vt-rife-block' : ''} ${selectedIds.includes(c.id) ? 'selected' : ''} ${trackIsLocked(project, c) ? 'locked' : ''} ${!a.asset && !c.text ? 'empty' : ''} ${c.text ? 'vt-title-block' : ''} ${badClips.has(c.id) ? 'invalid' : ''}`} title={badClips.get(c.id)} style={{ left: c.start / project.fps * zoom, width: Math.max(6, c.duration / project.fps * zoom) }} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter') { setPlaying(false); setSelected(c.id); setSelectedTrack(track.id); setPosition(c.start / project.fps) } }} onPointerDown={e => pointerDown(e, c, 'move')}><TimelineBlockDecor project={project} clip={c} asset={a.asset} inPoint={a.variant?.inPoint ?? 0} width={c.duration / project.fps * zoom} /><div className="vt-handle left" aria-label="Begin trimmen" onPointerDown={e => pointerDown(e, c, 'left')} /><b>{generating === c.id ? '◌ ' : ''}{c.text ? `T  ${c.text.content.split('\n')[0]}` : c.label}</b><span>{seconds(c.duration / project.fps)} s{c.variants.length > 1 ? ` · ${c.variants.length} varianten` : ''}</span><div className="vt-handle right" aria-label="Einde trimmen" onPointerDown={e => pointerDown(e, c, 'right')} /></div> })}
+            {project.clips.filter(c => clipTrackId(c) === track.id).map(c => { const a = activeMedia(project, c); return <div role="button" tabIndex={0} aria-label={`${c.label}, ${seconds(c.duration / project.fps)} seconden`} data-clip-id={c.id} data-transition-kind={c.transition?.kind} key={c.id} className={`vt-block ${c.transition ? 'vt-rife-block' : ''} ${selectedIds.includes(c.id) ? 'selected' : ''} ${trackIsLocked(project, c) ? 'locked' : ''} ${!a.asset && !c.text ? 'empty' : ''} ${c.text ? 'vt-title-block' : ''} ${badClips.has(c.id) ? 'invalid' : ''}`} title={badClips.get(c.id)} style={{ left: c.start / project.fps * zoom, width: Math.max(6, c.duration / project.fps * zoom) }} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Enter') { setPlaying(false); setSelected(c.id); setSelectedTrack(track.id); setPosition(c.start / project.fps) } }} onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setSelected(c.id); setSelectedTrack(track.id); setMenu({ x: e.clientX, y: e.clientY, clipId: c.id }) }} onPointerDown={e => pointerDown(e, c, 'move')}><TimelineBlockDecor project={project} clip={c} asset={a.asset} inPoint={a.variant?.inPoint ?? 0} width={c.duration / project.fps * zoom} /><div className="vt-handle left" aria-label="Begin trimmen" onPointerDown={e => pointerDown(e, c, 'left')} /><b>{generating === c.id ? '◌ ' : ''}{c.text ? `T  ${c.text.content.split('\n')[0]}` : c.label}</b><span>{seconds(c.duration / project.fps)} s{c.variants.length > 1 ? ` · ${c.variants.length} varianten` : ''}</span><div className="vt-handle right" aria-label="Einde trimmen" onPointerDown={e => pointerDown(e, c, 'right')} /></div> })}
             {dropPreview?.trackId === track.id && <div className={`vt-drop-preview ${dropPreview.valid ? '' : 'invalid'}`} style={{ left: dropPreview.start / project.fps * zoom, width: Math.max(6, dropPreview.duration / project.fps * zoom) }}><b>{!dropPreview.valid ? 'Geen vrije ruimte' : dropPreview.insert ? 'Invoegen · volgende schuiven mee' : 'Hier plaatsen'}</b><span>{seconds(dropPreview.start / project.fps)} s · {seconds(dropPreview.duration / project.fps)} s</span></div>}
           </TimelineLane>
         </div>)}

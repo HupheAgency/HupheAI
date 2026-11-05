@@ -457,6 +457,16 @@ const [atelierShellLevel, setAtelierShellLevel] = useState<'landing' | 'funnel' 
     safeNavigate('atelier')
   }
 
+  // De videotimeline vraagt om een afbeelding in de afbeeldingenomgeving te openen.
+  useEffect(() => {
+    const open = (event: Event) => {
+      const path = (event as CustomEvent<{ path?: string }>).detail?.path
+      if (typeof path === 'string' && path) handleOpenInAtelier(path)
+    }
+    window.addEventListener('huphe:open-in-atelier', open)
+    return () => window.removeEventListener('huphe:open-in-atelier', open)
+  })
+
   useEffect(() => {
     if (active !== 'atelier') {
       setAtelierInitialImagePath(null)

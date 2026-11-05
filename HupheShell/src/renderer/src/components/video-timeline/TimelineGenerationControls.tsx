@@ -40,6 +40,33 @@ export function TimelineGenerationControls({ project, clip, generation: g, capab
   const referenceLabel = (kind: TimelineAsset['kind']) => kind === 'image' ? 'Image' : kind === 'video' ? 'Video' : 'Audio'
 
   return <fieldset className="vt-generation-controls" disabled={disabled}>
+    <label>Prompt<textarea rows={5} placeholder="Wat gebeurt er in deze scène?" value={g.prompt} maxLength={cap?.prompt_max_length} onChange={e => onPatch({ prompt: e.target.value })} /></label>
+    <div className="vt-duration-control">
+      <div className="vt-duration-heading"><label htmlFor={`generation-duration-${clip.id}`}>Generatieduur</label><span>{valid ? auto ? 'Auto' : `${snapshot.requestedDuration.toLocaleString('nl-NL')} s` : '—'}</span>
+        {cap?.supports_auto_duration && <button type="button" aria-label="Automatische generatieduur" aria-pressed={auto} disabled={forcedAuto} onClick={() => onPatch({ requestedDuration: g.requestedDuration === 'auto' ? allowed[0] ?? 4 : 'auto' })}>Auto</button>}
+      </div>
+      <input id={`generation-duration-${clip.id}`} type="range" aria-label="Generatieduur" min={0} max={Math.max(0, allowed.length - 1)} step={1}
+        disabled={loading || !allowed.length || auto} value={typeof snapshot.requestedDuration === 'number' && valid ? allowed.indexOf(snapshot.requestedDuration) : 0}
+        aria-valuetext={valid ? auto ? 'Auto' : `${snapshot.requestedDuration.toLocaleString('nl-NL')} seconden` : 'Kies een generatieduur'} aria-invalid={!!cap && !valid}
+        onChange={e => chooseDuration(Number(e.target.value))} onPointerUp={e => { if (!valid) chooseDuration(Number(e.currentTarget.value)) }}
+        onKeyUp={e => { if (!valid && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) chooseDuration(Number(e.currentTarget.value)) }} />
+      {allowed.length > 0 ? <span className="vt-duration-bounds" aria-hidden="true"><span>{allowed[0].toLocaleString('nl-NL')} s</span>{allowed.length > 1 && <span>{allowed[allowed.length - 1].toLocaleString('nl-NL')} s</span>}</span> : <p className="vt-help">{loading ? 'Videomodellen laden…' : 'Kies eerst een model'}</p>}
+      {auto && <p className="vt-help">Het model bepaalt de videolengte. De prijsindicatie gaat uit van vijf seconden.</p>}
+    </div>
+    {cap && !valid && <p className="vt-help" role="alert">De opgeslagen generatieduur past niet bij dit model. Kies een duur met de schuifbalk.</p>}
+    {typeof snapshot.requestedDuration === 'number' && valid && snapshot.requestedDuration < duration && <p className="vt-help">Deze generatie is korter dan je blok. Kort het blok in bij Fragment voordat je de nieuwe variant gebruikt.</p>}
+    <section className="vt-generation-card">
+      <label>Startbeeld{start && <img className="vt-reference" src={start.src} alt="Gekozen startbeeld" />}
+        <button type="button" disabled={hasReferences && !state.mode?.allowsStartImage} onClick={() => onImport('image', 'start')}>{start ? 'Startbeeld vervangen' : '＋ Startbeeld kiezen'}</button>
+      </label>
+      {start && <button type="button" aria-label="Startbeeld verwijderen" onClick={() => onPatch({ referenceAssetId: undefined })}>Startbeeld verwijderen</button>}
+      {cap?.supports_end_image && <><label>Eindbeeld{end && <img className="vt-reference" src={end.src} alt="Gekozen eindbeeld" />}
+        <button type="button" disabled={!start || (hasReferences && !state.mode?.allowsStartImage)} onClick={() => onImport('image', 'end')}>{end ? 'Eindbeeld vervangen' : '＋ Eindbeeld kiezen'}</button>
+      </label>{end && <button type="button" aria-label="Eindbeeld verwijderen" onClick={() => onPatch({ endImageAssetId: undefined })}>Eindbeeld verwijderen</button>}</>}
+      {hasReferences && !state.mode?.allowsStartImage && <p className="vt-help">Referenties sturen deze generatie. Je start- en eindbeeld blijven bewaard.</p>}
+      {!hasReferences && cap?.supports_end_image && !start && <p className="vt-help">Kies een startbeeld om ook een eindbeeld te gebruiken.</p>}
+    </section>
+    <details className="vt-generation-card vt-more" open={hasReferences || undefined}><summary>Geavanceerd</summary>
     {(cap?.supports_references || references.length > 0) && <section className="vt-generation-card">
       <h3>Referenties</h3>
       <p className="vt-help">Voeg beeld, video of audio toe om deze generatie te sturen.</p>
@@ -62,33 +89,7 @@ export function TimelineGenerationControls({ project, clip, generation: g, capab
         {forcedAuto && <p className="vt-help">Bij {g.task === 'extension' ? 'verlengen' : 'bewerken'} bepaalt het model de lengte en beeldverhouding automatisch. De lengte van je tijdlijnblok stel je apart in.</p>}
       </> : <p className="vt-help">Dit model gebruikt geen referentiemedia. Deze bestanden blijven bewaard voor een ander model.</p>}
     </section>}
-    <section className="vt-generation-card">
-      <label>Startbeeld{start && <img className="vt-reference" src={start.src} alt="Gekozen startbeeld" />}
-        <button type="button" disabled={hasReferences && !state.mode?.allowsStartImage} onClick={() => onImport('image', 'start')}>{start ? 'Startbeeld vervangen' : '＋ Startbeeld kiezen'}</button>
-      </label>
-      {start && <button type="button" aria-label="Startbeeld verwijderen" onClick={() => onPatch({ referenceAssetId: undefined })}>Startbeeld verwijderen</button>}
-      {cap?.supports_end_image && <><label>Eindbeeld{end && <img className="vt-reference" src={end.src} alt="Gekozen eindbeeld" />}
-        <button type="button" disabled={!start || (hasReferences && !state.mode?.allowsStartImage)} onClick={() => onImport('image', 'end')}>{end ? 'Eindbeeld vervangen' : '＋ Eindbeeld kiezen'}</button>
-      </label>{end && <button type="button" aria-label="Eindbeeld verwijderen" onClick={() => onPatch({ endImageAssetId: undefined })}>Eindbeeld verwijderen</button>}</>}
-      {hasReferences && !state.mode?.allowsStartImage && <p className="vt-help">Referenties sturen deze generatie. Je start- en eindbeeld blijven bewaard.</p>}
-      {!hasReferences && cap?.supports_end_image && !start && <p className="vt-help">Kies een startbeeld om ook een eindbeeld te gebruiken.</p>}
-    </section>
-    <label>Prompt<textarea rows={5} placeholder="Wat gebeurt er in deze scène?" value={g.prompt} maxLength={cap?.prompt_max_length} onChange={e => onPatch({ prompt: e.target.value })} /></label>
-    <div className="vt-duration-control">
-      <div className="vt-duration-heading"><label htmlFor={`generation-duration-${clip.id}`}>Generatieduur</label><span>{valid ? auto ? 'Auto' : `${snapshot.requestedDuration.toLocaleString('nl-NL')} s` : '—'}</span>
-        {cap?.supports_auto_duration && <button type="button" aria-label="Automatische generatieduur" aria-pressed={auto} disabled={forcedAuto} onClick={() => onPatch({ requestedDuration: g.requestedDuration === 'auto' ? allowed[0] ?? 4 : 'auto' })}>Auto</button>}
-      </div>
-      <input id={`generation-duration-${clip.id}`} type="range" aria-label="Generatieduur" min={0} max={Math.max(0, allowed.length - 1)} step={1}
-        disabled={loading || !allowed.length || auto} value={typeof snapshot.requestedDuration === 'number' && valid ? allowed.indexOf(snapshot.requestedDuration) : 0}
-        aria-valuetext={valid ? auto ? 'Auto' : `${snapshot.requestedDuration.toLocaleString('nl-NL')} seconden` : 'Kies een generatieduur'} aria-invalid={!!cap && !valid}
-        onChange={e => chooseDuration(Number(e.target.value))} onPointerUp={e => { if (!valid) chooseDuration(Number(e.currentTarget.value)) }}
-        onKeyUp={e => { if (!valid && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) chooseDuration(Number(e.currentTarget.value)) }} />
-      {allowed.length > 0 ? <span className="vt-duration-bounds" aria-hidden="true"><span>{allowed[0].toLocaleString('nl-NL')} s</span>{allowed.length > 1 && <span>{allowed[allowed.length - 1].toLocaleString('nl-NL')} s</span>}</span> : <p className="vt-help">{loading ? 'Videomodellen laden…' : 'Kies eerst een model'}</p>}
-      {auto && <p className="vt-help">Het model bepaalt de videolengte. De prijsindicatie gaat uit van vijf seconden.</p>}
-    </div>
-    {cap && !valid && <p className="vt-help" role="alert">De opgeslagen generatieduur past niet bij dit model. Kies een duur met de schuifbalk.</p>}
     <p className="vt-help">Op de tijdlijn: <span data-testid="timeline-block-duration">{duration} s</span>. De generatieduur bepaalt hoeveel beeld je laat maken; de uitsnede stel je in bij Fragment.</p>
-    {typeof snapshot.requestedDuration === 'number' && valid && snapshot.requestedDuration < duration && <p className="vt-help">Deze generatie is korter dan je blok. Kort het blok in bij Fragment voordat je de nieuwe variant gebruikt.</p>}
     <button type="button" onClick={onTrim}>Lengte en uitsnede aanpassen</button>
     {cap?.supports_draft && <section className="vt-generation-card"><label className="vt-switch">Draft<input type="checkbox" role="switch" aria-label="Draft" checked={snapshot.draft ?? false} disabled={hasReferences && !cap.supports_reference_draft} onChange={e => onPatch({ draft: e.target.checked })} /></label><p className="vt-help">{hasReferences && !cap.supports_reference_draft ? 'Draft is niet beschikbaar met referentiemedia. Een apart startbeeld kan wel.' : 'Maak eerst een draft in 480p. Render die later bij Varianten naar 1080p.'}</p></section>}
     {cap && <div className="vt-field-row">
@@ -96,12 +97,13 @@ export function TimelineGenerationControls({ project, clip, generation: g, capab
       <label>Verhouding<select aria-label="Beeldverhouding" disabled={state.forcedAspect} value={snapshot.aspectRatio} onChange={e => onPatch({ aspectRatio: e.target.value })}>{snapshot.aspectRatio === 'auto' && !cap.supported_aspect_ratios.includes('auto') && <option value="auto">auto</option>}{cap.supported_aspect_ratios.map(r => <option key={r}>{r}</option>)}</select></label>
     </div>}
     {cap?.generate_audio && <section className="vt-generation-card"><label className="vt-switch">Audio<input type="checkbox" role="switch" aria-label="Audio genereren" checked={snapshot.generateAudio ?? false} onChange={e => onPatch({ generateAudio: e.target.checked })} /></label><p className="vt-help">Genereer geluid bij de video. Voeg het bij Varianten toe met ‘Geluid op audiospoor’.</p></section>}
-    {(cap?.seed || cap?.bitrate_mode || cap?.codec) && <details className="vt-generation-card"><summary>Geavanceerd</summary><div className="vt-advanced-fields">
+    {(cap?.seed || cap?.bitrate_mode || cap?.codec) && <div className="vt-advanced-fields">
       {cap.seed && <label>Seed{!hasReferences && (cap.seed_requires_references ?? true) && <span>Vereist referentiemedia</span>}<input type="number" aria-label="Seed" step={1} placeholder="Willekeurig" disabled={!hasReferences && (cap.seed_requires_references ?? true)} value={g.seed ?? ''} onChange={e => onPatch({ seed: e.target.value === '' ? undefined : Number(e.target.value) })} /></label>}
       {cap.bitrate_mode && <label>Bitrate<select aria-label="Bitrate" value={g.bitrateMode ?? 'standard'} onChange={e => onPatch({ bitrateMode: e.target.value as 'standard' | 'high' })}><option value="standard">Standaard</option><option value="high">Hoog</option></select></label>}
       {cap.codec && <label>Codec<select aria-label="Codec" value={g.codec ?? 'auto'} onChange={e => onPatch({ codec: e.target.value as 'auto' | 'H264' | 'H265' })}><option value="auto">auto</option><option value="H264">H264</option><option value="H265">H265</option></select></label>}
-    </div></details>}
+    </div>}
     {cap?.extra_fields && <VideoModelFields fields={cap.extra_fields} values={g.extraParams ?? {}} onChange={(key, value) => onPatch({ extraParams: { ...g.extraParams, [key]: value } })} />}
+    </details>
     {cap?.notice && <p className="vt-help">{cap.notice}</p>}
     {state.errors.filter(e => !e.includes('generatieduur') && cap).map(error => <p className="vt-help" role="alert" key={error}>{error}</p>)}
   </fieldset>
