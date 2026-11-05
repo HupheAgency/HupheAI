@@ -1,6 +1,9 @@
 import { app, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, access, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { constants } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { findTimelineTools, pickTimelineEncoder, timelineExtensions } from './lib/video-timeline-media'
 import { extractTimelineAudio, importTimelineSources, listTimelineProjects, parseTimelineProject, saveTimelineProject, timelineImportSchema, timelineProjectDirectory, validateOwnedAssets } from './lib/video-timeline-storage'
 import { parseTimelineExportOptions, renderTimelineProject } from './lib/video-timeline-export'
@@ -8,6 +11,63 @@ import { prepareTimelineReferences } from './lib/video-timeline-references'
 import { captureTimelineTransition } from './lib/video-timeline-transition'
 
 let registered = false
+
+type InstallResult = { ok: boolean; reason?: 'declined' | 'failed'; error?: string }
+let installing: Promise<InstallResult> | undefined
+
+const brewCandidates = ['/opt/homebrew/bin/brew', '/usr/local/bin/brew']
+async function findBrew(): Promise<string | undefined> {
+  for (const candidate of brewCandidates) {
+    try { await access(candidate, constants.X_OK); return candidate } catch { /* next location */ }
+  }
+}
+
+function run(command: string, args: string[], env: NodeJS.ProcessEnv, minutes: number): Promise<InstallResult> {
+  return new Promise(resolve => {
+    const child = spawn(command, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    let tail = ''
+    const keep = (chunk: Buffer) => { tail = (tail + chunk.toString()).slice(-1500) }
+    child.stdout.on('data', keep); child.stderr.on('data', keep)
+    const timer = setTimeout(() => child.kill(), minutes * 60_000)
+    child.on('error', error => { clearTimeout(timer); resolve({ ok: false, reason: 'failed', error: error.message }) })
+    child.on('close', code => { clearTimeout(timer); resolve(code === 0 ? { ok: true } : { ok: false, reason: 'failed', error: tail.trim().split('\n').slice(-6).join('\n') || `Installatie stopte met code ${code}` }) })
+  })
+}
+
+/** Homebrew's own installer, with the Mac password asked in a normal macOS dialog (sudo's askpass hook). */
+async function installHomebrew(): Promise<InstallResult> {
+  const choice = await dialog.showMessageBox({
+    type: 'question', buttons: ['Installeren', 'Annuleren'], defaultId: 0, cancelId: 1,
+    message: 'Homebrew en FFmpeg installeren?',
+    detail: 'Voor de videotimeline is FFmpeg nodig. Dat wordt geïnstalleerd met Homebrew, dat nog niet op deze Mac staat. Je Mac vraagt zo om je wachtwoord. Dit kan 10 tot 20 minuten duren; laat de app open.',
+  })
+  if (choice.response !== 0) return { ok: false, reason: 'declined' }
+  const dir = await mkdtemp(join(tmpdir(), 'huphe-brew-'))
+  try {
+    const askpass = join(dir, 'askpass.sh')
+    await writeFile(askpass, `#!/bin/sh\n/usr/bin/osascript -e 'text returned of (display dialog "HupheAI heeft het wachtwoord van je Mac nodig om Homebrew te installeren." default answer "" with hidden answer with title "HupheAI" with icon caution)'\n`, { mode: 0o700 })
+    const response = await fetch('https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh')
+    if (!response.ok) return { ok: false, reason: 'failed', error: `Homebrew downloaden mislukte (${response.status}).` }
+    const script = join(dir, 'install.sh')
+    await writeFile(script, await response.text(), { mode: 0o700 })
+    const result = await run('/bin/bash', [script], { NONINTERACTIVE: '1', SUDO_ASKPASS: askpass, HOMEBREW_NO_ANALYTICS: '1' }, 45)
+    if (!result.ok) return result
+    return await findBrew() ? { ok: true } : { ok: false, reason: 'failed', error: 'Homebrew is geïnstalleerd, maar niet gevonden.' }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+}
+
+/** Installs FFmpeg through Homebrew, installing Homebrew first (with a confirmation and a password prompt) when it is missing. */
+async function installFfmpegWithBrew(): Promise<InstallResult> {
+  let brew = await findBrew()
+  if (!brew) {
+    const installed = await installHomebrew()
+    if (!installed.ok) return installed
+    brew = await findBrew()
+    if (!brew) return { ok: false, reason: 'failed', error: 'Homebrew is niet gevonden na het installeren.' }
+  }
+  return run(brew, ['install', 'ffmpeg'], { HOMEBREW_NO_ENV_HINTS: '1', HOMEBREW_NO_INSTALL_CLEANUP: '1', HOMEBREW_NO_ANALYTICS: '1' }, 30)
+}
+
 const rootDirectory = () => process.env.HUPHE_TIMELINE_ROOT || join(app.getPath('documents'), 'HupheAI', 'Video')
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
 
@@ -20,6 +80,10 @@ export function registerVideoTimelineIPC(): void {
       const encoder = tools.ffmpeg ? await pickTimelineEncoder(tools.ffmpeg) : undefined
       return { ok: true, encoder, ffmpeg: !!tools.ffmpeg, ffprobe: !!tools.ffprobe, ffmpegPath: tools.ffmpeg, ffprobePath: tools.ffprobe }
     } catch (error) { return { ok: false, error: message(error), ffmpeg: false, ffprobe: false } }
+  })
+  ipcMain.handle('timeline:install-ffmpeg', async () => {
+    installing ??= installFfmpegWithBrew().finally(() => { installing = undefined })
+    return installing
   })
   ipcMain.handle('timeline:list', async () => {
     try { return { ok: true, ...await listTimelineProjects(rootDirectory()) } }

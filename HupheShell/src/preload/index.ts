@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld('api', {
     captureTransition: (payload: unknown) => ipcRenderer.invoke('timeline:capture-transition', payload),
     export: (project: unknown, settings?: unknown) => ipcRenderer.invoke('timeline:export', project, settings),
     tools: () => ipcRenderer.invoke('timeline:tools'),
+    installFfmpeg: () => ipcRenderer.invoke('timeline:install-ffmpeg'),
   },
   platform: process.platform,
   generateDeck: () => ipcRenderer.invoke('deck:generate'),
