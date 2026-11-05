@@ -78,6 +78,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const [capError, setCapError] = useState('')
   const modelRequest = useRef<Promise<void> | null>(null)
   const [library, setLibrary] = useState(false)
+  const [assetMenu, setAssetMenu] = useState<{ x: number; y: number; assetId: string } | null>(null)
   const [mediaView, setMediaView] = useState<'grid' | 'list'>(() => { try { return localStorage.getItem('vt-media-view') === 'list' ? 'list' : 'grid' } catch { return 'grid' } })
   const chooseMediaView = (v: 'grid' | 'list') => { setMediaView(v); try { localStorage.setItem('vt-media-view', v) } catch { /* voorkeur niet bewaren is geen probleem */ } }
   const [toolsAvailable, setToolsAvailable] = useState(true)
@@ -494,6 +495,15 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
     if (tracks) apply({ ...current.current, tracks })
   }
   const trackDropOk = (id: string) => !!trackDrag && trackDrag.id !== id && tracks.find(t => t.id === trackDrag.id)?.kind === tracks.find(t => t.id === id)?.kind
+
+  function saveAsset(assetId: string) {
+    setMenu(null); setAssetMenu(null)
+    void action('Media opslaan…', async () => {
+      const r = await api().timeline.saveAsset(current.current, assetId)
+      if (r.ok) setMessage('Opgeslagen als ' + r.path)
+      else if (!r.canceled) throw new Error(r.error ?? 'Opslaan is niet gelukt.')
+    })
+  }
 
   async function action(label: string, fn: () => Promise<void>) {
     if (busy) return
@@ -1051,7 +1061,10 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
 
   return <div ref={root} className={`vt${assetDragging ? ' vt-asset-dragging' : ''}`} data-testid="video-timeline" tabIndex={-1} onKeyDown={handleKeyDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}>{menu && (() => { const target = project.clips.find(c => c.id === menu.clipId); const asset = target && activeMedia(project, target).asset; return <div className="vt-menu-backdrop" onPointerDown={() => setMenu(null)} onContextMenu={e => { e.preventDefault(); setMenu(null) }}><div className="vt-menu" role="menu" style={{ left: Math.min(menu.x, window.innerWidth - 230), top: Math.min(menu.y, window.innerHeight - 140) }} onPointerDown={e => e.stopPropagation()}>
       {asset?.kind === 'image' ? <button role="menuitem" onClick={() => openInAtelier(menu.clipId)}>Bewerken in Afbeeldingen</button> : <button role="menuitem" disabled>{asset ? 'Alleen afbeeldingen kunnen in Afbeeldingen worden geopend' : 'Nog geen media in dit blok'}</button>}
+      {asset && <button role="menuitem" onClick={() => saveAsset(asset.id)}>Downloaden</button>}
       <button role="menuitem" onClick={() => { setMenu(null); setSelected(menu.clipId); deleteSelectedClip() }}>Verwijderen</button></div></div> })()}
+    {assetMenu && <div className="vt-menu-backdrop" onPointerDown={() => setAssetMenu(null)} onContextMenu={e => { e.preventDefault(); setAssetMenu(null) }}><div className="vt-menu" role="menu" style={{ left: Math.min(assetMenu.x, window.innerWidth - 230), top: Math.min(assetMenu.y, window.innerHeight - 140) }} onPointerDown={e => e.stopPropagation()}>
+      <button role="menuitem" onClick={() => saveAsset(assetMenu.assetId)}>Downloaden</button></div></div>}
     <TimelineTooltip root={root} />
     <header className="vt-header">
       <div className="vt-title"><span>VIDEOMONTAGE</span><input aria-label="Projectnaam" value={project.name} onChange={e => apply({ ...project, name: e.target.value }, false)} /></div>
@@ -1100,7 +1113,7 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
         {([['image', 'Afbeeldingen'], ['video', 'Video'], ['audio', 'Audio']] as const).map(([kind, title]) => {
           const group = project.assets.filter(a => a.kind === kind)
           return group.length > 0 && <section className="vt-asset-group" key={kind}><h3 className="vt-asset-group-title">{title} <span>{group.length}</span></h3>
-            <div className={`vt-assets${mediaView === 'list' ? ' list' : ''}`}>{group.map(a => <button className="vt-asset" key={a.id} data-asset-id={a.id} disabled={!!busy} draggable={!busy}
+            <div className={`vt-assets${mediaView === 'list' ? ' list' : ''}`}>{group.map(a => <button className="vt-asset" key={a.id} data-asset-id={a.id} onContextMenu={e => { e.preventDefault(); setAssetMenu({ x: e.clientX, y: e.clientY, assetId: a.id }) }} disabled={!!busy} draggable={!busy}
           title="Sleep naar een spoor of klik om achteraan te plaatsen" onDragStart={e => dragAsset(e, a)} onDragEnd={endAssetDrag}
           onClick={() => { if (!suppressAssetClick.current) { setPlaying(false); addAssets([a]) } }}>
           <div className={`vt-asset-art ${a.kind}`}>{a.kind === 'image' ? <img src={a.src} alt="" draggable={false} /> : a.kind === 'audio' ? '♫' : '▶'}{a.kind !== 'image' && <span>{seconds(a.duration)} s</span>}</div>

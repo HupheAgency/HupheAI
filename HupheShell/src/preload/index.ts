@@ -89,6 +89,7 @@ contextBridge.exposeInMainWorld('api', {
     extractAudio: (payload: unknown) => ipcRenderer.invoke('timeline:extract-audio', payload),
     captureTransition: (payload: unknown) => ipcRenderer.invoke('timeline:capture-transition', payload),
     export: (project: unknown, settings?: unknown) => ipcRenderer.invoke('timeline:export', project, settings),
+    saveAsset: (project: unknown, assetId: string) => ipcRenderer.invoke('timeline:save-asset', project, assetId),
     tools: () => ipcRenderer.invoke('timeline:tools'),
     installFfmpeg: () => ipcRenderer.invoke('timeline:install-ffmpeg'),
   },

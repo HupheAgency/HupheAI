@@ -1,6 +1,6 @@
 import { app, dialog, ipcMain } from 'electron'
-import { join } from 'node:path'
-import { mkdir, access, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { join, extname } from 'node:path'
+import { mkdir, access, mkdtemp, writeFile, rm, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { constants } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -124,6 +124,21 @@ export function registerVideoTimelineIPC(): void {
   ipcMain.handle('timeline:capture-transition', async (_event, input: unknown) => {
     try { return { ok: true, ...await captureTimelineTransition(rootDirectory(), input) } }
     catch (error) { return { ok: false, assets: [], error: message(error) } }
+  })
+  ipcMain.handle('timeline:save-asset', async (_event, input: unknown, assetId: unknown) => {
+    try {
+      const snapshot = parseTimelineProject(input)
+      await validateOwnedAssets(rootDirectory(), snapshot)
+      const asset = snapshot.assets.find(a => a.id === assetId)
+      if (!asset) return { ok: false, error: 'Dit bestand zit niet in het project.' }
+      const extension = extname(asset.path) || ''
+      const base = asset.name.replace(/\.[^./\\]+$/, '').replace(/[^\p{L}\p{N} _-]/gu, '').trim().slice(0, 100) || 'media'
+      const selection = await dialog.showSaveDialog({ title: 'Media opslaan', defaultPath: join(app.getPath('downloads'), `${base}${extension}`),
+        filters: extension ? [{ name: 'Mediabestand', extensions: [extension.slice(1)] }] : [] })
+      if (selection.canceled || !selection.filePath) return { ok: false, canceled: true }
+      await copyFile(asset.path, selection.filePath)
+      return { ok: true, path: selection.filePath }
+    } catch (error) { return { ok: false, error: message(error) } }
   })
   ipcMain.handle('timeline:export', async (_event, input: unknown, settings?: unknown) => {
     try {
