@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join, extname } from 'node:path'
 import { mkdir, access, mkdtemp, writeFile, rm, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -133,8 +133,10 @@ export function registerVideoTimelineIPC(): void {
       if (!asset) return { ok: false, error: 'Dit bestand zit niet in het project.' }
       const extension = extname(asset.path) || ''
       const base = asset.name.replace(/\.[^./\\]+$/, '').replace(/[^\p{L}\p{N} _-]/gu, '').trim().slice(0, 100) || 'media'
-      const selection = await dialog.showSaveDialog({ title: 'Media opslaan', defaultPath: join(app.getPath('downloads'), `${base}${extension}`),
-        filters: extension ? [{ name: 'Mediabestand', extensions: [extension.slice(1)] }] : [] })
+      const parent = BrowserWindow.fromWebContents(_event.sender) ?? undefined
+      const options = { title: 'Media opslaan', defaultPath: join(app.getPath('downloads'), `${base}${extension}`),
+        filters: extension ? [{ name: 'Mediabestand', extensions: [extension.slice(1)] }] : [] }
+      const selection = parent ? await dialog.showSaveDialog(parent, options) : await dialog.showSaveDialog(options)
       if (selection.canceled || !selection.filePath) return { ok: false, canceled: true }
       await copyFile(asset.path, selection.filePath)
       return { ok: true, path: selection.filePath }
