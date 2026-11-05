@@ -1,5 +1,6 @@
 /** Minimal line icons (24×24, stroke only). Every icon button names itself through aria-label; the label shows as a tooltip after a pause. */
 const PATHS = {
+  plus: 'M12 5v14M5 12h14',
   videoAdd: 'M3 7a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM15 10l6-3v10l-6-3M9 9v6M6 12h6',
   audioAdd: 'M9 18V6l10-2v12M9 18a3 3 0 1 1-3-3 3 3 0 0 1 3 3zM19 16a3 3 0 1 1-3-3 3 3 0 0 1 3 3z',
   imageAdd: 'M4 5h16v14H4zM4 16l4-4 4 4 3-3 5 5M15 9.5h.01',
