@@ -66,6 +66,11 @@ export function TimelineGenerationControls({ project, clip, generation: g, capab
       {hasReferences && !state.mode?.allowsStartImage && <p className="vt-help">Referenties sturen deze generatie. Je start- en eindbeeld blijven bewaard.</p>}
       {!hasReferences && cap?.supports_end_image && !start && <p className="vt-help">Kies een startbeeld om ook een eindbeeld te gebruiken.</p>}
     </section>
+    {cap && <div className="vt-field-row">
+      <label>Resolutie<select aria-label="Resolutie" disabled={snapshot.draft} value={snapshot.resolution} onChange={e => onPatch({ resolution: e.target.value })}>{cap.supported_resolutions.map(r => <option key={r}>{r}</option>)}</select></label>
+      <label>Verhouding<select aria-label="Beeldverhouding" disabled={state.forcedAspect} value={snapshot.aspectRatio} onChange={e => onPatch({ aspectRatio: e.target.value })}>{snapshot.aspectRatio === 'auto' && !cap.supported_aspect_ratios.includes('auto') && <option value="auto">auto</option>}{cap.supported_aspect_ratios.map(r => <option key={r}>{r}</option>)}</select></label>
+    </div>}
+    {cap?.generate_audio && <section className="vt-generation-card"><label className="vt-switch">Audio<input type="checkbox" role="switch" aria-label="Audio genereren" checked={snapshot.generateAudio ?? false} onChange={e => onPatch({ generateAudio: e.target.checked })} /></label><p className="vt-help">Genereer geluid bij de video. Voeg het bij Varianten toe met ‘Geluid op audiospoor’.</p></section>}
     <details className="vt-generation-card vt-more" open={hasReferences || undefined}><summary>Geavanceerd</summary>
     {(cap?.supports_references || references.length > 0) && <section className="vt-generation-card">
       <h3>Referenties</h3>
@@ -92,11 +97,6 @@ export function TimelineGenerationControls({ project, clip, generation: g, capab
     <p className="vt-help">Op de tijdlijn: <span data-testid="timeline-block-duration">{duration} s</span>. De generatieduur bepaalt hoeveel beeld je laat maken; de uitsnede stel je in bij Fragment.</p>
     <button type="button" onClick={onTrim}>Lengte en uitsnede aanpassen</button>
     {cap?.supports_draft && <section className="vt-generation-card"><label className="vt-switch">Draft<input type="checkbox" role="switch" aria-label="Draft" checked={snapshot.draft ?? false} disabled={hasReferences && !cap.supports_reference_draft} onChange={e => onPatch({ draft: e.target.checked })} /></label><p className="vt-help">{hasReferences && !cap.supports_reference_draft ? 'Draft is niet beschikbaar met referentiemedia. Een apart startbeeld kan wel.' : 'Maak eerst een draft in 480p. Render die later bij Varianten naar 1080p.'}</p></section>}
-    {cap && <div className="vt-field-row">
-      <label>Resolutie<select aria-label="Resolutie" disabled={snapshot.draft} value={snapshot.resolution} onChange={e => onPatch({ resolution: e.target.value })}>{cap.supported_resolutions.map(r => <option key={r}>{r}</option>)}</select></label>
-      <label>Verhouding<select aria-label="Beeldverhouding" disabled={state.forcedAspect} value={snapshot.aspectRatio} onChange={e => onPatch({ aspectRatio: e.target.value })}>{snapshot.aspectRatio === 'auto' && !cap.supported_aspect_ratios.includes('auto') && <option value="auto">auto</option>}{cap.supported_aspect_ratios.map(r => <option key={r}>{r}</option>)}</select></label>
-    </div>}
-    {cap?.generate_audio && <section className="vt-generation-card"><label className="vt-switch">Audio<input type="checkbox" role="switch" aria-label="Audio genereren" checked={snapshot.generateAudio ?? false} onChange={e => onPatch({ generateAudio: e.target.checked })} /></label><p className="vt-help">Genereer geluid bij de video. Voeg het bij Varianten toe met ‘Geluid op audiospoor’.</p></section>}
     {(cap?.seed || cap?.bitrate_mode || cap?.codec) && <div className="vt-advanced-fields">
       {cap.seed && <label>Seed{!hasReferences && (cap.seed_requires_references ?? true) && <span>Vereist referentiemedia</span>}<input type="number" aria-label="Seed" step={1} placeholder="Willekeurig" disabled={!hasReferences && (cap.seed_requires_references ?? true)} value={g.seed ?? ''} onChange={e => onPatch({ seed: e.target.value === '' ? undefined : Number(e.target.value) })} /></label>}
       {cap.bitrate_mode && <label>Bitrate<select aria-label="Bitrate" value={g.bitrateMode ?? 'standard'} onChange={e => onPatch({ bitrateMode: e.target.value as 'standard' | 'high' })}><option value="standard">Standaard</option><option value="high">Hoog</option></select></label>}
