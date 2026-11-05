@@ -131,3 +131,6 @@
 .vt .vt-menu button{text-align:left;border:0;background:transparent;border-radius:9px;padding:8px 10px;white-space:normal}
 .vt .vt-menu button:hover:not(:disabled){background:#262626}
 .vt-more>summary{cursor:pointer;color:rgba(255,255,255,.6)}
+
+.vt-library-bar{display:flex;align-items:center;justify-content:space-between;gap:8px}.vt-view-toggle{display:flex;gap:2px}
+.vt .vt-assets.list{gap:4px}.vt .vt-assets.list .vt-asset{grid-template-columns:56px 1fr;align-items:center;padding:4px;gap:8px}.vt .vt-assets.list .vt-asset-art{height:40px;border-radius:6px;overflow:hidden}.vt .vt-assets.list .vt-asset-art span{display:none}.vt .vt-assets.list .vt-asset-text b,.vt .vt-assets.list .vt-asset-text small{padding:0}

@@ -276,6 +276,7 @@ async function assertEmptyGapClearsPreview() {
 async function multitrackEditing() {
  await click('Nieuw');await until("document.querySelectorAll('[data-clip-id]').length===0",'new multitrack project');
  await importFile('video','source-A.mp4');await importFile('video','source-B.mp4');
+ await click('Lijst');await until("document.querySelector('.vt-assets.list')",'list view');await writeFile(join(work,'artifacts','media-list.png'),(await window.webContents.capturePage()).toPNG());await click('Miniaturen');await until("!document.querySelector('.vt-assets.list')",'grid view');
  const projectId=await js("localStorage.getItem('huphe:timeline:last-project')");
  const save=async()=>{await click('Opslaan');return JSON.parse(await readFile(join(process.env.HUPHE_TIMELINE_ROOT,projectId,'project.json'),'utf8'));};
  const select=async id=>{await js(`document.querySelector('[data-clip-id="${id}"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);await click('Fragment');};

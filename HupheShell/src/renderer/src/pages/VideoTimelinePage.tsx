@@ -78,6 +78,8 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
   const [capError, setCapError] = useState('')
   const modelRequest = useRef<Promise<void> | null>(null)
   const [library, setLibrary] = useState(false)
+  const [mediaView, setMediaView] = useState<'grid' | 'list'>(() => { try { return localStorage.getItem('vt-media-view') === 'list' ? 'list' : 'grid' } catch { return 'grid' } })
+  const chooseMediaView = (v: 'grid' | 'list') => { setMediaView(v); try { localStorage.setItem('vt-media-view', v) } catch { /* voorkeur niet bewaren is geen probleem */ } }
   const [toolsAvailable, setToolsAvailable] = useState(true)
   const [, bumpHistory] = useState(0)
   const history = useRef<{ undo: TimelineEdit[]; redo: TimelineEdit[] }>({ undo: [], redo: [] })
@@ -1089,16 +1091,17 @@ export default function VideoTimelinePage({ active = true }: { active?: boolean 
       {unknownJobs.map(job => <button key={job.id} className="vt-job-resolve" title="Ik heb dit gecontroleerd; nieuwe generaties weer toestaan" disabled={!!generating} onClick={() => apply({ ...current.current, jobs: current.current.jobs?.map(j => j.id === job.id ? { ...j, status: 'failed' as const, error: 'Handmatig afgehandeld na onbekende uitkomst.' } : j) }, false)}>{project.clips.find(c => c.id === job.clipId)?.label ?? 'Fragment'} · {new Date(job.createdAt).toLocaleString('nl-NL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} · afgehandeld</button>)}</div>}
     <div className="vt-workspace">
       <aside className="vt-library"><h2>Projectmedia <span>{project.assets.length}</span></h2>
-        <div className="vt-imports"><button className={`vt-icon vt-add${library ? ' on' : ''}`} aria-label="Media toevoegen" aria-expanded={library} title="Media toevoegen" disabled={!!busy} onClick={() => setLibrary(!library)}><Icon name="plus" /></button>
+        <div className="vt-library-bar"><div className="vt-imports"><button className={`vt-icon vt-add${library ? ' on' : ''}`} aria-label="Media toevoegen" aria-expanded={library} title="Media toevoegen" disabled={!!busy} onClick={() => setLibrary(!library)}><Icon name="plus" /></button>
           {library && <><div className="vt-menu-backdrop" onClick={() => setLibrary(false)} /><div className="vt-menu vt-add-menu" role="menu">
             {([['video', 'videoAdd', 'Video toevoegen'], ['audio', 'audioAdd', 'Audio toevoegen'], ['image', 'imageAdd', 'Afbeelding toevoegen']] as const).map(([kind, icon, label]) => <button key={kind} role="menuitem" aria-label={label} onClick={() => { setLibrary(false); void importMedia(kind) }}><Icon name={icon} size={16} /> {label.replace(' toevoegen', '')} van deze computer</button>)}
             {libraryItems.length > 0 && <><h3>Eerder gegenereerd</h3>{libraryItems.map((a, i) => <button key={i} role="menuitem" onClick={() => { setLibrary(false); void importMedia(a.kind, [{ src: a.src, name: a.name }]) }}>{a.kind === 'audio' ? '♫' : '▶'} {a.name}</button>)}</>}
           </div></>}</div>
-        <div className="vt-assets">{project.assets.map(a => <button className="vt-asset" key={a.id} data-asset-id={a.id} disabled={!!busy} draggable={!busy}
+          <div className="vt-view-toggle" role="group" aria-label="Weergave media">{([['grid', 'gridView', 'Miniaturen'], ['list', 'listView', 'Lijst']] as const).map(([v, icon, label]) => <button key={v} className={`vt-icon${mediaView === v ? ' on' : ''}`} aria-label={label} aria-pressed={mediaView === v} title={label} onClick={() => chooseMediaView(v)}><Icon name={icon} /></button>)}</div></div>
+        <div className={`vt-assets${mediaView === 'list' ? ' list' : ''}`}>{project.assets.map(a => <button className="vt-asset" key={a.id} data-asset-id={a.id} disabled={!!busy} draggable={!busy}
           title="Sleep naar een spoor of klik om achteraan te plaatsen" onDragStart={e => dragAsset(e, a)} onDragEnd={endAssetDrag}
           onClick={() => { if (!suppressAssetClick.current) { setPlaying(false); addAssets([a]) } }}>
           <div className={`vt-asset-art ${a.kind}`}>{a.kind === 'image' ? <img src={a.src} alt="" draggable={false} /> : a.kind === 'audio' ? '♫' : '▶'}{a.kind !== 'image' && <span>{seconds(a.duration)} s</span>}</div>
-          <b>{a.name}</b><small>{a.width ? `${a.width} × ${a.height}` : 'Audio'} · sleep of klik</small></button>)}</div>
+          <span className="vt-asset-text"><b>{a.name}</b><small>{a.width ? `${a.width} × ${a.height}` : 'Audio'}{a.kind !== 'image' ? ` · ${seconds(a.duration)} s` : ''}</small></span></button>)}</div>
         {!project.assets.length && <p className="vt-help">Voeg je bestaande fragmenten toe. De volledige bron blijft bewaard wanneer je knipt.</p>}
       </aside>
       <main className="vt-viewer" ref={viewerRef}><div className="vt-viewer-top"><span>{clip?.label ?? 'Je film'}</span><span>{project.width} × {project.height} · {project.fps} fps</span></div>
