@@ -1,5 +1,8 @@
 # Videomodellen — mogelijkheden en bediening
 
+> **5 november 2026:** Kling 3 Pro is vervangen door **Kling 4** (`fal-ai/kling-video/v4`: tekst `kling/v4/text-to-video`, beeld `fal-ai/kling-video/v4/image-to-video`) en Wan 2.5 Preview door **Wan 2.7** (`fal-ai/wan/v2.7/text-to-video` en `/image-to-video`). Gecontroleerd tegen fal's schema's; Kling 4 heeft geen audio, seed of elementen, wel 3–30 s, 720p/1080p en shots (max. 512 tekens per shot). Wan 2.7: 2–15 s, 720p/1080p, eindbeeld, eigen audio. Nog niet gebouwd: Wan 2.7 reference-to-video, video continuation en video edit (limieten en endpointnaam nog niet bevestigd), Kling 4 reference-to-video (API 'coming soon'). De tekst hieronder over Kling 3 en Wan 2.5 is verouderd. Vereist een deploy van `proxy-fal-video` en migratie `20261105000100_kling4_wan27_models.sql`.
+
+
 Gecontroleerd op 3 november 2026. Scope: de generatie-ingangen van Seedance 2.5, Veo 3.1, Kling 3 Pro en Wan 2.5 Preview via fal, in **Single én Timeline**. Kling 3 blijft op verzoek van Tom actief tot Kling 4 bij fal beschikbaar is. Beeld maken blijft in de beeldmodule.
 
 De instellingen hieronder zijn aangesloten op de aanvraagroute en lokaal getest. Een lokale simulatie bewijst de bediening en meegestuurde instellingen; de kwaliteit, wachttijd en acceptatie door de echte provider moeten tijdens gebruik blijken. Deze uitbreiding start geen betaalde proeven.

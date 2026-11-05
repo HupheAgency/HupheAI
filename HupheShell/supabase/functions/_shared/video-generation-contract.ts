@@ -3,8 +3,10 @@
  */
 export const SEEDANCE = 'bytedance/seedance-2.5'
 export const VEO = 'fal-ai/veo3.1'
-export const KLING = 'fal-ai/kling-video/v3/pro'
-export const WAN = 'fal-ai/wan-25-preview'
+// Logische model-id's (niet de fal-endpoints zelf): Kling 4 heeft voor tekst en beeld twee
+// verschillende endpointfamilies, Wan 2.7 zit onder fal-ai/wan/v2.7/*.
+export const KLING = 'fal-ai/kling-video/v4'
+export const WAN = 'fal-ai/wan/v2.7'
 const range = (min: number, max: number) => Array.from({ length: max - min + 1 }, (_, i) => min + i)
 const safety = { type: 'boolean', label: 'Veiligheidscontrole', default: true, description: 'Uitschakelen vereist toestemming van de provider; zonder die toestemming blijft de controle actief.' }
 const negative = (maxLength: number) => ({ type: 'text', label: 'Negatieve prompt', maxLength, description: 'Wat wil je uit het resultaat weglaten?' })
@@ -12,17 +14,12 @@ const veoFields = { variant: { type: 'select', label: 'Veo-uitvoering', options:
   negative_prompt: negative(20_000), auto_fix: { type: 'boolean', label: 'Prompt automatisch corrigeren', default: false },
   safety_tolerance: { type: 'select', label: 'Moderatiegevoeligheid', options: ['1', '2', '3', '4', '5', '6'], default: '4', description: '1 is het strengst; 6 het minst streng.' } }
 const { negative_prompt: _negative, ...veoReferenceFields } = veoFields
-const klingFields = { negative_prompt: { ...negative(2500), default: 'blur, distort, and low quality' },
-  cfg_scale: { type: 'number', label: 'Prompt volgen', min: 0, max: 1, step: 0.05, default: 0.5 },
-  shot_type: { type: 'select', label: 'Shotindeling', options: ['customize', 'intelligent'], default: 'customize' },
-  multi_prompt: { type: 'json', label: 'Shots', description: 'Beschrijf ieder shot en kies de duur; de som moet gelijk zijn aan de generatieduur.' },
-  enable_safety_checker: safety }
-const elements = { type: 'json', label: 'Personages en objecten', description: 'Gebruik een hoofdbeeld met 1–3 extra aanzichten, of één videoreferentie. Verwijs in je prompt naar @Element1, @Element2 enzovoort.' }
+const klingFields = { multi_prompt: { type: 'json', label: 'Shots', description: 'Beschrijf ieder shot (maximaal 512 tekens) en kies de duur; de som moet gelijk zijn aan de generatieduur.' } }
 export const REFERENCE_RULES: Record<string, any> = {
   [SEEDANCE]: { image: { max_bytes: 30 * 1024 ** 2 }, video: { min_duration: 1.8, max_duration: 30.2, max_total_duration: 30.2, max_bytes: 200 * 1024 ** 2, min_dimension: 300, max_dimension: 6000, min_fps: 24, max_fps: 60, extensions: ['.mp4', '.mov'] }, audio: { min_duration: 1.8, max_duration: 30.2, max_total_duration: 30.2, max_bytes: 15 * 1024 ** 2, extensions: ['.wav', '.mp3'] } },
   [VEO]: { image: { max_bytes: 8 * 1024 ** 2 }, video: { min_duration: 0.04, max_duration: 8, max_total_duration: 8, max_bytes: 200 * 1024 ** 2 } },
-  [WAN]: { image: { max_bytes: 10 * 1024 ** 2, min_dimension: 360, max_dimension: 2000 }, audio: { min_duration: 3, max_duration: 30, max_total_duration: 30, max_bytes: 15 * 1024 ** 2, extensions: ['.wav', '.mp3'] } },
-  [KLING]: { image: { max_bytes: 50 * 1024 ** 2, min_dimension: 300 } },
+  [WAN]: { image: { max_bytes: 20 * 1024 ** 2 }, audio: { min_duration: 3, max_duration: 30, max_total_duration: 30, max_bytes: 15 * 1024 ** 2, extensions: ['.wav', '.mp3'] } },
+  [KLING]: { image: { max_bytes: 30 * 1024 ** 2, min_dimension: 300 } },
 }
 
 export function enhanceVideoCapability(cap: any): any {
@@ -40,13 +37,17 @@ export function enhanceVideoCapability(cap: any): any {
     mode_overrides: { image: { supported_aspect_ratios: ['auto', '16:9', '9:16'] }, frames: { supported_aspect_ratios: ['auto', '16:9', '9:16'] },
       reference: { supported_durations: [8], seed: false, extra_fields: veoReferenceFields, reference_limits: { image: 3, video: 0, audio: 0 } },
       extension: { supported_durations: [7], supported_resolutions: ['720p'], supported_aspect_ratios: ['auto', '16:9', '9:16'], high_resolution_duration: undefined, reference_limits: { image: 0, video: 1, audio: 0 } } } }
-  if (cap.model_id === WAN) return { ...cap, ...common, seed: true, native_audio: true, supports_references: true, reference_with_start_image: true,
-    reference_limits: { image: 0, video: 0, audio: 1 }, reference_tasks: ['reference'], aspect_ratio_from_image: true, prompt_max_length: 1500,
+  if (cap.model_id === WAN) return { ...cap, ...common, supported_durations: range(2, 15), supported_resolutions: ['720p', '1080p'],
+    supported_aspect_ratios: ['16:9', '9:16', '1:1', '4:3', '3:4'], seed: true, native_audio: true, supports_end_image: true,
+    supports_references: true, reference_with_start_image: true,
+    reference_limits: { image: 0, video: 0, audio: 1 }, reference_tasks: ['reference'], aspect_ratio_from_image: true, prompt_max_length: 5000,
+    prompt_optional: true, pricing_skus: { duration_seconds_720p: '0.10', duration_seconds_1080p: '0.15' },
     extra_fields: { negative_prompt: negative(500), enable_prompt_expansion: { type: 'boolean', label: 'Prompt uitbreiden', default: true }, enable_safety_checker: safety },
     notice: 'Wan maakt geluid bij de video. Je kunt één eigen WAV- of MP3-bestand toevoegen (3–30 s, maximaal 15 MB).' }
-  if (cap.model_id === KLING) return { ...cap, ...common, supported_durations: range(3, 15), aspect_ratio_from_image: true,
-    prompt_max_length: 2500, extra_fields: klingFields, prompt_optional: true,
-    mode_overrides: { image: { extra_fields: { ...klingFields, elements } }, frames: { extra_fields: { ...klingFields, elements } } } }
+  if (cap.model_id === KLING) return { ...cap, ...common, supported_durations: range(3, 30), supported_resolutions: ['720p', '1080p'],
+    supported_aspect_ratios: ['16:9', '9:16', '1:1', '21:9'], generate_audio: false, seed: false, supports_end_image: true, image_url_field: 'start_image_url',
+    aspect_ratio_from_image: true, prompt_max_length: 20_000, extra_fields: klingFields, prompt_optional: true,
+    pricing_skus: { duration_seconds_720p: '0.157', duration_seconds_1080p: '0.235' } }
   return cap
 }
 function veoPricing(fast: boolean) {
@@ -81,35 +82,17 @@ function extras(fields: Record<string, any>, raw: unknown): Record<string, any> 
   }
   return result
 }
-function validateKlingExtras(extra: Record<string, any>, duration: number, prompt: string | undefined, audio: boolean) {
+function validateKlingExtras(extra: Record<string, any>, duration: number, prompt: string | undefined, hasStart: boolean) {
   if (extra.multi_prompt != null) {
     if (!Array.isArray(extra.multi_prompt) || !extra.multi_prompt.length || extra.multi_prompt.length > 15) fail('Voeg één tot vijftien shots toe.')
     if (prompt?.trim()) fail('Gebruik óf één prompt óf afzonderlijke shots; niet beide.')
     extra.multi_prompt = extra.multi_prompt.map((shot: any) => {
       const n = Number(shot?.duration)
-      if (typeof shot?.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 2500 || !Number.isInteger(n) || n < 1 || n > 15) fail('Ieder shot heeft een prompt en een duur van 1–15 seconden nodig.')
-      return { prompt: shot.prompt, duration: String(n) }
+      if (typeof shot?.prompt !== 'string' || !shot.prompt.trim() || shot.prompt.length > 512 || !Number.isInteger(n) || n < 1 || n > 30) fail('Ieder shot heeft een prompt (maximaal 512 tekens) en een duur van 1–30 seconden nodig.')
+      return { prompt: shot.prompt, duration: n }
     })
     if (extra.multi_prompt.reduce((n: number, s: any) => n + Number(s.duration), 0) !== duration) fail('De shotduren moeten samen gelijk zijn aan de generatieduur.')
-  } else if (!prompt?.trim()) fail('Vul een prompt in of voeg shots toe.')
-  if (extra.elements != null) {
-    if (!Array.isArray(extra.elements)) fail('Ongeldige lijst personages/objecten.')
-    let videos = 0
-    extra.elements = extra.elements.map((element: any) => {
-      if (!element || typeof element !== 'object') fail('Ongeldig personage/object.')
-      const e: Record<string, unknown> = {}
-      if (element.video_url) { videos++; e.video_url = mediaUrl(element.video_url, 'Elementvideo'); if (element.frontal_image_url || element.reference_image_urls?.length) fail('Kies beelden of een video per element.') }
-      else {
-        e.frontal_image_url = mediaUrl(element.frontal_image_url, 'Hoofdbeeld')
-        const refs = urls(element.reference_image_urls, 'Extra aanzichten')
-        if (refs.length < 1 || refs.length > 3) fail('Een beeldelement heeft één tot drie extra aanzichten nodig.')
-        e.reference_image_urls = refs
-      }
-      if (element.voice_id) { if (typeof element.voice_id !== 'string' || element.voice_id.length > 200 || !audio) fail('Een stem-ID vereist gegenereerde audio.'); e.voice_id = element.voice_id }
-      return e
-    })
-    if (videos > 1) fail('Kling 3 ondersteunt maximaal één video-element.')
-  }
+  } else if (!prompt?.trim() && !hasStart) fail('Vul een prompt in of voeg shots toe.')
 }
 export function buildVideoGenerationRequest(base: any, input: Record<string, any>) {
   const model = base.model_id
@@ -144,10 +127,11 @@ export function buildVideoGenerationRequest(base: any, input: Record<string, any
   const audio = cap.generate_audio ? input.generate_audio ?? true : false
   if (typeof audio !== 'boolean') fail('Audio moet aan of uit zijn.')
   if (input.seed != null && (!Number.isSafeInteger(input.seed) || !cap.seed || cap.seed_requires_references && !hasRefs)) fail('Seed is niet geldig of niet beschikbaar in deze modus.')
-  if (model === KLING) validateKlingExtras(extra, Number(duration), prompt, audio)
+  if (model === KLING) validateKlingExtras(extra, Number(duration), prompt, !!start)
+  if (model === WAN && !start && !prompt) fail('Vul een prompt in.')
   let endpoint: string
-  const body: Record<string, any> = { ...(prompt ? { prompt } : {}), duration: model === VEO ? `${duration}s` : String(duration) }
-  if (model !== KLING) body.resolution = resolution
+  const body: Record<string, any> = { ...(prompt ? { prompt } : {}), duration: model === VEO ? `${duration}s` : model === KLING || model === WAN ? Number(duration) : String(duration) }
+  body.resolution = resolution
   if (model === SEEDANCE || (model === VEO) || !start) body.aspect_ratio = aspect
   if (cap.generate_audio) body.generate_audio = audio
   if (input.seed != null) body.seed = input.seed
@@ -170,12 +154,12 @@ export function buildVideoGenerationRequest(base: any, input: Record<string, any
     delete extra.variant
   } else if (model === WAN) {
     endpoint = `${WAN}/${start ? 'image' : 'text'}-to-video`
-    if (start) body.image_url = start
+    if (start) { body.image_url = start; if (end) body.end_image_url = end }
     if (audios.length) body.audio_url = audios[0]
   } else if (model === KLING) {
-    endpoint = `${KLING}/${start ? 'image' : 'text'}-to-video`
+    // Tekst-naar-video draait onder 'kling/v4/…', beeld-naar-video onder 'fal-ai/kling-video/v4/…'.
+    endpoint = start ? 'fal-ai/kling-video/v4/image-to-video' : 'kling/v4/text-to-video'
     if (start) { body.start_image_url = start; if (end) body.end_image_url = end }
-    if (extra.elements?.some((e: any) => e.voice_id)) cap.audio_rate_multiplier = 0.196 / 0.112
   } else fail('Onbekend generatiecontract.')
   Object.assign(body, extra)
   return { endpoint, body, capability: cap, duration: duration === 'auto' ? 5 : duration, resolution, generateAudio: audio, draft, mode,

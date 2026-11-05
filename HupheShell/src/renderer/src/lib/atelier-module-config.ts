@@ -114,8 +114,8 @@ export const DEFAULT_MODULE_MODELS: Record<ModuleType, ModuleModelConfig[]> = {
   video: [
     { id: 'bytedance/seedance-2.5', label: 'Seedance 2.5', model: 'bytedance/seedance-2.5', provider: 'fal', modality: 'video' },
     { id: 'fal-ai/veo3.1', label: 'Veo 3.1', model: 'fal-ai/veo3.1', provider: 'fal', modality: 'video' },
-    { id: 'fal-ai/kling-video/v3/pro', label: 'Kling v3 Pro', model: 'fal-ai/kling-video/v3/pro', provider: 'fal', modality: 'video' },
-    { id: 'fal-ai/wan-25-preview', label: 'Wan 2.5 Preview', model: 'fal-ai/wan-25-preview', provider: 'fal', modality: 'video' },
+    { id: 'fal-ai/kling-video/v4', label: 'Kling 4', model: 'fal-ai/kling-video/v4', provider: 'fal', modality: 'video' },
+    { id: 'fal-ai/wan/v2.7', label: 'Wan 2.7', model: 'fal-ai/wan/v2.7', provider: 'fal', modality: 'video' },
     // De volgende 5 zijn tool-gebonden (sidebar-tool forceert het model, zie
     // VIDEO_EDIT_TOOLS/forcedModelId in AtelierMediaPanel.tsx) en worden daarom uit de
     // generieke Generate Video-dropdown gefilterd (VIDEO_TOOL_MODEL_IDS), maar moeten hier

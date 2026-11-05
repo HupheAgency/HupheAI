@@ -202,7 +202,7 @@ try {
   assert.notDeepEqual(fresh, references, 'every job gets freshly uploaded URLs')
   assert.ok(!(await readFile(join(root, 'media-tests', 'project.json'), 'utf8')).includes('https://test.invalid'), 'ephemeral upload URLs never persist')
   // The same owned media takes different routes and constraints per model.
-  const wanAudio = await backend.prepareTimelineReferences(root, { ...uploadRequest, modelId: 'fal-ai/wan-25-preview', assetIds: [longAudio[0].id] }, uploader, tools)
+  const wanAudio = await backend.prepareTimelineReferences(root, { ...uploadRequest, modelId: 'fal-ai/wan/v2.7', assetIds: [longAudio[0].id] }, uploader, tools)
   assert.equal(wanAudio.audioUrls.length, 1, 'Wan accepts its own 3–30 s WAV reference range')
   const veoExtension = await backend.prepareTimelineReferences(root, { ...uploadRequest, modelId: 'fal-ai/veo3.1', task: 'extension', assetIds: [videoAssets[0].id] }, uploader, tools)
   assert.equal(veoExtension.videoUrls.length, 1)
@@ -212,9 +212,9 @@ try {
   await assert.rejects(backend.prepareTimelineReferences(root, { ...uploadRequest, assetIds: ['missing'] }, uploader, tools), /behoort niet/)
   await assert.rejects(backend.prepareTimelineReferences(root, { ...uploadRequest, assetIds: [images[0].id, images[0].id] }, uploader, tools), /één keer/)
   await assert.rejects(backend.prepareTimelineReferences(root, { ...uploadRequest, projectId: 'project-1', assetIds: [audio[0].id] }, uploader, tools), /1,8 en 30,2/)
-  await assert.rejects(backend.prepareTimelineReferences(root, { ...uploadRequest, modelId: 'fal-ai/wan-25-preview', assetIds: [extracted.id] }, uploader, tools), /tussen 3 en 30/)
+  await assert.rejects(backend.prepareTimelineReferences(root, { ...uploadRequest, modelId: 'fal-ai/wan/v2.7', assetIds: [extracted.id] }, uploader, tools), /tussen 3 en 30/)
   await assert.rejects(backend.prepareTimelineReferences(root, { ...uploadRequest, modelId: 'fal-ai/veo3.1', task: 'reference', assetIds: [videoAssets[0].id] }, uploader, tools), /Maximaal 0 video/)
-  await assert.rejects(backend.prepareTimelineReferences(root, { ...uploadRequest, modelId: 'fal-ai/wan-25-preview', assetIds: [images[0].id] }, uploader, tools), /Maximaal 0 image/)
+  await assert.rejects(backend.prepareTimelineReferences(root, { ...uploadRequest, modelId: 'fal-ai/wan/v2.7', assetIds: [images[0].id] }, uploader, tools), /Maximaal 0 image/)
   for (const [kind, base, count, mb] of [['image', images[0], 31, 30], ['video', videoAssets[0], 11, 200], ['audio', extracted, 11, 15]]) {
     const duplicates = Array.from({ length: count }, (_, i) => ({ ...base, id: `limit-${kind}-${i}` }))
     await backend.saveTimelineProject(root, { ...mediaProject, assets: duplicates })

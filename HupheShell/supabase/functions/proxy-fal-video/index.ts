@@ -157,41 +157,33 @@ const CAPABILITIES: Record<string, VideoModelCapability> = {
     // Bevestigd in fal's pricing-tekst: met audio ~2x het stille tarief op 720p/1080p.
     audio_rate_multiplier: 2,
   },
-  'fal-ai/kling-video/v3/pro': {
-    model_id: 'fal-ai/kling-video/v3/pro',
-    supported_durations: [5, 10],
-    supported_resolutions: ['1080p'],
-    supported_aspect_ratios: ['16:9', '9:16', '1:1'],
-    generate_audio: true,
-    seed: false,
-    bitrate_mode: false,
-    codec: false,
-    // Start- en eindbeeld worden door het modelcontract naar Kling-velden vertaald.
-    supports_end_image: true,
-    image_url_field: 'start_image_url',
-    // Bevestigd via fal's eigen pricing-tekst: $0.112/s zonder audio, $0.168/s met
-    // audio (1.5x), $0.196/s met audio+voice-control via een element. Geen resolutie- of
-    // duration-afhankelijke staffel; de echte API kent zelfs geen resolution-veld
-    // (alleen aspect_ratio) -- supported_resolutions: ['1080p'] hierboven is puur
-    // een UI-label, geen echte fal-parameter.
-    pricing_skus: {
-      duration_seconds: '0.112',
-    },
-    audio_rate_multiplier: 1.5,
-  },
-  'fal-ai/wan-25-preview': {
-    model_id: 'fal-ai/wan-25-preview',
-    supported_durations: [5, 10],
-    supported_resolutions: ['480p', '720p', '1080p'],
-    supported_aspect_ratios: ['16:9', '9:16', '1:1'],
+  // Kling 4 en Wan 2.7: de echte velden/limieten komen uit enhanceVideoCapability
+  // (_shared/video-generation-contract.ts, gecontroleerd tegen fal's schema's op 2026-11-05).
+  'fal-ai/kling-video/v4': {
+    model_id: 'fal-ai/kling-video/v4',
+    supported_durations: [],
+    supported_resolutions: ['720p', '1080p'],
+    supported_aspect_ratios: ['16:9', '9:16', '1:1', '21:9'],
     generate_audio: false,
     seed: false,
     bitrate_mode: false,
     codec: false,
-    supports_end_image: false,
-    pricing_skus: {
-      duration_seconds: '0.15',
-    },
+    supports_end_image: true,
+    image_url_field: 'start_image_url',
+    // fal: $0.157/s op 720p, $0.235/s op 1080p (tekst-naar-video; de beeld-pagina noemt $0.157).
+    pricing_skus: { duration_seconds_720p: '0.157', duration_seconds_1080p: '0.235' },
+  },
+  'fal-ai/wan/v2.7': {
+    model_id: 'fal-ai/wan/v2.7',
+    supported_durations: [],
+    supported_resolutions: ['720p', '1080p'],
+    supported_aspect_ratios: ['16:9', '9:16', '1:1', '4:3', '3:4'],
+    generate_audio: false,
+    seed: true,
+    bitrate_mode: false,
+    codec: false,
+    supports_end_image: true,
+    pricing_skus: { duration_seconds_720p: '0.10', duration_seconds_1080p: '0.15' },
   },
 
   // ── Vijf "bewerk-bestaande-video"-tools: eigen family/pricing_model, geen van de
@@ -411,13 +403,13 @@ const ENDPOINTS: Record<string, {
     textToVideo: 'fal-ai/veo3.1',
     imageToVideo: 'fal-ai/veo3.1/image-to-video',
   },
-  'fal-ai/kling-video/v3/pro': {
-    textToVideo: 'fal-ai/kling-video/v3/pro/text-to-video',
-    imageToVideo: 'fal-ai/kling-video/v3/pro/image-to-video',
+  'fal-ai/kling-video/v4': {
+    textToVideo: 'kling/v4/text-to-video',
+    imageToVideo: 'fal-ai/kling-video/v4/image-to-video',
   },
-  'fal-ai/wan-25-preview': {
-    textToVideo: 'fal-ai/wan-25-preview/text-to-video',
-    imageToVideo: 'fal-ai/wan-25-preview/image-to-video',
+  'fal-ai/wan/v2.7': {
+    textToVideo: 'fal-ai/wan/v2.7/text-to-video',
+    imageToVideo: 'fal-ai/wan/v2.7/image-to-video',
   },
   'fal-ai/void-video-inpainting': {
     edit: 'fal-ai/void-video-inpainting',
