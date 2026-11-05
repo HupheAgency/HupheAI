@@ -39,6 +39,13 @@ export function TimelineGenerationControls({ project, clip, generation: g, capab
   }
   const referenceLabel = (kind: TimelineAsset['kind']) => kind === 'image' ? 'Image' : kind === 'video' ? 'Video' : 'Audio'
 
+  const MAIN_EXTRA = ['variant', 'negative_prompt']
+  const extraSplit = (main: boolean) => {
+    const entries = Object.entries(cap?.extra_fields ?? {}).filter(([key]) => MAIN_EXTRA.includes(key) === main)
+    return entries.length ? Object.fromEntries(entries) : null
+  }
+  const extraMain = extraSplit(true), extraRest = extraSplit(false)
+  const onExtra = (key: string, value: unknown) => onPatch({ extraParams: { ...g.extraParams, [key]: value } })
   return <fieldset className="vt-generation-controls" disabled={disabled}>
     <label>Prompt<textarea rows={5} placeholder="Wat gebeurt er in deze scène?" value={g.prompt} maxLength={cap?.prompt_max_length} onChange={e => onPatch({ prompt: e.target.value })} /></label>
     <div className="vt-duration-control">
@@ -71,6 +78,7 @@ export function TimelineGenerationControls({ project, clip, generation: g, capab
       <label>Verhouding<select aria-label="Beeldverhouding" disabled={state.forcedAspect} value={snapshot.aspectRatio} onChange={e => onPatch({ aspectRatio: e.target.value })}>{snapshot.aspectRatio === 'auto' && !cap.supported_aspect_ratios.includes('auto') && <option value="auto">auto</option>}{cap.supported_aspect_ratios.map(r => <option key={r}>{r}</option>)}</select></label>
     </div>}
     {cap?.generate_audio && <section className="vt-generation-card"><label className="vt-switch">Audio<input type="checkbox" role="switch" aria-label="Audio genereren" checked={snapshot.generateAudio ?? false} onChange={e => onPatch({ generateAudio: e.target.checked })} /></label><p className="vt-help">Genereer geluid bij de video. Voeg het bij Varianten toe met ‘Geluid op audiospoor’.</p></section>}
+    {extraMain && <VideoModelFields fields={extraMain} values={g.extraParams ?? {}} onChange={onExtra} />}
     <details className="vt-generation-card vt-more" open={hasReferences || undefined}><summary>Geavanceerd</summary>
     {(cap?.supports_references || references.length > 0) && <section className="vt-generation-card">
       <h3>Referenties</h3>
@@ -102,7 +110,7 @@ export function TimelineGenerationControls({ project, clip, generation: g, capab
       {cap.bitrate_mode && <label>Bitrate<select aria-label="Bitrate" value={g.bitrateMode ?? 'standard'} onChange={e => onPatch({ bitrateMode: e.target.value as 'standard' | 'high' })}><option value="standard">Standaard</option><option value="high">Hoog</option></select></label>}
       {cap.codec && <label>Codec<select aria-label="Codec" value={g.codec ?? 'auto'} onChange={e => onPatch({ codec: e.target.value as 'auto' | 'H264' | 'H265' })}><option value="auto">auto</option><option value="H264">H264</option><option value="H265">H265</option></select></label>}
     </div>}
-    {cap?.extra_fields && <VideoModelFields fields={cap.extra_fields} values={g.extraParams ?? {}} onChange={(key, value) => onPatch({ extraParams: { ...g.extraParams, [key]: value } })} />}
+    {extraRest && <VideoModelFields fields={extraRest} values={g.extraParams ?? {}} onChange={onExtra} />}
     </details>
     {cap?.notice && <p className="vt-help">{cap.notice}</p>}
     {state.errors.filter(e => !e.includes('generatieduur') && cap).map(error => <p className="vt-help" role="alert" key={error}>{error}</p>)}
