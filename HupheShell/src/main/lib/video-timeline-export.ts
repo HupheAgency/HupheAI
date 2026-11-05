@@ -1,6 +1,7 @@
 import { mkdir, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import { activeMedia, clipFades, clipSpeed, clipTrackId, renderableProject, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
 import { transitionPlaybackProblems } from '../../shared/video-timeline-transition'
 import { pickTimelineEncoder, probeTimelineMedia, requireTimelineTools, runTimelineTool, timelineEncoderArgs, type TimelineTools } from './video-timeline-media'
@@ -62,7 +63,7 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
   if (isWithinTimelineDirectory(managedRoot, outputDirectory) && outputDirectory.split(/[\\/]/).some(part => part === 'originals' || part === 'previews'))
     throw new Error('Bewaar de export buiten de mappen met originele media en previewkopieën.')
   if (project.assets.some(asset => (asset.path === join(outputDirectory, basename(outputPath)) || asset.previewPath === join(outputDirectory, basename(outputPath))))) throw new Error('Een export mag geen bronbestand vervangen.')
-  const temporary = join(outputDirectory, `.huphe-export-${randomUUID()}${extension}`)
+  const temporary = join(outputDirectory, `huphe-export-${randomUUID()}.partial${extension}`)
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y']
   const filters: string[] = []
   let inputIndex = 0
@@ -173,6 +174,8 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
     await runTimelineTool(tools.ffmpeg, args, 30 * 60_000)
     if ((await stat(temporary)).size === 0) throw new Error('De export heeft geen bestand opgeleverd.')
     await rename(temporary, outputPath)
+    // Finder hides files with the macOS "hidden" flag; an export must always be visible (seen on iCloud-synced folders).
+    if (process.platform === 'darwin') await new Promise<void>(done => execFile('/usr/bin/chflags', ['nohidden', outputPath], () => done()))
     return { path: outputPath, duration, frames }
   } finally { await unlink(temporary).catch(() => {}) }
 }
