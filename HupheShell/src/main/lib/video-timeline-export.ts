@@ -1,8 +1,9 @@
-import { mkdir, realpath, rename, stat, unlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
-import { activeMedia, clipFades, clipSpeed, clipTrackId, renderableProject, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
+import { activeMedia, clipFades, exportRange, clipSpeed, clipTrackId, renderableProject, timelineEnd, timelineProblems, timelineTracks, visualClipRect, type TimelineProject } from '../../shared/video-timeline'
 import { transitionPlaybackProblems } from '../../shared/video-timeline-transition'
 import { pickTimelineEncoder, probeTimelineMedia, requireTimelineTools, runTimelineTool, timelineEncoderArgs, type TimelineTools } from './video-timeline-media'
 import { isWithinTimelineDirectory, parseTimelineProject, validateOwnedAssets } from './video-timeline-storage'
@@ -18,6 +19,10 @@ export interface TimelineRenderOptions {
   format?: TimelineExportFormat
   /** Output height in pixels; the width follows the project's aspect ratio. Omitted = project size. */
   outputHeight?: number
+  /** Export only the project's work area instead of the whole film. */
+  useRange?: boolean
+  /** Transparent full-frame PNG data URLs per title clip id, drawn by the renderer (the bundled FFmpeg has no text filter). */
+  titleImages?: Record<string, string>
 }
 
 export type TimelineExportQuality = 'draft' | 'standard' | 'high'
@@ -31,11 +36,15 @@ const QUALITY = {
 } as const
 
 /** Settings arrive from the renderer, so unknown values fall back to the defaults instead of reaching FFmpeg. */
-export function parseTimelineExportOptions(input: unknown): Pick<TimelineRenderOptions, 'quality' | 'outputHeight' | 'format'> {
+export function parseTimelineExportOptions(input: unknown): Pick<TimelineRenderOptions, 'quality' | 'outputHeight' | 'format' | 'useRange' | 'titleImages'> {
   const raw = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   const quality = raw.quality === 'draft' || raw.quality === 'high' ? raw.quality : 'standard'
   const height = Number(raw.outputHeight)
-  return { quality, format: raw.format === 'prores' ? 'prores' : 'mp4', outputHeight: Number.isInteger(height) && height >= 144 && height <= 4320 ? height : undefined }
+  const titleImages: Record<string, string> = {}
+  if (raw.titleImages && typeof raw.titleImages === 'object') for (const [id, url] of Object.entries(raw.titleImages)) {
+    if (/^[A-Za-z0-9_-]{1,100}$/.test(id) && typeof url === 'string' && url.length < 20_000_000 && url.startsWith('data:image/png;base64,')) titleImages[id] = url
+  }
+  return { quality, format: raw.format === 'prores' ? 'prores' : 'mp4', useRange: raw.useRange === true, titleImages, outputHeight: Number.isInteger(height) && height >= 144 && height <= 4320 ? height : undefined }
 }
 
 const seconds = (frames: number, fps: number) => (frames / fps).toFixed(9)
@@ -49,7 +58,9 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
   for (const asset of project.assets.filter(a => used.has(a.id))) Object.assign(asset, await probeTimelineMedia(asset.path, asset.kind, tools))
   const problems = [...timelineProblems(project), ...transitionPlaybackProblems(project)]
   if (problems.length) throw new Error(problems.join('\n'))
-  const frames = timelineEnd(project)
+  const fullFrames = timelineEnd(project)
+  const range = exportRange(project, !!options.useRange)
+  const frames = range.end - range.start
   const duration = frames / project.fps
   if (frames <= 0 || duration > 3600) throw new Error('Exporteer een tijdlijn van maximaal één uur met minimaal één videofragment.')
   const prores = options.format === 'prores'
@@ -73,7 +84,7 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
   const videoLayers: string[] = []
   const audioLayers: string[] = []
   for (const track of timelineTracks(project)) {
-    const clips = project.clips.filter(clip => clipTrackId(clip) === track.id).sort((a, b) => a.start - b.start)
+    const clips = project.clips.filter(clip => clipTrackId(clip) === track.id && !clip.text).sort((a, b) => a.start - b.start)
     if (!clips.length) continue
     const segments: string[] = []
     const video = track.kind === 'video'
@@ -141,33 +152,52 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
       previous = clip
       cursor = clip.start + clip.duration
     }
-    addGap(frames - cursor)
+    addGap(fullFrames - cursor)
     const output = `layer${video ? 'v' : 'a'}${video ? videoLayers.length : audioLayers.length}`
     if (segments.length === 1) filters.push(`${segments[0]}${video ? 'null' : 'anull'}[${output}]`)
     else filters.push(`${segments.join('')}concat=n=${segments.length}:v=${video ? 1 : 0}:a=${video ? 0 : 1}[${output}]`)
     ;(video ? videoLayers : audioLayers).push(`[${output}]`)
   }
-  filters.push(`color=c=black:s=${size}:r=${project.fps},trim=end_frame=${frames},setpts=PTS-STARTPTS,setsar=1,format=rgba[background]`)
+  filters.push(`color=c=black:s=${size}:r=${project.fps},trim=end_frame=${fullFrames},setpts=PTS-STARTPTS,setsar=1,format=rgba[background]`)
   let composite = '[background]'
   videoLayers.forEach((layer, index) => {
     const output = `composite${index}`
     filters.push(`${composite}${layer}overlay=shortest=1:format=auto[${output}]`)
     composite = `[${output}]`
   })
+  // Titles come last so they always sit above all video. The PNGs were drawn by the renderer at project size.
+  const titleDirectory = await mkdtemp(join(tmpdir(), 'huphe-titles-'))
+  const titles = project.clips.filter(clip => clip.text?.content.trim() && options.titleImages?.[clip.id])
+  for (const [index, clip] of titles.entries()) {
+    const file = join(titleDirectory, `title${index}.png`)
+    await writeFile(file, Buffer.from(options.titleImages![clip.id].split(',')[1], 'base64'))
+    args.push('-loop', '1', '-framerate', String(project.fps), '-i', file)
+    const fades = clipFades(project, clip)
+    const name = `title${index}`
+    const chain = [`[${inputIndex}:v:0]format=rgba`, `trim=end_frame=${clip.duration}`, 'setpts=PTS-STARTPTS',
+      fades.fadeIn ? `fade=t=in:s=0:n=${fades.fadeIn}:alpha=1` : '', fades.fadeOut ? `fade=t=out:s=${clip.duration - fades.fadeOut}:n=${fades.fadeOut}:alpha=1` : '',
+      `setpts=PTS+${seconds(clip.start, project.fps)}/TB`].filter(Boolean)
+    filters.push(`${chain.join(',')}[${name}]`)
+    filters.push(`${composite}[${name}]overlay=eof_action=pass:format=auto[${name}out]`)
+    composite = `[${name}out]`
+    inputIndex++
+  }
   // Even dimensions only: yuv420p cannot hold odd sizes.
   const outputHeight = options.outputHeight ? Math.max(2, Math.round(options.outputHeight / 2) * 2) : undefined
   const outputWidth = outputHeight ? Math.max(2, Math.round(project.width * outputHeight / project.height / 2) * 2) : undefined
-  filters.push(`${composite}${outputHeight && outputHeight !== project.height ? `scale=${outputWidth}:${outputHeight}:flags=lanczos,` : ''}format=${prores ? 'yuv422p10le' : 'yuv420p'}[vout]`)
-  if (!audioLayers.length) filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${seconds(frames, project.fps)}[aout]`)
+  const partial = range.start > 0 || range.end < fullFrames
+  filters.push(`${composite}${partial ? `trim=start_frame=${range.start}:end_frame=${range.end},setpts=PTS-STARTPTS,` : ''}${outputHeight && outputHeight !== project.height ? `scale=${outputWidth}:${outputHeight}:flags=lanczos,` : ''}format=${prores ? 'yuv422p10le' : 'yuv420p'}[vout]`)
+  if (!audioLayers.length) filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${seconds(fullFrames, project.fps)}[aout]`)
   else if (audioLayers.length === 1) filters.push(`${audioLayers[0]}anull[aout]`)
   // Do not automatically attenuate one track when another track is added.
   else filters.push(`${audioLayers.join('')}amix=inputs=${audioLayers.length}:duration=longest:normalize=0[aout]`)
+  if (partial) filters.push(`[aout]atrim=start=${seconds(range.start, project.fps)}:end=${seconds(range.end, project.fps)},asetpts=PTS-STARTPTS[aoutr]`)
   const quality = QUALITY[options.quality ?? 'standard']
   // ProRes (LGPL-safe, built into FFmpeg) is for editing onwards: little loss, big files, PCM audio.
   const video = prores ? ['-c:v', 'prores_ks', '-profile:v', PRORES_PROFILE[options.quality ?? 'standard'], '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le']
     : [...timelineEncoderArgs(options.encoder || await pickTimelineEncoder(tools.ffmpeg), quality.bitrate, quality.crf), '-pix_fmt', 'yuv420p']
   const audio = prores ? ['-c:a', 'pcm_s16le'] : ['-c:a', 'aac', '-b:a', quality.audio]
-  args.push('-filter_complex_threads', '1', '-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]',
+  args.push('-filter_complex_threads', '1', '-filter_complex', filters.join(';'), '-map', '[vout]', '-map', partial ? '[aoutr]' : '[aout]',
     '-frames:v', String(frames), '-t', seconds(frames, project.fps), '-r', String(project.fps), '-fps_mode', 'cfr',
     ...video, ...audio, '-ar', '48000', '-ac', '2', ...(prores ? [] : ['-movflags', '+faststart']), temporary)
   try {
@@ -177,5 +207,5 @@ export async function renderTimelineProject(input: TimelineProject, options: Tim
     // Finder hides files with the macOS "hidden" flag; an export must always be visible (seen on iCloud-synced folders).
     if (process.platform === 'darwin') await new Promise<void>(done => execFile('/usr/bin/chflags', ['nohidden', outputPath], () => done()))
     return { path: outputPath, duration, frames }
-  } finally { await unlink(temporary).catch(() => {}) }
+  } finally { await unlink(temporary).catch(() => {}); await rm(titleDirectory, { recursive: true, force: true }).catch(() => {}) }
 }

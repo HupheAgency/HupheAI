@@ -31,6 +31,8 @@ export async function serveLocalMedia(request: Request, filePath: string): Promi
       'Content-Length': String(size),
       'Last-Modified': info.mtime.toUTCString(),
       'Cache-Control': 'no-cache',
+      // Lets the renderer read thumbnails from a <video crossOrigin="anonymous"> without tainting the canvas.
+      'Access-Control-Allow-Origin': '*',
     })
 
     // Range applies only to GET. We intentionally don't implement multipart ranges.

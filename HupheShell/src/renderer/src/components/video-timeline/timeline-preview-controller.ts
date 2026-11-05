@@ -1,4 +1,5 @@
-import { activeMedia, clipFades, clipSpeed, clipTrackId, timelineEnd, timelineTracks, visualClipRect, type TimelineProject } from '../../../../shared/video-timeline'
+import { drawTitle } from './timeline-text'
+import { activeMedia, clipFades, clipSpeed, clipTrackId, timelineEnd, timelineTracks, visualClipRect, type TimelineProject, type TimelineText } from '../../../../shared/video-timeline'
 
 export interface PreviewCallbacks {
   onPosition: (seconds: number) => void
@@ -90,6 +91,7 @@ export class TimelinePreviewController {
   private project: TimelineProject | null = null
   private projectSignature = ''
   private segments: VideoSegment[] = []
+  private titles: { text: TimelineText; start: number; end: number; fadeIn: number; fadeOut: number }[] = []
   private slots: VideoSlot[]
   private baseSlots: VideoSlot[]
   private trackSlots = new Map<string, VideoSlot[]>()
@@ -141,6 +143,10 @@ export class TimelinePreviewController {
         fadeIn: fades.fadeIn / project.fps, fadeOut: fades.fadeOut / project.fps, crossfade: fades.crossfade / project.fps,
         holdForNext: project.clips.some(other => clipTrackId(other) === clipTrackId(clip) && other.start === clip.start + clip.duration && clipFades(project, other).crossfade > 0) }]
     }).sort((a, b) => a.start - b.start)
+    this.titles = project.clips.filter(clip => clip.text && clip.duration > 0).map(clip => {
+      const fades = clipFades(project, clip)
+      return { text: clip.text!, start: clip.start / project.fps, end: (clip.start + clip.duration) / project.fps, fadeIn: fades.fadeIn / project.fps, fadeOut: fades.fadeOut / project.fps }
+    })
     this.reconcileTracks(timelineTracks(project).filter(track => track.kind === 'video').map(track => track.id))
     const imageUrls = new Set(this.segments.filter(segment => segment.kind === 'image').map(segment => segment.src))
     for (const [src, image] of this.images) if (!imageUrls.has(src)) { image.cleanup(); this.images.delete(src) }
@@ -613,6 +619,8 @@ export class TimelinePreviewController {
         }
       }
       context.globalAlpha = 1
+      for (const title of this.titles) if (this.position >= title.start && this.position < title.end)
+        drawTitle(context, title.text, width, height, fadeLevel(this.position, title.start, title.end, title.fadeIn, title.fadeOut))
     }
     this.canvas.dataset.timelineTime = this.position.toFixed(6)
     this.canvas.dataset.previewState = this.actualPlaying ? 'playing' : this.wantedPlaying ? 'loading' : 'paused'

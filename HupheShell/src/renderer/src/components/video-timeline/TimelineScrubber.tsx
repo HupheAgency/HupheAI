@@ -22,9 +22,13 @@ interface TimelineScrubberProps {
   zoom: number
   fps: number
   onSeek: (seconds: number) => void
+  markers?: { id: string; frame: number; label?: string }[]
+  range?: { start: number; end: number }
+  /** Click on a marker jumps to it; Alt-click removes it. */
+  onMarker?: (id: string, remove: boolean) => void
 }
 
-export function TimelineScrubber({ position, duration, extent, zoom, fps, onSeek }: TimelineScrubberProps) {
+export function TimelineScrubber({ position, duration, extent, zoom, fps, onSeek, markers, range, onMarker }: TimelineScrubberProps) {
   const ruler = useRef<HTMLDivElement>(null)
   const gesture = useRef<{ pointerId: number; clientX: number; lastTime: number } | null>(null)
   const animation = useRef<number | null>(null)
@@ -108,6 +112,9 @@ export function TimelineScrubber({ position, duration, extent, zoom, fps, onSeek
 
   return <>
     <div ref={ruler} className={`vt-ruler${scrubbing ? ' scrubbing' : ''}`} style={{ marginLeft: 96 }} {...pointerHandlers}>
+      {range && <div className="vt-range" aria-label="Bereik" style={{ left: range.start / fps * zoom, width: Math.max(2, (range.end - range.start) / fps * zoom) }} />}
+      {markers?.map(m => <button key={m.id} className="vt-marker" aria-label={`Merker ${(m.frame / fps).toFixed(2)} s`} title={`Merker ${(m.frame / fps).toFixed(2)} s · klik om erheen te gaan · Alt-klik verwijdert`}
+        style={{ left: m.frame / fps * zoom }} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onMarker?.(m.id, e.altKey) }} />)}
       {rulerTicks(extent, zoom, fps).map(({ frame, label }) => <span key={frame} style={{ left: frame / fps * zoom }}>{label}</span>)}
     </div>
     <div className={`vt-playhead${scrubbing ? ' scrubbing' : ''}`} style={{ left: 96 + position * zoom }}

@@ -58,6 +58,20 @@ export interface TimelineTransition {
   capturedAt?: string
 }
 
+/** A title drawn over the film. Position is the text's centre as a fraction of the frame; size is the text height as a fraction of the frame height. */
+export interface TimelineText {
+  content: string
+  size: number
+  color: string
+  x: number
+  y: number
+  bold?: boolean
+  /** Dark box behind the text for legibility. */
+  background?: boolean
+}
+
+export interface TimelineMarker { id: string; frame: number; label?: string }
+
 export interface TimelineClip {
   id: string
   track: 'video' | 'audio'
@@ -81,6 +95,8 @@ export interface TimelineClip {
   crossfade?: number
   /** Playback speed, 1 = normal. The clip keeps its timeline length and consumes duration * speed of source. */
   speed?: number
+  /** Title clip: lives on a video track, has no media and is always drawn above all video. */
+  text?: TimelineText
 }
 
 export interface TimelineTrack {
@@ -112,6 +128,9 @@ export interface TimelineProject {
   /** Video tracks are ordered from the bottom layer to the top layer. */
   tracks?: TimelineTrack[]
   jobs?: TimelineJob[]
+  markers?: TimelineMarker[]
+  /** Work area in project frames (end exclusive): the part that is exported when asked, and looped on request. */
+  range?: { start: number; end: number }
 }
 
 export interface TimelineJob {
@@ -144,6 +163,19 @@ export function clipFades(project: TimelineProject, clip: TimelineClip): { fadeI
   const crossfade = clip.track === 'video' && previous ? limit(clip.crossfade, Math.min(clip.duration, previous.duration)) : 0
   const fadeIn = limit(clip.fadeIn, clip.duration)
   return { fadeIn, fadeOut: limit(clip.fadeOut, clip.duration - Math.min(fadeIn, clip.duration)), crossfade }
+}
+
+export const DEFAULT_TEXT: TimelineText = { content: 'Titel', size: 0.07, color: '#ffffff', x: 0.5, y: 0.5, bold: true }
+
+/** Title clips in drawing order. */
+export const textClips = (project: TimelineProject) => project.clips.filter(c => c.text)
+
+/** The part of the film an export covers: the work area when asked for, otherwise everything. */
+export function exportRange(project: TimelineProject, useRange: boolean): { start: number; end: number } {
+  const end = timelineEnd(project)
+  if (!useRange || !project.range) return { start: 0, end }
+  const start = Math.max(0, Math.min(project.range.start, end - 1))
+  return { start, end: Math.max(start + 1, Math.min(project.range.end, end)) }
 }
 
 export function timelineEnd(project: TimelineProject): number {
@@ -198,19 +230,23 @@ export function timelineIssues(project: TimelineProject): TimelineIssue[] {
   for (const track of tracks) {
     const clips = project.clips.filter(c => clipTrackId(c) === track.id).sort((a, b) => a.start - b.start)
     clips.forEach((clip, i) => {
+      if (clip.text) {
+        if (!clip.text.content.trim()) errors.push({ clipId: clip.id, message: `${clip.label}: de titel is leeg.` })
+      } else {
       const { asset, variant } = activeMedia(project, clip)
       if (!asset || !variant) errors.push({ clipId: clip.id, message: `${clip.label}: kies eerst een variant.` })
       else if (asset.kind !== clip.track && !(clip.track === 'video' && asset.kind === 'image'))
         errors.push({ clipId: clip.id, message: `${clip.label}: het gekozen bestand past niet op dit spoor.` })
       else if (asset.kind === 'image' ? variant.inPoint !== 0 : variant.inPoint < 0 || variant.inPoint + sourceSeconds(clip, clip.duration, project.fps) > asset.duration + 0.00001)
         errors.push({ clipId: clip.id, message: `${clip.label}: de uitsnede is langer dan de bron.` })
+      }
       if (i && clips[i - 1].start + clips[i - 1].duration > clip.start) {
         errors.push({ clipId: clip.id, message: `${clip.label}: overlap op spoor ${track.name}.` })
         errors.push({ clipId: clips[i - 1].id, message: `${clips[i - 1].label}: overlap op spoor ${track.name}.` })
       }
     })
   }
-  if (!project.clips.some(c => c.track === 'video')) errors.push({ message: 'Plaats eerst een videofragment.' })
+  if (!project.clips.some(c => c.track === 'video' && !c.text)) errors.push({ message: 'Plaats eerst een videofragment.' })
   return errors
 }
 

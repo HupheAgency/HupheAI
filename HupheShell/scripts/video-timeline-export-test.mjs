@@ -187,6 +187,53 @@ async function testMultitrack(renderTimelineProject) {
   console.log('PASS multitrack-logo-audio: 75 frames, transparent PNG/opacity/position and frame-accurate overlay edges, two simultaneous tones with independent gains, trimmed voice timing, originals unchanged')
 }
 
+async function testTitleAndRange(renderTimelineProject) {
+  const id = 'title-and-range'
+  const originals = join(testDirectory, id, 'media', 'originals')
+  await mkdir(originals, { recursive: true })
+  const ffmpeg = (...args) => run(tools.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...args])
+  const videoPath = join(originals, 'blue.mp4')
+  const titlePath = join(originals, 'title.png')
+  await ffmpeg('-f', 'lavfi', '-i', 'color=c=0x204080:s=320x180:r=25', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '3',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', videoPath)
+  // Opaque red block in the middle, transparent elsewhere: stands in for a rasterised title.
+  await ffmpeg('-f', 'lavfi', '-i', 'color=c=0xff0000:s=100x40,format=rgba', '-vf', 'pad=320:180:110:70:color=0x00000000', '-frames:v', '1', titlePath)
+  const now = new Date().toISOString()
+  const asset = { id: 'video', kind: 'video', name: 'video', path: videoPath, duration: 3, width: 320, height: 180, fps: 25,
+    src: `huphe://file/${encodeURIComponent(videoPath)}` }
+  const project = { schemaVersion: 1, id, name: id, createdAt: now, updatedAt: now, width: 320, height: 180, fps: 25, targetDuration: 3, assets: [asset],
+    tracks: [{ id: 'video-1', kind: 'video', name: 'Film' }, { id: 'video-2', kind: 'video', name: 'Titels' }],
+    clips: [{ id: 'video', label: 'video', track: 'video', trackId: 'video-1', start: 0, duration: 75, activeVariantId: 'video', variants: [{ id: 'video', assetId: 'video', createdAt: now, inPoint: 0 }] },
+      { id: 'title', label: 'Titel', track: 'video', trackId: 'video-2', start: 25, duration: 25, variants: [], text: { content: 'Titel', size: 0.07, color: '#ffffff', x: 0.5, y: 0.5 } }],
+    range: { start: 10, end: 60 } }
+  const titleImages = { title: `data:image/png;base64,${(await readFile(titlePath)).toString('base64')}` }
+  const rgbFrames = async file => {
+    const data = await run(tools.ffmpeg, ['-v', 'error', '-i', file, '-an', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'], { binaryOutput: true })
+    return { count: data.length / (320 * 180 * 3), center: n => Array.from(data.subarray(((n * 180 + 90) * 320 + 160) * 3, ((n * 180 + 90) * 320 + 160) * 3 + 3)) }
+  }
+  const isRed = pixel => pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60
+  const isBlue = pixel => pixel[0] < 70 && pixel[2] > 100
+
+  const full = join(testDirectory, id, 'exports', 'full.mp4')
+  await mkdir(dirname(full), { recursive: true })
+  await renderTimelineProject(project, { root: testDirectory, outputPath: full, tools, encoder, titleImages, useRange: false })
+  const whole = await rgbFrames(full)
+  assert.equal(whole.count, 75)
+  for (let n = 0; n < 75; n++) assert.equal(isRed(whole.center(n)), n >= 25 && n < 50, `title visible exactly on frames 25–49 (frame ${n}: ${whole.center(n)})`)
+
+  const part = join(testDirectory, id, 'exports', 'range.mp4')
+  await renderTimelineProject(project, { root: testDirectory, outputPath: part, tools, encoder, titleImages, useRange: true })
+  const cut = await rgbFrames(part)
+  assert.equal(cut.count, 50, 'range export has exactly the range length')
+  for (let n = 0; n < 50; n++) assert.equal(isRed(cut.center(n)), n >= 15 && n < 40, `range: title visible on output frames 15–39 (frame ${n}: ${cut.center(n)})`)
+  assert.ok(isBlue(cut.center(0)) && isBlue(cut.center(49)))
+  const metadata = await probe(part, tools.ffprobe)
+  const audio = metadata.streams.find(s => s.codec_type === 'audio')
+  assert.ok(Math.abs(Number(audio.duration) - 2) < 0.1, `range audio is about 2 s long: ${audio.duration}`)
+  report.tests.push({ id, passed: true, frames: 50, titleFrames: [25, 49] })
+  console.log('PASS title-and-range: title overlay only in its window, range export has 50 frames, titles shift with the range, audio trimmed to 2 s')
+}
+
 async function main() {
   if (process.argv.includes('--generate')) await generateFixtures({ directory, ...tools, encoder })
   const manifest = await loadFixtures(directory)
@@ -259,6 +306,7 @@ async function main() {
     console.log(`PASS ${scenario.id}: ${decoded.length} decoded source IDs, cuts ${cuts.join(', ') || '—'}, ${peaks.length} audio markers`)
   }
   await testMultitrack(renderTimelineProject)
+  await testTitleAndRange(renderTimelineProject)
   const hashesAfter = await Promise.all(manifest.contract.sources.map(s => hash(join(directory, `source-${s.id}.mp4`))))
   assert.deepEqual(hashesAfter, inputHashes, 'Original source files unchanged')
   report.originalsUnchanged = true

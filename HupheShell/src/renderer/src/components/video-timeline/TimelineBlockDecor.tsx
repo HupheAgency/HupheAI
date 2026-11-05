@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { thumbnailAt } from './timeline-thumbnails'
 import { clipFades, clipSpeed, sourceSeconds, type TimelineAsset, type TimelineClip, type TimelineProject } from '../../../../shared/video-timeline'
 
 const PEAKS_PER_SECOND = 100
@@ -45,12 +46,34 @@ function Waveform({ asset, inPoint, length, width, gain }: { asset: TimelineAsse
   return <svg className="vt-wave" viewBox={`0 0 ${bars} 100`} preserveAspectRatio="none" aria-hidden="true"><path d={d} /></svg>
 }
 
+const FRAME_WIDTH = 90
+
+/** A strip of frames behind the block's label so a clip can be recognised and cut at the right moment. */
+function Filmstrip({ project, clip, asset, inPoint, width }: { project: TimelineProject; clip: TimelineClip; asset: TimelineAsset; inPoint: number; width: number }) {
+  const count = Math.max(1, Math.min(14, Math.ceil(width / FRAME_WIDTH)))
+  const src = asset.previewSrc ?? asset.src
+  const length = sourceSeconds(clip, clip.duration, project.fps)
+  const [frames, setFrames] = useState<(string | null)[]>([])
+  useEffect(() => {
+    if (asset.kind === 'image') { setFrames([asset.src]); return }
+    let live = true
+    // Wait until a trim or zoom gesture settles; the thumbnails are made one at a time.
+    const timer = setTimeout(() => {
+      void Promise.all(Array.from({ length: count }, (_, i) => thumbnailAt(src, inPoint + (i + 0.5) / count * length))).then(urls => { if (live) setFrames(urls) })
+    }, 200)
+    return () => { live = false; clearTimeout(timer) }
+  }, [asset.kind, asset.src, src, inPoint, length, count])
+  if (!frames.some(Boolean)) return null
+  return <div className="vt-strip" aria-hidden="true">{frames.map((url, i) => url ? <img key={i} src={url} alt="" draggable={false} /> : <span key={i} style={{ flex: '1 1 0' }} />)}</div>
+}
+
 /** Waveform, fade ramps, crossfade marker and speed badge drawn inside a timeline block. */
 export function TimelineBlockDecor({ project, clip, asset, inPoint, width }: { project: TimelineProject; clip: TimelineClip; asset?: TimelineAsset; inPoint: number; width: number }) {
   const fades = clipFades(project, clip)
   const px = (frames: number) => (clip.duration ? frames / clip.duration : 0) * width
   const speed = clipSpeed(clip)
   return <>
+    {clip.track === 'video' && !clip.text && asset && (asset.kind === 'video' || asset.kind === 'image') && <Filmstrip project={project} clip={clip} asset={asset} inPoint={inPoint} width={width} />}
     {clip.track === 'audio' && asset?.kind === 'audio' && <Waveform asset={asset} inPoint={inPoint} length={sourceSeconds(clip, clip.duration, project.fps)} width={width} gain={clip.gain ?? 1} />}
     {fades.fadeIn > 0 && <svg className="vt-fade in" style={{ width: px(fades.fadeIn) }} viewBox="0 0 10 10" preserveAspectRatio="none" aria-hidden="true"><path d="M0 10L10 0V10Z" /></svg>}
     {fades.fadeOut > 0 && <svg className="vt-fade out" style={{ width: px(fades.fadeOut) }} viewBox="0 0 10 10" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0L10 10H0Z" /></svg>}

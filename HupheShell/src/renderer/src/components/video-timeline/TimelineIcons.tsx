@@ -34,6 +34,13 @@ const PATHS = {
   layers: 'M12 3 3 8l9 5 9-5zM3 13l9 5 9-5M3 17.5 12 22l9-4.5',
   close: 'M6 6l12 12M18 6 6 18',
   sliders: 'M4 7h9M17 7h3M4 17h3M11 17h9M15 4v6M9 14v6',
+  text: 'M5 6V4h14v2M12 4v16M9 20h6',
+  flag: 'M6 21V4M6 5h11l-2 4 2 4H6',
+  magnet: 'M5 4v8a7 7 0 0 0 14 0V4h-4v8a3 3 0 0 1-6 0V4zM5 8h4M15 8h4',
+  loop: 'M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4',
+  fullscreen: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  rangeIn: 'M9 4H5v16h4M9 12h11M16 8l4 4-4 4',
+  rangeOut: 'M15 4h4v16h-4M15 12H4M8 8l-4 4 4 4',
   grip: 'M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01',
 } as const
 

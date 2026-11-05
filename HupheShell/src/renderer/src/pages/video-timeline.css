@@ -107,3 +107,14 @@
 .vt-icon.vt-primary{background:#facc15;color:#111}.vt-icon.vt-primary:hover:not(:disabled){background:#fde047}
 .vt-track.drop-target .vt-track-heading{box-shadow:inset 0 2px 0 #facc15}
 .vt select,.vt input:not([type=range]),.vt textarea{color:#f2f2f2}
+
+/* Titels, merkers, bereik, tijdveld, filmstrip */
+.vt-block.vt-title-block{background:#3a3318;border-color:#facc15;color:#fde68a}
+.vt-block.vt-title-block>span{color:#d9c46a}
+.vt-range{position:absolute;top:0;bottom:0;background:rgba(250,204,21,.16);border-left:2px solid #facc15;border-right:2px solid #facc15;pointer-events:none}
+.vt .vt-marker{position:absolute;top:0;width:11px;height:14px;padding:0;margin-left:-5px;border:0;border-radius:0;background:#fb923c;clip-path:polygon(0 0,100% 0,100% 65%,50% 100%,0 65%);z-index:2}
+.vt .vt-marker:hover{background:#fdba74}
+.vt .vt-time-input{width:78px;padding:3px 6px;text-align:center;background:transparent;border:1px solid transparent;font:11px monospace}
+.vt .vt-time-input:hover{border-color:rgba(255,255,255,.14)}
+.vt-strip{position:absolute;inset:0;display:flex;pointer-events:none;opacity:.55}
+.vt-strip img{flex:1 1 0;min-width:0;height:100%;object-fit:cover;display:block}
