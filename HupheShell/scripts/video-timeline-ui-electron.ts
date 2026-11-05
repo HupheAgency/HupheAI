@@ -213,7 +213,7 @@ async function generationSettingsParity(projectId,clipId) {
  };
  const openAdvanced=async()=>{await js("(()=>{const e=[...document.querySelectorAll('.vt summary')].find(e=>e.textContent.trim()==='Geavanceerd');if(!e)throw Error('Geavanceerd ontbreekt');if(!e.parentElement.open)e.click();})()");await sleep(80);};
  const variantAction=async(id,label)=>{await js(`(()=>{const card=document.querySelector('[data-variant-id="${id}"]');const button=[...card.querySelectorAll('button')].find(e=>(e.textContent.trim()||e.getAttribute('aria-label'))===${JSON.stringify(label)});if(!button||button.disabled)throw Error('Variantactie niet beschikbaar: '+${JSON.stringify(label)});button.click();})()`);await sleep(150);};
- const awaitVariants=async count=>until(`document.querySelectorAll('.vt-inspector [data-variant-id]').length===${count}`,'new variant visible');
+ const awaitVariants=async count=>{await sleep(300);await js("document.querySelector('.vt-tabs [aria-label=Varianten]')?.click()");return until(`document.querySelectorAll('.vt-inspector [data-variant-id]').length===${count}`,'new variant visible')};
  await selectVideo();const before=await saveProject(),beforeClip=structuredClone(selectedClip(before));
  await js("document.querySelector('[aria-label=\"Automatische generatieduur\"]').click()");await sleep(120);
  assert.equal(await js("document.querySelector('[aria-label=Generatieduur]').disabled"),true,'Auto maakt de handmatige schuifbalk inactief');
@@ -250,10 +250,10 @@ async function generationSettingsParity(projectId,clipId) {
  expectedGenerationSettings={duration:'auto',aspectRatio:'auto',generateAudio:true,draft:false,seed:42,bitrateMode:'high',codec:'H265'};expectedReferenceTask='editing';
  await click('Genereer');await awaitVariants(beforeClip.variants.length+3);assert.equal(generated,3);
  saved=await saveProject();clip=selectedClip(saved);let latest=clip.variants.at(-1);
- assert.equal(latest.generation.task,'editing');assert.equal(latest.generation.requestedDuration,'auto');assert.equal(latest.generation.aspectRatio,'auto');assert.equal(latest.generation.seed,42);assert.equal(latest.generation.referenceAssetIds.length,3);assert.equal(clip.activeVariantId,final.id);
+ assert.equal(latest.generation.task,'editing');assert.equal(latest.generation.requestedDuration,'auto');assert.equal(latest.generation.aspectRatio,'auto');assert.equal(latest.generation.seed,42);assert.equal(latest.generation.referenceAssetIds.length,3);assert.equal(clip.activeVariantId,latest.id,'Het nieuwste resultaat is direct actief');
  await selectVideo();await click('Verlengen');expectedReferenceTask='extension';
  await click('Genereer');await awaitVariants(beforeClip.variants.length+4);assert.equal(generated,4);
- saved=await saveProject();clip=selectedClip(saved);latest=clip.variants.at(-1);assert.equal(latest.generation.task,'extension');assert.equal(latest.generation.requestedDuration,'auto');assert.equal(clip.duration,88);assert.equal(clip.activeVariantId,final.id);assert.deepEqual(clip.variants.find(v=>v.id===draft.id),immutableDraft);
+ saved=await saveProject();clip=selectedClip(saved);latest=clip.variants.at(-1);assert.equal(latest.generation.task,'extension');assert.equal(latest.generation.requestedDuration,'auto');assert.equal(clip.duration,88);assert.equal(clip.activeVariantId,latest.id,'Het nieuwste resultaat is direct actief');assert.deepEqual(clip.variants.find(v=>v.id===draft.id),immutableDraft);
  assert.equal(preparedReferenceCalls.length,2,'Referenties worden pas bij de twee expliciete aanvragen voorbereid');
  passes.push('Beeld/video/audio-referenties, Bewerken/Verlengen, Auto en geavanceerde opties gaan met lokale asset-IDs en exacte snapshots naar de simulator');
  await window.webContents.reload();await until("document.querySelector('input[placeholder=\"Beschrijf je video…\"]')",'reload video settings');await click('Timeline');await until(`!!document.querySelector('[data-clip-id="${clipId}"]')`,'generation settings restored');await selectVideo();

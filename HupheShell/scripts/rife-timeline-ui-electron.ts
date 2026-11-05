@@ -233,15 +233,14 @@ async function run() {
   assert.equal(generated, 0, 'insufficient balance never creates a video')
   passes.push('Insufficient-balance rejection becomes a failed job, preserves captures and enables retry without an unknown-outcome warning')
   await click('Genereer overgang')
-  await until("document.querySelectorAll('.vt-variant').length===1 && [...document.querySelectorAll('button')].some(e=>e.textContent==='Gebruik deze variant'&&!e.disabled)", 'generated variant ready', 30_000)
+  await until("document.body.innerText.includes('De overgang staat in je film')", 'generated variant ready', 30_000)
   let generatedProject = await savedWhen(project => project.clips.find(clip => clip.id === transition.id)?.variants.length === 1, 'generated snapshot')
   let generatedClip = generatedProject.clips.find(clip => clip.id === transition.id)!
-  assert.equal(generatedClip.activeVariantId, undefined, 'generated transition waits for explicit selection')
+  assert.equal(generatedClip.activeVariantId, generatedClip.variants[0].id, 'generated transition is active straight away')
   assert.deepEqual(generatedClip.variants[0].transition, transition.transition)
   assert.equal(generatedClip.variants[0].generation!.extraParams!.num_frames, 19)
   const generatedAsset = generatedProject.assets.find(asset => asset.id === generatedClip.variants[0].assetId)!
   assert.equal(generatedAsset.duration, 0.8); assert.equal(generatedAsset.fps, 25)
-  await click('Gebruik deze variant')
   generatedProject = await savedWhen(project => !!project.clips.find(clip => clip.id === transition.id)?.activeVariantId, 'explicit active selection')
   generatedClip = generatedProject.clips.find(clip => clip.id === transition.id)!
   assert.equal(transitionVariantIsCurrent(generatedProject, generatedClip, generatedClip.variants[0]), true)
